@@ -40,13 +40,15 @@ type InsertCall = {
 describe('tracked command physical attempts (#732)', () => {
   test('control sends its own query id and receipt settings without command routing', async () => {
     const requests: URL[] = []
-    const server = Bun.serve({ port: 0, fetch(request) {
+    const server = Bun.serve({ port: 0, async fetch(request) {
+      const sql = await request.text()
+      if (isReadonlyLookup(sql)) return new Response('{"readonly":"0"}')
       requests.push(new URL(request.url))
       if (requests.length === 1) {
         expect(request.headers.get('X-DDL')).toBeNull()
         expect(request.headers.get('Connection')?.toLowerCase()).toBe('close')
       }
-      return new Response('{}\n')
+      return new Response('{"meta":[],"data":[],"rows":0}')
     } })
     const db = createStatelessClickHouseExecutor({ url: server.url.toString(), username: 'default', password: '', database: 'default', secure: false })
     try {
@@ -159,7 +161,7 @@ function createMockClient(
           return []
         },
         async text() {
-          return ''
+          return '{"meta":[],"data":[],"rows":0}'
         },
       }
     },
@@ -391,7 +393,7 @@ SETTINGS index_granularity = 8192;`
         query_id: method,
         response_headers: {},
         async text() {
-          return method === 'queryJson' ? '{"meta":[],"data":[],"rows":0}' : ''
+          return '{"meta":[],"data":[],"rows":0}'
         },
       }
     }
@@ -404,7 +406,7 @@ SETTINGS index_granularity = 8192;`
           expect(params.clickhouse_settings).toBeUndefined()
           return readonlyLookupResult(readonly)
         }
-        return record(params.format === 'JSON' ? 'queryJson' : 'query')(params)
+        return record('read')(params)
       },
       async close() {},
     } as unknown as ReturnType<typeof createStatelessClickHouseClient>
@@ -423,9 +425,9 @@ SETTINGS index_granularity = 8192;`
 
     expect(lookups).toBe(1)
     expect(sent).toEqual([
-      ['query', read],
-      ['query', readWithSettings],
-      ['queryJson', read],
+      ['read', read],
+      ['read', readWithSettings],
+      ['read', read],
       ['command', { async_insert: 0, ...progress, max_threads: 1 }],
       ['insert', { async_insert: 0, ...progress }],
     ])
@@ -441,7 +443,7 @@ SETTINGS index_granularity = 8192;`
           if (lookups === 1) throw new Error('Code: 81. DB::Exception: Database app does not exist. (UNKNOWN_DATABASE)')
           return readonlyLookupResult(0)
         }
-        return { query_id: 'q', response_headers: {}, async text() { return '{"id":1}' } }
+        return { query_id: 'q', response_headers: {}, async text() { return '{"meta":[{"name":"id","type":"UInt8"}],"data":[{"id":1}],"rows":1}' } }
       },
       async close() {},
     } as unknown as ReturnType<typeof createStatelessClickHouseClient>
@@ -1201,7 +1203,8 @@ function createStatusCapturingClient(
         : params.query.includes('system.query_log')
           ? options.bodies?.query_log
           : undefined
-      const text = body ?? rows.map((row) => JSON.stringify(row)).join('\n')
+      const data = body === undefined ? rows : body.split('\n').filter((line) => line.trim()).map((line) => JSON.parse(line))
+      const text = JSON.stringify({ meta: [], data, rows: data.length })
       return {
         query_id: 'q',
         response_headers: {},

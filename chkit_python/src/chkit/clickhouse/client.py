@@ -46,7 +46,7 @@ from chkit.clickhouse.control import (
 from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
 from chkit.core.jsnum import js_math_round
 from chkit.core.model import ChxResolvedClickHouseConfig
-from chkit.core.sql_lexer import js_trim
+from chkit.core.sql_lexer import is_trivia, js_trim, tokenize_sql
 
 # chkit prints its own one-line error, as TS silences @clickhouse/client's
 # logger: without a handler, the driver's warnings (``Unexpected Http Driver
@@ -320,10 +320,15 @@ class ClickHouseClient:
             self._client.http = pool
 
     def query_control(
-        self, statement: str, timeout_ms: float, *, query_id: str | None = None,
+        self,
+        statement: str,
+        timeout_ms: float,
+        *,
+        query_id: str | None = None,
         settings: dict[str, Any] | None = None,
     ) -> QueryResult:
         """A session-free, non-retrying control request with one absolute budget."""
+
         def request(deadline: float) -> QueryResult:
             parsed = urlparse(self._config.url)
             url = httpx.URL(scheme=parsed.scheme, host=parsed.hostname or "", port=parsed.port)
@@ -334,9 +339,13 @@ class ClickHouseClient:
                     url,
                     auth=(username, password),
                     params={
-                        "database": self._config.database, "default_format": "JSONEachRow",
-                        **{key: str(value) for key, value in (settings or {}).items()
-                           if key != "query_id" and value is not None},
+                        "database": self._config.database,
+                        "default_format": "JSON",
+                        **{
+                            key: str(value)
+                            for key, value in (settings or {}).items()
+                            if key != "query_id" and value is not None
+                        },
                         **STRICT_CONTROL_SETTINGS,
                         "wait_end_of_query": "1",
                         **({"query_id": query_id} if query_id else {}),
@@ -346,11 +355,25 @@ class ClickHouseClient:
                     timeout=remaining_control_seconds(deadline),
                 )
                 if response.is_error or response.headers.get("X-ClickHouse-Exception-Code") not in (
-                    None, "", "0",
+                    None,
+                    "",
+                    "0",
                 ):
                     raise DatabaseError(response.text)
-                rows = [json.loads(line) for line in response.text.splitlines() if line.strip()]
-                return QueryResult(column_names=list(rows[0]) if rows else [], rows=rows)
+                allow_empty = allows_empty_result(statement)
+                if not allow_empty and not response.text.strip():
+                    summary = json.loads(response.headers.get("X-ClickHouse-Summary", "{}"))
+                    allow_empty = allows_empty_result(
+                        statement,
+                        summary.get("result_rows") if isinstance(summary, dict) else None,
+                    )
+                payload = parse_json_result(
+                    response.text, numbers="round_trip", allow_empty=allow_empty,
+                )
+                return QueryResult(
+                    column_names=[column["name"] for column in payload["meta"]],
+                    rows=payload["data"],
+                )
 
         return run_control_request(request, timeout_ms)
 
@@ -375,6 +398,30 @@ class ClickHouseClient:
         rows: list[dict[str, Any]] = [
             dict(zip(column_names, row, strict=True)) for row in result.result_rows
         ]
+        # Native writes no blocks for zero rows. A final server summary proves
+        # that result without changing Decimal, date or integer conversions.
+        if (
+            not rows and not allows_empty_result(statement)
+            and not (column_names and _is_metadata_only_query(statement))
+            and str((effective_settings or {}).get("wait_end_of_query", 1)).lower()
+            in {"0", "false"}
+        ):
+            raise DatabaseError("Cannot validate an empty Native result with wait_end_of_query=0")
+        summary_rows = result.summary.get("result_rows")
+        if summary_rows is not None:
+            if (
+                not isinstance(summary_rows, (str, int))
+                or not re.fullmatch(r"[0-9]+", str(summary_rows))
+            ):
+                raise DatabaseError("Invalid ClickHouse Native result row count")
+            if int(summary_rows) != len(rows):
+                raise DatabaseError("Incomplete ClickHouse Native result response")
+        elif (
+            not (column_names and not rows and _is_metadata_only_query(statement))
+            and not allows_empty_result(statement)
+        ):
+            # The driver's LIMIT 0 path reads a JSON metadata envelope and has no summary.
+            raise DatabaseError("Missing ClickHouse Native result summary")
         return QueryResult(column_names=column_names, rows=rows)
 
     def query_json(self, statement: str) -> ClickHouseJsonQueryResult:
@@ -387,11 +434,23 @@ class ClickHouseClient:
         ``@clickhouse/client`` does.
         """
         query_id = str(uuid.uuid4())
-        body = self._client.raw_query(
-            js_trim(statement).rstrip(";"), settings={"query_id": query_id}, fmt="JSON"
-        )
+        with self._client.raw_stream(
+            js_trim(statement).rstrip(";"),
+            settings={"query_id": query_id, "wait_end_of_query": 1}, fmt="JSON",
+        ) as response:
+            body = response.read()
+            allow_empty = allows_empty_result(statement)
+            if not allow_empty and not body.strip():
+                summary = json.loads(response.headers.get("X-ClickHouse-Summary", "{}"))
+                allow_empty = allows_empty_result(
+                    statement,
+                    summary.get("result_rows") if isinstance(summary, dict) else None,
+                )
         return ClickHouseJsonQueryResult.model_validate(
-            {**parse_json_result(body), "query_id": query_id}
+            {
+                **parse_json_result(body, allow_empty=allow_empty),
+                "query_id": query_id,
+            }
         )
 
     def submit(
@@ -1239,7 +1298,9 @@ class _JsonFloat(str):
     """A JSON number with a fraction or an exponent, as ClickHouse wrote it."""
 
 
-def parse_json_result(body: str | bytes) -> dict[str, Any]:
+def parse_json_result(
+    body: str | bytes, *, allow_empty: bool = False, numbers: str = "typed"
+) -> dict[str, Any]:
     """Parse a ClickHouse ``FORMAT JSON`` body without losing digits (#381).
 
     ClickHouse writes 64-bit and wider integers and Decimals as bare JSON
@@ -1251,20 +1312,40 @@ def parse_json_result(body: str | bytes) -> dict[str, Any]:
     type is or contains ``JSON``, ``Object`` or ``Dynamic``, only a number a
     float would change becomes a string, as TS ``parseJsonEachRowLine`` does
     (#438). Other numbers stay numbers. A statement without a result set (DDL,
-    ``OPTIMIZE``) has an empty body, read as no rows. Same as TS ``parseJsonResult``.
+    ``OPTIMIZE``) may have an empty body only when explicitly allowed by the caller.
     """
     if not body.strip():
-        return {"data": [], "meta": [], "rows": 0}
+        if allow_empty:
+            return {"data": [], "meta": [], "rows": 0}
+        raise ValueError("Missing ClickHouse JSON result envelope")
     parsed: dict[str, Any] = json.loads(body, parse_int=_JsonInt, parse_float=_JsonFloat)
-    modes = {
-        column["name"]: _number_mode(column["type"]) for column in parsed.get("meta", [])
-    }
+    if (
+        not isinstance(parsed, dict)
+        or not isinstance(parsed.get("meta"), list)
+        or not isinstance(parsed.get("data"), list)
+        or not all(
+            isinstance(column, dict)
+            and isinstance(column.get("name"), str)
+            and isinstance(column.get("type"), str)
+            for column in parsed["meta"]
+        )
+        or not all(isinstance(row, dict) for row in parsed["data"])
+        or not isinstance(parsed.get("rows"), _JsonInt)
+        or int(parsed["rows"]) != len(parsed["data"])
+    ):
+        raise ValueError("Invalid ClickHouse JSON result envelope")
+    modes = {column["name"]: _number_mode(column["type"]) for column in parsed.get("meta", [])}
 
     # Rows keyed by column name: data, totals (WITH TOTALS) and extremes.min/max.
     def restore_row(row: Any) -> Any:
         if not isinstance(row, dict):
             return _restore(row, "number")
-        return {name: _restore(cell, modes.get(name, "number")) for name, cell in row.items()}
+        return {
+            name: _restore(
+                cell, "round_trip" if numbers == "round_trip" else modes.get(name, "number")
+            )
+            for name, cell in row.items()
+        }
 
     def restore_entry(key: str, value: Any) -> Any:
         if key == "data":
@@ -1276,6 +1357,50 @@ def parse_json_result(body: str | bytes) -> dict[str, Any]:
         return _restore(value, "number")
 
     return {key: restore_entry(key, value) for key, value in parsed.items()}
+
+
+def allows_empty_result(statement: str, result_rows: Any = None) -> bool:
+    tokens = [token for token in tokenize_sql(js_trim(statement)) if not is_trivia(token)]
+    if tokens and tokens[0].kind == "identifier" and tokens[0].text.upper() == "KILL":
+        return result_rows == "0" or (type(result_rows) is int and result_rows == 0)
+    return bool(
+        tokens
+        and tokens[0].kind == "identifier"
+        and tokens[0].text.upper()
+        in {
+            "CREATE",
+            "ALTER",
+            "DROP",
+            "DETACH",
+            "ATTACH",
+            "TRUNCATE",
+            "RENAME",
+            "OPTIMIZE",
+            "SYSTEM",
+            "SET",
+            "USE",
+            "GRANT",
+            "REVOKE",
+            "INSERT",
+            "DELETE",
+            "UPDATE",
+            "EXCHANGE",
+            "MOVE",
+            "UNDROP",
+            "BEGIN",
+            "COMMIT",
+            "ROLLBACK",
+        }
+    )
+
+
+def _is_metadata_only_query(statement: str) -> bool:
+    tokens = [
+        token.text.upper() for token in tokenize_sql(js_trim(statement)) if not is_trivia(token)
+    ]
+    while tokens and tokens[-1] == ";":
+        tokens.pop()
+    return tokens[-2:] == ["LIMIT", "0"]
 
 
 def _number_mode(column_type: str) -> _NumberMode:

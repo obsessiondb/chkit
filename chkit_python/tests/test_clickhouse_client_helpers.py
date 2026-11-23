@@ -11,6 +11,7 @@ from __future__ import annotations
 import socket
 import threading
 import time
+from io import BytesIO
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -25,12 +26,16 @@ from clickhouse_connect.driver import (
     httpclient,
     httputil,
 )
+from clickhouse_connect.driver.buffer import ResponseBuffer  # type: ignore[import-untyped]
 from clickhouse_connect.driver.exceptions import DatabaseError  # type: ignore[import-untyped]
 from clickhouse_connect.driver.httpclient import HttpClient  # type: ignore[import-untyped]
+from clickhouse_connect.driver.httputil import ResponseSource  # type: ignore[import-untyped]
+from clickhouse_connect.driver.transform import NativeTransform  # type: ignore[import-untyped]
 from pytest_httpx import HTTPXMock
 from urllib3 import Timeout
 from urllib3.connection import HTTPConnection
 from urllib3.exceptions import ProtocolError
+from urllib3.response import HTTPResponse
 
 from chkit.clickhouse import (
     ClickHouseClient,
@@ -416,13 +421,13 @@ def test_submit_once_opens_its_driver_with_the_clients_tls_settings(
 
 def test_native_control_uses_a_separate_bounded_session_free_request(httpx_mock: HTTPXMock) -> None:
     client, fake = _stub_client()
-    httpx_mock.add_response(text='{"query_id":"old-query","kill_status":"finished"}\n')
+    httpx_mock.add_response(text='{"meta":[],"data":[{"query_id":"old-query","kill_status":"finished"}],"rows":1}')
     result = client.query_control("KILL QUERY WHERE query_id = 'old-query' SYNC", 5000, query_id="receipt-control", settings={"log_queries": 1, "query_id": "ignored", "result_overflow_mode": "break", "max_result_rows": 1, "use_query_cache": 1, "enable_reads_from_query_cache": 1, "enable_writes_to_query_cache": 1})
     assert result.rows == [{"query_id": "old-query", "kill_status": "finished"}]
     request = httpx_mock.get_request()
     assert request is not None
     assert request.url.params["database"] == "default"
-    assert request.url.params["default_format"] == "JSONEachRow"
+    assert request.url.params["default_format"] == "JSON"
     assert request.url.params["query_id"] == "receipt-control"
     assert request.url.params["log_queries"] == "1"
     assert request.url.params["max_result_rows"] == "1"
@@ -435,6 +440,9 @@ def test_native_control_uses_a_separate_bounded_session_free_request(httpx_mock:
     cache_settings = {"use_query_cache": 1, "enable_reads_from_query_cache": 1, "enable_writes_to_query_cache": 1}
     for name in cache_settings:
         assert request.url.params[name] == "0"
+    fake.query.return_value.column_names = ["1"]
+    fake.query.return_value.result_rows = [(1,)]
+    fake.query.return_value.summary = {"result_rows": "1"}
     client.query("SELECT 1", settings=cache_settings)
     fake.query.assert_called_once_with("SELECT 1", settings=cache_settings)
 
@@ -766,7 +774,7 @@ def test_native_control_accepts_zero_exception_header(
     httpx_mock: HTTPXMock, code: str | None,
 ) -> None:
     client, _fake = _stub_client()
-    httpx_mock.add_response(text='{"n":0}\n', headers={"X-ClickHouse-Exception-Code": code} if code else {})
+    httpx_mock.add_response(text='{"meta":[{"name":"n","type":"UInt8"}],"data":[{"n":0}],"rows":1}', headers={"X-ClickHouse-Exception-Code": code} if code else {})
     assert client.query_control("SELECT 0 AS n", 1000).rows == [{"n": 0}]
 
 
@@ -1100,3 +1108,96 @@ def test_a_send_whose_name_lookup_stalls_ends_at_the_connect_timeout(
     assert elapsed < 2
     assert "Resolving stalled.chkit.invalid timed out" in str(raised.value)
     assert admission.handed_off_count == 0
+
+
+@pytest.mark.parametrize("body", [b"", b"\x01\x00\x01n\x05UInt8"])
+def test_native_response_requires_summary_or_framed_metadata(body: bytes) -> None:
+    client, fake = _stub_client()
+    source = ResponseSource(HTTPResponse(body=BytesIO(body), preload_content=False))
+    fake.query.return_value = NativeTransform.parse_response(ResponseBuffer(source))
+    if not body:
+        with pytest.raises(DatabaseError, match="Missing ClickHouse Native result summary"):
+            client.query("SELECT name FROM _chkit_migrations")
+    else:
+        result = client.query("SELECT n FROM numbers(0) LIMIT 0", settings={"wait_end_of_query": 0})
+        assert result.column_names == ["n"]
+        assert result.rows == []
+
+
+@pytest.mark.parametrize("body", ["", " \n", '{"meta":[],"data":[]}',
+                                  '{"meta":[],"data":[],"rows":1}',
+                                  '{"meta":[],"data":[{"n":1}'])
+def test_control_and_query_json_reject_missing_or_incomplete_results(
+    httpx_mock: HTTPXMock, body: str,
+) -> None:
+    client, fake = _stub_client()
+    httpx_mock.add_response(text=body)
+    with pytest.raises(ValueError, match=r"Expecting|Invalid ClickHouse|Missing ClickHouse"):
+        client.query_control("KILL QUERY WHERE query_id = 'old' SYNC", 1000)
+    fake.raw_stream.return_value = HTTPResponse(body=BytesIO(body.encode()), preload_content=False)
+    with pytest.raises(ValueError, match=r"Expecting|Invalid ClickHouse|Missing ClickHouse"):
+        client.query_json("/* DDL */ WITH 1 AS n SELECT n")
+
+
+def test_control_accepts_a_framed_zero_row_result(httpx_mock: HTTPXMock) -> None:
+    client, _fake = _stub_client()
+    httpx_mock.add_response(text='{"meta":[{"name":"n","type":"UInt8"}],"data":[],"rows":0}')
+    assert client.query_control("SELECT n FROM numbers(0)", 1000).rows == []
+
+
+@pytest.mark.parametrize("statement", [
+    "\u00a0/* comment */ OPTIMIZE TABLE t\ufeff", "EXCHANGE TABLES a AND b", "DELETE FROM t WHERE id = 0",
+])
+def test_query_json_accepts_bodyless_ddl(statement: str) -> None:
+    client, fake = _stub_client()
+    fake.raw_stream.return_value = HTTPResponse(body=BytesIO(b""), preload_content=False)
+    assert client.query_json(statement).data == []
+
+
+@pytest.mark.parametrize(("body", "count", "expected"), [
+    (b"", "0", []),
+    (b"", "1", None),
+    (b"\x01\x01\x01n\x05UInt8\x07", "1", [{"n": 7}]),
+    (b"\x01\x01\x01n\x05UInt8\x07", "2", None),
+])
+def test_native_final_summary_checks_empty_and_complete_block_responses(
+    body: bytes, count: str, expected: list[dict[str, int]] | None,
+) -> None:
+    client, fake = _stub_client()
+    response = HTTPResponse(body=BytesIO(body), preload_content=False,
+                            headers={"X-ClickHouse-Summary": '{"result_rows":"' + count + '"}'})
+    result = NativeTransform.parse_response(ResponseBuffer(ResponseSource(response)))
+    result.summary = HttpClient._summary(response)
+    fake.query.return_value = result
+    if expected is None:
+        with pytest.raises(DatabaseError, match="Incomplete ClickHouse Native result response"):
+            client.query("SELECT n FROM t")
+    else:
+        assert client.query("SELECT n FROM t").rows == expected
+
+
+def test_native_does_not_trust_an_early_zero_row_summary() -> None:
+    client, fake = _stub_client()
+    fake.query.return_value.column_names = ()
+    fake.query.return_value.result_rows = []
+    fake.query.return_value.summary = {"result_rows": "0"}
+    with pytest.raises(DatabaseError, match="Cannot validate an empty Native result"):
+        client.query("SELECT n FROM t", settings={"wait_end_of_query": 0})
+    fake.query.assert_called_once_with("SELECT n FROM t", settings={"wait_end_of_query": 0})
+
+
+def test_control_accepts_bodyless_journal_marker_writes(httpx_mock: HTTPXMock) -> None:
+    client, _fake = _stub_client()
+    httpx_mock.add_response(text="")
+    assert client.query_control("INSERT INTO journal SELECT 1", 1000).rows == []
+
+
+def test_control_and_query_json_validate_bodyless_no_match_kill(httpx_mock: HTTPXMock) -> None:
+    client, fake = _stub_client()
+    headers = {"X-ClickHouse-Summary": '{"result_rows":"0"}'}
+    httpx_mock.add_response(text="", headers=headers)
+    assert client.query_control("KILL QUERY WHERE 0 SYNC", 1000).rows == []
+    fake.raw_stream.return_value = HTTPResponse(
+        body=BytesIO(b""), preload_content=False, headers=headers,
+    )
+    assert client.query_json("KILL QUERY WHERE 0 SYNC").data == []
