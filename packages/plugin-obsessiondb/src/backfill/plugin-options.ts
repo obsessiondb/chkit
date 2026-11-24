@@ -1,3 +1,6 @@
+import type { SafeParseable } from '@chkit/core'
+import { type InsertSettings, insertSettingsFromOptions } from '@chkit/plugin-backfill/sdk'
+
 interface OptionsSchema {
 	safeParse(data: unknown): { success: boolean; data?: unknown }
 }
@@ -24,6 +27,28 @@ export function resolveBackfillPluginOptions(plugins: unknown): Record<string, u
 	// schema reports them.
 	const result = schema.safeParse(options)
 	return result.success && isRecord(result.data) ? result.data : options
+}
+
+/**
+ * The backfill plugin's `insertSettings`, resolved like its other options but
+ * strictly: an invalid backfill option stops the submit, as it stops a local
+ * run, instead of being dropped. Undefined when no backfill plugin is
+ * registered or it has none.
+ */
+export function resolveBackfillInsertSettings(plugins: unknown): InsertSettings | undefined {
+	if (!Array.isArray(plugins)) return undefined
+	const registration = plugins.find(
+		(entry) => isRecord(entry) && entry.enabled !== false && pluginName(entry.plugin) === 'backfill',
+	)
+	if (!isRecord(registration)) return undefined
+	const options = isRecord(registration.options) ? registration.options : {}
+	const schema = isRecord(registration.plugin) ? registration.plugin.optionsSchema : undefined
+	if (!isStrictOptionsSchema(schema)) return insertSettingsFromOptions({ success: true, data: options })
+	return insertSettingsFromOptions(schema.safeParse(options))
+}
+
+function isStrictOptionsSchema(value: unknown): value is SafeParseable<unknown> {
+	return isRecord(value) && typeof value.safeParse === 'function'
 }
 
 /** The configured backfill `stateDir`, or undefined for the default directory. */

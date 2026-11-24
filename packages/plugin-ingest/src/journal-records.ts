@@ -25,6 +25,16 @@ export type JournalRow = {
   detail_json: string
 }
 
+/** A journal row read in JSONStrings, which returns every value as a string. */
+export type JournalStringsRow = Omit<JournalRow, 'attempt_no' | 'retry_at'> & { attempt_no: string; retry_at: string }
+
+/** JSONStrings writes NULL as the text ᴺᵁᴸᴸ, so the query reads a missing retry_at as ''. */
+export const JOURNAL_STRINGS_COLUMNS = "* REPLACE (ifNull(toString(retry_at), '') AS retry_at)"
+
+export function fromJournalStrings(row: JournalStringsRow): JournalRow {
+  return { ...row, attempt_no: Number(row.attempt_no), retry_at: row.retry_at === '' ? null : row.retry_at }
+}
+
 export function toJournalRow(event: JournalEvent, targetId: string, at: Date): JournalRow {
   const checkpointJson = event.checkpoint ? canonicalJson(event.checkpoint) : ''
   const detailJson = canonicalJson(event.detail)

@@ -21,7 +21,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from typer.testing import CliRunner
 
@@ -357,29 +357,24 @@ def sorting_keys(target: CutoverTarget, project: CutoverProject) -> dict[str, st
 
 
 def assert_chkit_clean() -> None:
-    """status, drift, check and generate --dryrun report nothing to do."""
-    status = json_of(cli(["status", "--json"]), "status")
-    live = json_of(cli(["drift", "--json"]), "drift")
+    """check (no pending migration, no drift) and generate --dryrun report nothing to do."""
     check = cli(["check", "--json"])
     plan = json_of(cli(["generate", "--dryrun", "--json"]), "generate --dryrun")
+    payload = json.loads(check.stdout)
     summary = {
-        "pending": status["pending"],
-        "live_drifted": live["drifted"],
-        "live_missing": live["missing"],
         "check": check.exit_code,
+        "pending": payload["pendingCount"],
+        "drift_evaluated": payload["driftEvaluated"],
+        "drifted": payload["drifted"],
         "operations": plan["operationCount"],
     }
     assert summary == {
-        "pending": 0,
-        "live_drifted": False,
-        "live_missing": [],
         "check": 0,
+        "pending": 0,
+        "drift_evaluated": True,
+        "drifted": False,
         "operations": 0,
-    }, f"chkit not clean after the cutover: {summary}\n{_without_extra(live)}\n{check.output}"
-
-
-def _without_extra(payload: dict[str, Any]) -> str:
-    return json.dumps({key: value for key, value in payload.items() if key != "extra"})
+    }, f"chkit not clean after the cutover: {summary}\n{check.output}"
 
 
 def edit_journal_state(
@@ -511,17 +506,27 @@ def run_backfill_scenario(target: CutoverTarget, label: str, directory: Path) ->
         drop_cutover_project(target, project)
 
 
+RetryFailures = Literal["retries", "layout guards"]
+"""Which statements of the cutover fail once. ``retries``: every statement whose
+retry runs other SQL than its first run (before-retry SQL, or the lookup of an
+async attempt), and the statement after each one whose acknowledgement is
+lost. A retry of any other statement only runs it again, which the migrate
+resume unit tests cover. ``layout guards``: the EXCHANGE and the
+drop of the old table, whose guards compare the tables' layouts."""
+
+
 def run_retry_scenario(
     target: CutoverTarget,
     label: str,
     directory: Path,
     change: CutoverChange = ORDER_BY_CHANGE,
+    failures: RetryFailures = "retries",
 ) -> None:
-    """Fail every statement of the cutover once and resume it with --retry, and
-    replay the statements whose acknowledgement can be lost: the snapshot
-    (re-taken after a TRUNCATE), the copy (skips what it wrote), the EXCHANGE
-    (refuses: it must never swap back) and the drop of the old table. Writers
-    insert the whole time; no row may be lost or duplicated."""
+    """Fail statements of the cutover once (see RetryFailures) and resume them
+    with --retry, and replay the statements whose acknowledgement can be lost:
+    the snapshot (re-taken after a TRUNCATE), the copy (skips what it wrote),
+    the EXCHANGE (refuses: it must never swap back) and the drop of the old
+    table. Writers insert the whole time; no row may be lost or duplicated."""
     project = create_cutover_project(target, label, directory)
     writers: Writers | None = None
     try:
@@ -548,9 +553,10 @@ def run_retry_scenario(
                 ["migrate", "--apply", "--allow-destructive", "--json", *(["--retry", file] if retry else [])]
             )
 
-        for step in range(len(types)):
+        steps = _retry_steps(blocks, types, drop_old, replayed, failures)
+        for attempt, step in enumerate(steps):
             path.write_text(_inject_failure(blocks, step), encoding="utf-8")
-            failed = migrate(retry=step > 0)
+            failed = migrate(retry=attempt > 0)
             assert failed.exit_code != 0, f"statement {step + 1} ({types[step]}) must fail"
             assert f"injected failure at statement {step + 1}" in failed.output, failed.output
             lost = replayed.get(step - 1)
@@ -607,6 +613,24 @@ def run_retry_scenario(
         if writers is not None:
             writers.stop()
         drop_cutover_project(target, project)
+
+
+def _retry_steps(
+    blocks: list[str],
+    types: list[str],
+    drop_old: int,
+    replayed: dict[int, str],
+    failures: RetryFailures,
+) -> list[int]:
+    if failures == "layout guards":
+        exchange = types.index("exchange_tables")
+        return [exchange, exchange + 1, drop_old]
+
+    def retry_runs_other_sql(step: int) -> bool:
+        lines = blocks[step + 1].split("\n")
+        return any(line.startswith("-- before-retry:") for line in lines) or " mode=async" in lines[0]
+
+    return [step for step in range(len(types)) if retry_runs_other_sql(step) or step - 1 in replayed]
 
 
 def _inject_failure(blocks: list[str], step: int) -> str:

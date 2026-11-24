@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import select
 import shutil
 import signal
 import socket
@@ -151,9 +152,10 @@ def test_never_takes_over_a_lock_even_of_a_dead_process(tmp_path: Path) -> None:
     acquire_run_lock(lock_path, PLAN_ID).release()
 
 
-def _python(script: str) -> subprocess.Popen[str]:
+def _python(script: str, *, stdin: int | None = None) -> subprocess.Popen[str]:
     return subprocess.Popen(
         [sys.executable, "-c", script],
+        stdin=stdin,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -164,24 +166,44 @@ def _python(script: str) -> subprocess.Popen[str]:
 def test_one_of_several_processes_racing_for_the_lock_gets_it(tmp_path: Path) -> None:
     runs_dir = _runs_dir(tmp_path)
     lock_path = run_lock_path(runs_dir, PLAN_ID)
+    release_path = tmp_path / "release"
     script = f"""
 import time
+from pathlib import Path
 from chkit_plugin_backfill.errors import BackfillConfigError
 from chkit_plugin_backfill.run_lock import acquire_run_lock
 try:
     lock = acquire_run_lock({str(lock_path)!r}, {PLAN_ID!r})
 except BackfillConfigError:
-    print("busy")
+    print("busy", flush=True)
 else:
-    print("acquired")
-    time.sleep(1)
+    print("acquired", flush=True)
+    while not Path({str(release_path)!r}).exists():
+        time.sleep(0.01)
     lock.release()
 """
 
     children = [_python(script) for _ in range(6)]
-    outcomes = sorted(child.communicate(timeout=30)[0].strip() for child in children)
-
-    assert outcomes == ["acquired", "busy", "busy", "busy", "busy", "busy"]
+    outcomes = []
+    try:
+        for child in children:
+            assert child.stdout is not None
+            ready, _, _ = select.select([child.stdout], [], [], 30)
+            assert ready, "lock contender did not report its outcome"
+            outcomes.append(child.stdout.readline().strip())
+        assert sorted(outcomes) == ["acquired", "busy", "busy", "busy", "busy", "busy"]
+    finally:
+        release_path.touch()
+        results = []
+        for child in children:
+            try:
+                _, stderr = child.communicate(timeout=30)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                _, stderr = child.communicate()
+            results.append((child.returncode, stderr))
+        for code, stderr in results:
+            assert code == 0, stderr
     assert list(runs_dir.iterdir()) == []
 
 

@@ -2,4 +2,4 @@
 "chkit": patch
 ---
 
-`chkit drift` and `chkit check` now report a dictionary whose attributes, primary key, source, layout, lifetime, range or settings differ from the schema (#492).
+`drift` and `check` detect changed dictionary definitions, case-sensitive engine arguments, and expression changes involving columns named `all` or `distinct`, instead of overlooking them.

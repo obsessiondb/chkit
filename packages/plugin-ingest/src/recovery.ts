@@ -3,13 +3,17 @@ import { randomUUID } from 'node:crypto'
 import { waitForTable, type ClickHouseExecutor, type ClickHouseSettings } from '@chkit/clickhouse'
 
 import { validateJournalHistory, type ValidatedJournalHistory } from './journal-history.js'
-import { canonicalJson, DEFAULT_JOURNAL_TABLE, digest, journalTableSql, type JournalRow } from './journal.js'
+import { canonicalJson, DEFAULT_JOURNAL_TABLE, digest, fromJournalStrings, JOURNAL_STRINGS_COLUMNS, journalTableSql, type JournalRow, type JournalStringsRow } from './journal.js'
 import { sortedDigest } from './sorted-digest.js'
 import type { CommittedCheckpoint } from './types.js'
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/
-const READ_SETTINGS = {
+const STREAM_SETTINGS = {
   select_sequential_consistency: '1', use_query_cache: 0, output_format_json_quote_64bit_integers: 1,
+} satisfies ClickHouseSettings
+// The JSONStrings envelope makes a blank or truncated response fail instead of reading as no rows.
+const READ_SETTINGS = {
+  default_format: 'JSONStrings', select_sequential_consistency: '1', use_query_cache: 0,
 } satisfies ClickHouseSettings
 
 export interface JournalRepairPlan {
@@ -197,9 +201,19 @@ function sourcePlan(
 
 /** Streams a snapshot in batches; executors without batched reads return it whole. */
 async function* readRows(table: string, options: JournalRecoveryOptions): AsyncGenerator<JournalRow[]> {
-  const sql = `SELECT * FROM ${qualified(options.database, table)} ORDER BY target_id, namespace_id, run_id, event_seq, event_id, payload_hash, event_at`
-  if (options.executor.queryBatches) yield* options.executor.queryBatches<JournalRow>(sql, READ_SETTINGS)
-  else yield await options.executor.query<JournalRow>(sql, READ_SETTINGS)
+  const from = `FROM ${qualified(options.database, table)} ORDER BY target_id, namespace_id, run_id, event_seq, event_id, payload_hash, event_at`
+  if (!options.executor.queryBatches) {
+    yield (await options.executor.query<JournalStringsRow>(`SELECT ${JOURNAL_STRINGS_COLUMNS} ${from}`, READ_SETTINGS)).map(fromJournalStrings)
+    return
+  }
+  // A stream cannot be framed, so its row count is checked against a framed count.
+  const [count] = await options.executor.query<{ rows: string }>(`SELECT count() AS rows FROM ${qualified(options.database, table)}`, READ_SETTINGS)
+  let received = 0
+  for await (const batch of options.executor.queryBatches<JournalRow>(`SELECT * ${from}`, STREAM_SETTINGS)) {
+    received += batch.length
+    yield batch
+  }
+  if (String(received) !== count?.rows) throw new Error(`Ingest journal ${table} returned ${received} of ${count?.rows} rows: the response was incomplete or the journal changed. Stop ingestion writers and retry.`)
 }
 
 async function tableDigest(table: string, options: JournalRecoveryOptions): Promise<string> {
