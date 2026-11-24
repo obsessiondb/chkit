@@ -1,6 +1,6 @@
 ---
 name: pr-creation
-description: Use when creating a pull request. Ensures package changesets and independent registry template releases match the changed surfaces, verification passes, and PR metadata is correct. Invoke this skill BEFORE committing or pushing PR code.
+description: Use whenever opening or creating a pull request, including requests to ship changes or prepare a PR. Load before committing or pushing PR code; covers verification, releases, PR metadata, and watching for review feedback.
 allowed-tools: [Read, Edit, Write, Bash, Glob, Grep, mcp__conductor__GetWorkspaceDiff]
 metadata:
   internal: true
@@ -18,9 +18,9 @@ bun verify
 
 Do NOT proceed if verification fails. Fix issues first.
 
-## 2. Review the Workspace Diff
+## 2. Determine the Change Scope
 
-Use `mcp__conductor__GetWorkspaceDiff` with `stat: true` to see all changed files, then review the full diff to understand the scope of changes.
+Inspect `git diff --stat <base>...HEAD`, the full branch diff, and any uncommitted changes to identify the changed surfaces for documentation, release, and PR metadata. Independent code review belongs to the `review` skill, not this workflow.
 
 ## 3. Check Documentation (if needed)
 
@@ -154,16 +154,13 @@ Stage and commit all changes including changeset files. Follow any user instruct
    - Description covering ALL changes in the workspace diff (not just the latest commit)
    - Keep description under five sentences unless instructed otherwise
 
-```bash
-gh pr create --base main --title "title here" --body "$(cat <<'EOF'
-## Summary
-- bullet points describing changes
+Write the description to a file and pass it with `gh pr create --base main --title "title here" --body-file <file>`.
 
-## Test plan
-- [ ] testing steps
-EOF
-)"
-```
+When running in Replicas, include the originating workspace link in the PR description, preserve any existing Replicas footer and co-author trailers, and state that an automatic review will follow. Use the actual workspace URL supplied by the environment; do not invent one. This skill does not configure or trigger automatic reviews.
+
+## 7. Watch for Review Feedback
+
+After opening the PR, watch for review comments and address actionable feedback, pushing fixes and responding on the PR. Use the available PR monitoring workflow; if monitoring cannot continue after the session ends, report that limitation. Do not perform an independent review as part of PR creation; that belongs to `review`.
 
 ## Common Mistakes to Avoid
 
