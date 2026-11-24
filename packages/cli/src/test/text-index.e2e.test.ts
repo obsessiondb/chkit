@@ -61,8 +61,9 @@ async function loadPulled(definition: TableDefinition, dir: string): Promise<Tab
 }
 
 describe('text index live round trips', () => {
+  // Each case has its own table and waits on the server, not the CPU.
   for (const { name: label, ...params } of fixtures) {
-    test(label, async () => {
+    test.concurrent(label, async () => {
       const executor = createLiveExecutor(env)
       const name = `${createPrefix('text')}docs`
       const index: TextSkipIndex = {
