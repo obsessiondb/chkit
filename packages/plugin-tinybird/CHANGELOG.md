@@ -1,5 +1,11 @@
 # @chkit/plugin-tinybird
 
+## 0.2.0-beta.18
+
+### Patch Changes
+
+- Updated dependencies: `@chkit/core@0.2.0-beta.18`, `@chkit/clickhouse@0.2.0-beta.18`, `@chkit/plugin-pull@0.2.0-beta.18`
+
 ## 0.2.0-beta.17
 
 ### Patch Changes
