@@ -60,7 +60,7 @@ Review the whole diff before choosing a release path:
 
 - **Template-only:** Changes to distributed registry source, dependencies, or metadata use the integration's independent version, changelog, and generated release artifact. Do not create a package changeset or bump `chkit` or the fixed npm package group.
 - **Package behavior:** User-facing shared-runtime, CLI, plugin, or library changes require ordinary package changesets, even when they support registry templates.
-- **chkit-py behavior:** Add one fragment of one or two user-facing sentences in `chkit_python/changelog.d/` (`<issue>.<type>.md` or `+<slug>.<type>.md`, type `added`, `changed` or `fixed`) instead of editing `chkit_python/CHANGELOG.md`.
+- **chkit-py behavior:** Add one fragment of one or two user-facing sentences in `chkit_python/changelog.d/` (`<issue>.<type>.md` or `+<slug>.<type>.md`, type `added`, `changed` or `fixed`) instead of editing `chkit_python/CHANGELOG.md`. Apply the unreleased-entry consolidation rule below to these fragments too, using the latest published PyPI release as their baseline.
 - **Mixed:** Release the affected templates and packages separately. Registry files in a PR never exempt package changes.
 - **Docs or tooling only:** No release is needed unless the changed files are distributed as part of a template or change published package behavior.
 
@@ -77,7 +77,11 @@ Use the actual PR base if different. Commit the generated `registry/<provider>/r
 
 ### Package changesets
 
-If the PR introduces a **user-facing npm package change** (new feature, bug fix, API change, behavior change), create `.changeset/<descriptive-name>.md` directly; the interactive `bun run changeset` CLI does not work in this environment. Existing `.changeset/*.md` files show the package names.
+Before adding a package changeset, read the existing unreleased `.changeset/*.md` entries and compare the final behavior with the latest published release. In prerelease mode, entries named in `.changeset/pre.json` have already been consumed: preserve them unchanged and exclude them from this consolidation.
+
+If the PR refines or fixes behavior that is still unreleased, update its existing pending entry to describe the final user-facing change instead of adding another changeset. Merge overlapping pending entries into one per user-facing change, preserving required upgrade actions; keep distinct changes separate. A fix to behavior in the latest published release still needs a pending entry; never edit a consumed entry.
+
+If the PR introduces a **user-facing npm package change** (new feature, bug fix, API change, behavior change) with no matching pending entry, create `.changeset/<descriptive-name>.md` directly; the interactive `bun run changeset` CLI does not work in this environment. Existing `.changeset/*.md` files show the package names.
 
 ```markdown
 ---
@@ -116,7 +120,7 @@ Examples that **do NOT require** a changeset:
 
 These rules cover changeset summaries and registry `meta.chkit.changelog` items. Users read them in release notes, `CHANGELOG.md` and `chkit registry inspect`, so write for someone deciding whether to upgrade:
 
-- One entry per user-facing change, normally one sentence and at most two. A PR with several user-facing changes gets one changeset (or changelog item) for each.
+- One entry per user-facing area, normally one sentence and at most two. Group related fixes by what users upgrading from the latest published release will notice, rather than writing an entry for each PR or follow-up.
 - Say what changed for the user (fixed, added, now behaves like X), naming the command, option or export they touch. Don't describe the implementation.
 - Leave out internal mechanisms, tests, rationale, edge-case lists and lists of removed internals. The code, docs and PR carry those.
 - Only when a user must act, add one short `- Breaking: …` line below the entry per breaking change or required action. In a template changelog, make it its own item starting with `Breaking:`.
