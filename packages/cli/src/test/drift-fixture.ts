@@ -33,6 +33,6 @@ export async function createFixture(input: {
   return { dir, configPath, schemaPath }
 }
 
-export function renderBaseSchema(database: string, usersTableName: string): string {
+function renderBaseSchema(database: string, usersTableName: string): string {
   return `import { schema, table } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: '${database}',\n  name: '${usersTableName}',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nexport default schema(users)\n`
 }

@@ -196,7 +196,7 @@ export async function waitForFingerprints(
   )
 }
 
-export function toJournalRow(row: { checksum: string; completed: string; statuses: string }): JournalRow {
+function toJournalRow(row: { checksum: string; completed: string; statuses: string }): JournalRow {
   return { checksum: row.checksum, completed: Number(row.completed), statuses: row.statuses }
 }
 
