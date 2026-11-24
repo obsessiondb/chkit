@@ -94,7 +94,7 @@ def test_keeps_every_row_on_both_shards_while_writers_insert(
     run_keep_scenario(target, "cutover_keep_2s", tmp_path)
 
 
-def test_resumes_after_a_failure_at_every_step_on_both_shards(
+def test_resumes_after_a_failure_at_every_step_whose_retry_differs_on_both_shards(
     target: CutoverTarget, tmp_path: Path
 ) -> None:
     run_retry_scenario(target, "cutover_retry_2s", tmp_path)

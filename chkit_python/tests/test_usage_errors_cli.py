@@ -214,6 +214,69 @@ def test_codegen_without_its_plugin_is_not_configured(
         assert result.stdout == ""
 
 
+@pytest.fixture
+def profile_without_plugins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No project config, and a user profile that lists no plugins."""
+    (tmp_path / "xdg" / "chkit").mkdir(parents=True)
+    (tmp_path / "xdg" / "chkit" / "config.py").write_text(
+        'from chkit import define_config\nconfig = define_config({"plugins": []})\n'
+    )
+    (tmp_path / "cwd").mkdir()
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.chdir(tmp_path / "cwd")
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["obsessiondb"],
+        ["obsessiondb", "login"],
+        ["obsessiondb", "service", "list"],
+        ["obsessiondb", "--bogus"],
+        ["obsessiondb", "--", "x"],
+    ],
+)
+@pytest.mark.parametrize("json_mode", [False, True])
+@pytest.mark.usefixtures("profile_without_plugins")
+def test_obsessiondb_without_its_plugin_is_not_configured(
+    args: list[str], *, json_mode: bool
+) -> None:
+    # As in TS (#776), not `Unknown plugin "obsessiondb"` with the generic code.
+    message = "ObsessionDB plugin is not configured. Add it to config.plugins first."
+
+    result = CliRunner().invoke(app, [args[0], *(["--json"] if json_mode else []), *args[1:]])
+
+    assert result.exit_code == 1, result.output
+    assert result.stderr == f"{message}\n"
+    if json_mode:
+        assert json.loads(result.stdout) == {
+            "command": "obsessiondb",
+            "schemaVersion": 1,
+            "ok": False,
+            "error": {"code": "plugin_not_configured", "message": message},
+        }
+    else:
+        assert result.stdout == ""
+
+
+@pytest.mark.parametrize(
+    ("args", "usage"),
+    [
+        (["obsessiondb", "--help"], "chkit obsessiondb <command> [options]"),
+        (["obsessiondb", "--help", "--json"], "chkit obsessiondb <command> [options]"),
+        (["obsessiondb", "-h"], "chkit obsessiondb <command> [options]"),
+        (["obsessiondb", "--help-plugins"], "chkit obsessiondb <command> [options]"),
+        (["obsessiondb", "login", "--help"], "chkit obsessiondb login [options]"),
+    ],
+)
+@pytest.mark.usefixtures("profile_without_plugins")
+def test_obsessiondb_help_prints_without_its_plugin(args: list[str], usage: str) -> None:
+    result = CliRunner().invoke(app, args)
+    assert result.exit_code == 0, result.output
+    assert result.stderr == ""
+    assert usage in result.stdout
+
+
 def _raise_after_emitting_json(*_args: Any, **_kwargs: Any) -> Any:
     emit_json("status", {"ok": True})
     msg = "late"

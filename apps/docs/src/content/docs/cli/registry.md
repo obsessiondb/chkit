@@ -7,7 +7,7 @@ sidebar:
 
 Discovers provider templates and builds source catalogs into static, installable JSON artifacts.
 
-This command belongs to [chkit Sync (beta)](/sync/). See the [Sync CLI overview](/sync/cli/) for the relationship between registry browsing, installation, and stream execution.
+This command belongs to [chkit Sync (beta)](/sync/). It is TypeScript only: chkit-py has no `chkit registry` (see [Differences from the TypeScript version](/python/overview/#differences-from-the-typescript-version)). See the [Sync CLI overview](/sync/cli/) for the relationship between registry browsing, installation, and stream execution.
 
 ## Synopsis
 

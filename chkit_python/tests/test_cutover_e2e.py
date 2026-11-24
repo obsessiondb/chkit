@@ -1,6 +1,6 @@
 """Zero-downtime cutover of a sort-key change (#202) under concurrent writers.
 
-Port of ``packages/cli/src/test/cutover.e2e.test.ts``: against the local stack,
+Port of the ``packages/cli/src/test/cutover*.e2e.test.ts`` files: against the local stack,
 or ObsessionDB when ``CLICKHOUSE_URL`` / ``CLICKHOUSE_HOST`` point at it. The
 2-shard cluster runs the same scenarios in
 ``tests_cluster/test_cutover_cluster_e2e.py``. An unreachable server fails the
@@ -76,16 +76,16 @@ def test_copies_through_the_backfill_plugin_then_swaps_and_drops_the_old_table(
     run_backfill_scenario(target, "cutover_backfill", tmp_path)
 
 
-def test_resumes_after_a_failure_at_every_step_and_never_replays_the_swap(
+def test_resumes_after_a_failure_at_every_step_whose_retry_differs_and_never_replays_the_swap(
     target: CutoverTarget, tmp_path: Path
 ) -> None:
     run_retry_scenario(target, "cutover_retry", tmp_path)
 
 
-def test_cuts_over_an_index_granularity_change_resuming_after_a_failure_at_every_step(
+def test_cuts_over_an_index_granularity_change_and_its_layout_guards_tell_the_tables_apart(
     target: CutoverTarget, tmp_path: Path
 ) -> None:
-    run_retry_scenario(target, "cutover_granularity", tmp_path, GRANULARITY_CHANGE)
+    run_retry_scenario(target, "cutover_granularity", tmp_path, GRANULARITY_CHANGE, "layout guards")
 
 
 def test_cuts_over_a_table_created_with_only_order_by(

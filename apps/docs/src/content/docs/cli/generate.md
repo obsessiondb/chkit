@@ -118,9 +118,7 @@ chkit generate --name events_by_user --cutover analytics.events=id
 - A cutover is refused when only the engine arguments change: it tells the old table from the new one by engine name, sorting key, primary key, partition key and read-only settings.
 - The cutover's first statement checks, on every replica, that the table stores the read-only settings the migration expects and no column that the schema does not declare, that it has every column the copy writes with the type the schema declares, that it computes the columns the schema declares `ALIAS` or `EPHEMERAL` and stores the others, and, when the snapshot is created `AS` the table, that its replication path (the engine's first argument) has `{uuid}` and that it has no TTL, before anything is created or copied. A table that does not declare `index_granularity` stores the server's default, which chkit takes from [`clickhouse.indexGranularity`](/configuration/overview/#mergetree-index-granularity-clickhouseindexgranularity) (8192 by default). If they differ, the migration stops there: set `clickhouse.indexGranularity` to the server's value and generate the cutover again.
 - A cutover is refused, with a `cutover_unsupported` validation issue, for engines other than `MergeTree`, `ReplicatedMergeTree` and `SharedMergeTree`, a `Replicated` table without `clickhouse.cluster`, a Nullable key, a TTL, a column whose type changes or that is renamed in the same migration, a renamed table, a new `CHECK` constraint, and writers chkit cannot follow (a Kafka-style consumer, directly or through intermediate tables, a refreshable materialized view or a `Buffer` table writing into the table). A view that reads from or writes into the table and is recreated in the same migration is refused too.
-- `migrate` stops a cutover, at its first step and before the swap, while asynchronous inserts with `wait_for_async_insert = 0` reach the table: ClickHouse drops their buffered rows when the table is swapped. See the [guide](/guides/data-preserving-migrations/#preconditions).
-
-See [Zero-downtime structural migrations](/guides/data-preserving-migrations/) for the steps, the preconditions, and recovery.
+- `migrate` stops a cutover, at its first step and before the swap, while asynchronous inserts with `wait_for_async_insert = 0` reach the table: ClickHouse drops their buffered rows when the table is swapped.
 
 ### Dictionary password warnings
 
@@ -159,6 +157,10 @@ If the codegen plugin is configured with `runOnGenerate: true` (the default), `c
 ### Validation errors
 
 Schema validation issues (such as invalid definitions) produce a `validation_failed` error with structured issue codes and messages. The process exits with code 1 and writes no migration or snapshot. For example, a function call written as the plain string `DEFAULT` of a column that cannot hold a string (`default: 'now64(3)'` on a `DateTime64` column) fails with `column_default_looks_like_expression` instead of producing a migration that ClickHouse rejects. See [Validation rules](/schema/dsl-reference/#validation-rules) for every code.
+
+### Migration data-copy warnings
+
+`generate` warns about standalone `INSERT` and data-reading/exporting `SELECT` statements in saved migration files and newly planned SQL in schema-diff modes (including dry runs), excluding ordinary DDL definitions, `assert_backfill` SELECTs, `SELECT throwIf(...)` guards and SELECT barriers; this warning never changes the exit status. Text prints `Warning: copy.sql, statement 1: Data copies should usually run as resumable backfill jobs; small copies in migrations are acceptable.`; JSON includes the same message without the `Warning: ` prefix in its `warnings` string array, for example `{"warnings": ["copy.sql, statement 1: Data copies …"]}`.
 
 ## Examples
 

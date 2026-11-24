@@ -43,7 +43,7 @@ Journal reads disable the query cache and request `select_sequential_consistency
 
 ## Retries and provider errors
 
-Retries need no configuration. `context.fetch` throws `HttpError` for unsuccessful responses; requests made another way throw `HttpError.fromResponse(response)` themselves. The classification treats 429 as rate limiting, 408/425/5xx as transient, and other 4xx as permanent.
+Retry defaults and execution-wide overrides are documented in the [plugin retry policy](/plugins/ingest/#retry-policy). `context.fetch` throws `HttpError` for unsuccessful responses; requests made another way throw `HttpError.fromResponse(response)` themselves. The classification treats 429 as rate limiting, 408/425/5xx as transient, and other 4xx as permanent.
 
 Requests of one pipeline share a request queue across its streams. `maxFetches` limits how many run at once, and a rate-limited response with `Retry-After` pauses the whole queue until then, so other streams of the pipeline do not run into the same limit. A rate-limit retry that the provider schedules at least the initial backoff ahead does not count against the retry limit; the retry time budget and the execution budget still bound it. Templates therefore send requests without fixed pauses.
 

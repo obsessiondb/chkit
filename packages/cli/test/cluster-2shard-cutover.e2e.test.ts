@@ -52,7 +52,7 @@ describe('generate --cutover on a 2-shard cluster (#202)', () => {
     await runKeepScenario(clusterTarget(), 'cutover2s_keep')
   }, 900_000)
 
-  test('resumes after a failure at every step and never replays the swap', async () => {
+  test('resumes after a failure at every step whose retry differs, and never replays the swap', async () => {
     await runRetryScenario(clusterTarget(), 'cutover2s_retry')
   }, 1_800_000)
 
