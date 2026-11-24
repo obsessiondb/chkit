@@ -97,7 +97,7 @@ type PinnedSetting = keyof typeof PINNED_INSERT_SETTINGS
  * an override turns off. The others are proof pins: with another value a
  * failure could not be proven, and a replay could write a chunk's rows twice.
  */
-export const DELIVERY_PINS: Partial<Record<PinnedSetting, string>> = {
+const DELIVERY_PINS: Partial<Record<PinnedSetting, string>> = {
   distributed_foreground_insert: "a chunk can be recorded done before its rows reach a Distributed table's shards",
   materialized_views_ignore_errors: "a materialized view's failed write is dropped and the chunk is still recorded done",
 }
@@ -113,7 +113,7 @@ const PROOF_PINS_SQL = Object.entries(PINNED_INSERT_SETTINGS)
  * `allow_experimental_parallel_reading_from_replicas` from 24.10 on, and
  * `insert_distributed_sync` one of `distributed_foreground_insert`.
  */
-export const PINNED_SETTING_ALIASES: Record<string, string> = {
+const PINNED_SETTING_ALIASES: Record<string, string> = {
   enable_parallel_replicas: 'allow_experimental_parallel_reading_from_replicas',
   insert_distributed_sync: 'distributed_foreground_insert',
 }

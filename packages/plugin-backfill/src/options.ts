@@ -74,7 +74,7 @@ function normalizePlanId(raw: string): string {
 
 // Extra ClickHouse settings for every chunk INSERT (e.g. max_insert_threads).
 // Plugin-level only, as in chkit-py: no command takes them.
-export const InsertSettingsSchema = z.record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
+const InsertSettingsSchema = z.record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
 
 export const PluginConfigSchema = z.object({
   maxChunkBytes: z.number().positive().optional(),
