@@ -1,5 +1,7 @@
 # @chkit/core
 
+## 0.2.0-beta.18
+
 ## 0.2.0-beta.17
 
 ### Patch Changes

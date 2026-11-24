@@ -91,6 +91,8 @@
     "ingest-checkpoint-contract-guards",
     "ingest-definition-validation",
     "ingest-execution-limits",
+    "ingest-execution-retry",
+    "ingest-framed-journal-reads",
     "ingest-journal-atomic-attempt-start",
     "ingest-journal-repair-hint",
     "ingest-journal-replica-resilience",
