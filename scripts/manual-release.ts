@@ -25,7 +25,8 @@
  *
  * publish derives the channel from the version: a prerelease publishes under
  * `beta` and moves `latest` onto it (the docs use unqualified installs); a
- * stable version publishes straight to `latest`. It refuses a commit that still
+ * stable version publishes straight to `latest`, and only after ci.yml's
+ * obsessiondb job passed on the commit. It refuses a commit that still
  * has unreleased changesets — main moved after prepare — because those changes
  * would ship without a changelog entry.
  *
@@ -99,6 +100,10 @@ const RELEASE_BRANCH_PREFIX = 'release/v'
 const CHANGE_HEADINGS = ['Major Changes', 'Minor Changes', 'Patch Changes']
 // GitHub rejects PR bodies over 65,536 characters.
 const MAX_PR_NOTES_LENGTH = 60_000
+// ci.yml's job that runs the full suite against ObsessionDB.
+const OBSESSIONDB_JOB = 'obsessiondb'
+const OBSESSIONDB_POLL_MS = 60_000
+const OBSESSIONDB_TIMEOUT_MS = 120 * 60_000
 
 export async function main(): Promise<void> {
 	mkdirSync(TMP_DIR, { recursive: true })
@@ -310,6 +315,9 @@ async function publishRelease({ dryRun, ci }: PublishArgs): Promise<void> {
 		// 3. Quality gates (typecheck, lint, test, build) and release guards.
 		runQualityGates()
 		runReleaseGuards()
+		if (stable) {
+			requireObsessionDbSuite(gitHead())
+		}
 	} else {
 		logLine(
 			`Every package is already on npm at ${version}; finishing dist-tags and the GitHub release.`,
@@ -939,6 +947,63 @@ function runQualityGates(): void {
 	logLine('Running quality gates (typecheck, lint, test, build)...')
 	// `verify` starts the local test stack itself, as in ci.yml's verify job.
 	runCommand('bun', ['run', 'verify'])
+}
+
+/**
+ * A stable version publishes only after ci.yml's obsessiondb job (the full
+ * suite, `--force`) passed on this exact commit, in the run its push to main
+ * started. Waits while that job is pending; a failed or skipped job stops the
+ * release until it is re-run green.
+ */
+function requireObsessionDbSuite(sha: string): void {
+	logLine(`Waiting for ci.yml's ${OBSESSIONDB_JOB} job on ${sha}...`)
+	const deadline = Date.now() + OBSESSIONDB_TIMEOUT_MS
+	for (;;) {
+		const job = findObsessionDbJob(sha)
+		if (job?.status === 'completed') {
+			if (job.conclusion === 'success') {
+				logLine(`ObsessionDB suite passed: ${job.url}`)
+				return
+			}
+			fail(
+				`ObsessionDB suite concluded ${job.conclusion} (${job.url}). ` +
+					'Re-run that job until it passes, then re-run publish.',
+			)
+		}
+		if (Date.now() > deadline) {
+			fail(`ci.yml's ${OBSESSIONDB_JOB} job on ${sha} did not finish in time.`)
+		}
+		Bun.sleepSync(OBSESSIONDB_POLL_MS)
+	}
+}
+
+function findObsessionDbJob(
+	sha: string,
+): { status: string; conclusion: string; url: string } | null {
+	const [run] = JSON.parse(
+		runCommand('gh', [
+			'run',
+			'list',
+			'--workflow',
+			'ci.yml',
+			'--event',
+			'push',
+			'--commit',
+			sha,
+			'--limit',
+			'1',
+			'--json',
+			'databaseId',
+		]).stdout,
+	) as { databaseId: number }[]
+	if (!run) return null
+	const { jobs } = JSON.parse(
+		runCommand('gh', ['run', 'view', String(run.databaseId), '--json', 'jobs'])
+			.stdout,
+	) as {
+		jobs: { name: string; status: string; conclusion: string; url: string }[]
+	}
+	return jobs.find(({ name }) => name === OBSESSIONDB_JOB) ?? null
 }
 
 /**

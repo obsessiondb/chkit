@@ -14,7 +14,9 @@ name: "Release: publish"
 # Runs on a GitHub-hosted runner: npm Trusted Publishing does not support
 # self-hosted runners, which is what Blacksmith runners register as. The quality
 # gates run `bun run verify`, which starts the local test stack (test/infra) as
-# in ci.yml's verify job, never the shared ObsessionDB test database.
+# in ci.yml's verify job, never the shared ObsessionDB test database. A stable
+# release also waits for ci.yml's obsessiondb job on the release commit and
+# publishes only if it passed.
 #
 # Prerequisites (configured once, out of band):
 #   - npm Trusted Publisher on each of the 11 packages -> GitHub Actions,
@@ -68,6 +70,7 @@ jobs:
     permissions:
       id-token: write # OIDC Trusted Publishing
       contents: write # create the tag and GitHub release
+      actions: read # stable: read ci.yml's obsessiondb job on this commit
     steps:
       - name: Checkout
         uses: actions/checkout@v4

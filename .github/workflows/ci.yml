@@ -8,6 +8,9 @@ on:
   # "Release: prepare" opens its PR with GITHUB_TOKEN, which does not start
   # pull_request runs, so it dispatches CI on the release branch instead.
   workflow_dispatch:
+  # Nightly full ObsessionDB run: the managed backend changes on its own.
+  schedule:
+    - cron: '0 3 * * *'
 
 jobs:
   verify:
@@ -48,10 +51,15 @@ jobs:
   obsessiondb:
     runs-on: blacksmith-8vcpu-ubuntu-2404
     needs: verify
-    # Push to main, and a manual dispatch of this workflow so a branch can
-    # observe the managed target. Pull requests stay off: they cannot be
-    # trusted with the test database secrets.
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+    # Push to main, the nightly schedule, and a manual dispatch so a branch can
+    # observe the managed target, except a beta release branch
+    # (release/v<x>-beta.<n>). Pull requests stay off: they cannot be trusted
+    # with the test database secrets.
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' &&
+       !(startsWith(github.ref_name, 'release/v') && contains(github.ref_name, '-')))
     # Fixture tables are shared on the managed test database. Let an active
     # run finish before another run reseeds them.
     concurrency:
@@ -83,7 +91,7 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: verify
     # Production and PR previews both deploy once verify passes. The
-    # obsessiondb job reports on the managed target and gates nothing.
+    # obsessiondb job gates only stable publishing (scripts/manual-release.ts).
     if: >-
       !cancelled() && needs.verify.result == 'success' &&
       ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
