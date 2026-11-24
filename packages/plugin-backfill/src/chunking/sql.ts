@@ -237,11 +237,11 @@ function isDeliveryDefault(name: string, value: string | number | boolean): bool
 }
 
 /**
- * The settings of a chunk INSERT, in one list: the user's own first, delivery
- * pins included, then everything chkit requires, so that a later setting wins
- * over whatever the user's set (a settings profile included): the fixed
- * settings, a cutover's, the dedup token, and the pins, without the delivery
- * ones the user sets.
+ * The settings of a chunk INSERT, in one list, each later one winning over
+ * the earlier: the user's own settings (a settings profile included), then
+ * the delivery pins, the user's value as written or chkit's default, then
+ * everything chkit requires, the fixed settings, a cutover's, the dedup token
+ * and the proof pins.
  */
 export function chunkInsertSettingsSql(
   insertSettings: InsertSettings | undefined,
@@ -250,14 +250,17 @@ export function chunkInsertSettingsSql(
   const cutover = options.cutover ?? false
   assertInsertSettingsKeepPinned(insertSettings, undefined, { cutover })
   const effective = effectiveInsertSettings(insertSettings)
-  const parts = Object.entries(effective).map(([key, value]) => `${key}=${renderInsertSettingValue(value)}`)
+  const parts = Object.entries(effective)
+    .filter(([key]) => !isDeliveryPin(key))
+    .map(([key, value]) => `${key}=${renderInsertSettingValue(value)}`)
+  for (const [name, value] of Object.entries(PINNED_INSERT_SETTINGS)) {
+    if (!isDeliveryPin(name)) continue
+    const own = effective[name]
+    parts.push(`${name}=${own === undefined ? value : renderInsertSettingValue(own)}`)
+  }
   parts.push(...Object.entries(fixedSettings(cutover)).map(([name, value]) => `${name}=${value}`))
   if (options.token) parts.push(`${TOKEN_SETTING}='${options.token}'`)
-  parts.push(
-    ...Object.entries(PINNED_INSERT_SETTINGS)
-      .filter(([name]) => !(isDeliveryPin(name) && Object.hasOwn(effective, name)))
-      .map(([name, value]) => `${name}=${value}`),
-  )
+  parts.push(PROOF_PINS_SQL)
   return parts.join(', ')
 }
 

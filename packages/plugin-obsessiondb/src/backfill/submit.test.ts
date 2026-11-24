@@ -337,14 +337,15 @@ describe('handleSubmit insertSettings', () => {
 
 		expect(result).toEqual({ handled: true, exitCode: 0 })
 		const fixed = 'async_insert=0, asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0'
-		const pins = "allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, materialized_views_ignore_errors=0, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0, log_queries_probability=1"
+		const delivery = 'distributed_foreground_insert=0, materialized_views_ignore_errors=0'
+		const pins = "allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0, log_queries_probability=1"
 		for (const task of api.tasks) {
 			expect(task.sql).not.toContain('foreground_alias')
-			expect(task.sql).toContain(`SETTINGS distributed_foreground_insert=0, ${fixed}, `)
+			expect(task.sql).toContain(`SETTINGS ${delivery}, ${fixed}, `)
 			expect(task.sql.endsWith(`, ${pins}`)).toBe(true)
 		}
 		// Codex review r2: the preflight tries every setting the chunks run with.
-		expect(api.queries).toContain(`SELECT 1 SETTINGS distributed_foreground_insert=0, ${fixed}, insert_deduplication_token='chkit_preflight', ${pins}`)
+		expect(api.queries).toContain(`SELECT 1 SETTINGS ${delivery}, ${fixed}, insert_deduplication_token='chkit_preflight', ${pins}`)
 		expect(warnings).toEqual([
 			"Warning: insertSettings overrides what every backfill chunk INSERT sets by default: distributed_foreground_insert=0 (a chunk can be recorded done before its rows reach a Distributed table's shards).\n",
 		])

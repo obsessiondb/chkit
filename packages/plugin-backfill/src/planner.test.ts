@@ -317,7 +317,7 @@ export const events_mv = {
       expect(sql).toContain('SELECT toStartOfHour(event_time)')
       expect(sql).toContain('FROM app.events')
       expect(sql).toContain('GROUP BY event_time')
-      expect(sql).toContain('SETTINGS async_insert=0')
+      expect(sql).toContain('SETTINGS distributed_foreground_insert=1, materialized_views_ignore_errors=0, async_insert=0')
       expect(sql).not.toContain('FROM app.events_agg')
       // Single MV: no UNION ALL, output identical to prior behavior.
       expect(sql).not.toContain('UNION ALL')
@@ -442,7 +442,7 @@ export const api_mv = {
         : ''
 
       expect(output.plan.execution.requireIdempotencyToken).toBe(false)
-      expect(sql).toContain('SETTINGS async_insert=0')
+      expect(sql).toContain('SETTINGS distributed_foreground_insert=1, materialized_views_ignore_errors=0, async_insert=0')
       expect(sql).not.toContain('insert_deduplication_token')
     } finally {
       await rm(dir, { recursive: true, force: true })
@@ -771,7 +771,8 @@ describe('unprovableTargetFailures', () => {
 // (readonly = 1, a settings constraint) fails the run before it submits.
 describe('assertPinnedInsertSettingsAccepted', () => {
   const FIXED = 'async_insert=0, asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0'
-  const PINNED = `${FIXED}, allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, distributed_foreground_insert=1, materialized_views_ignore_errors=0, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0, log_queries_probability=1`
+  const PROOF = "allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0, log_queries_probability=1"
+  const PINNED = `distributed_foreground_insert=1, materialized_views_ignore_errors=0, ${FIXED}, ${PROOF}`
 
   test('reads SELECT 1 with the pinned settings', async () => {
     const reads: string[] = []
@@ -795,7 +796,7 @@ describe('assertPinnedInsertSettingsAccepted', () => {
       query: async <T>(sql: string) => { reads.push(sql); return [] as T[] },
       insertSettings: { distributed_foreground_insert: 0 },
     })
-    expect(reads).toEqual([`SELECT 1 SETTINGS distributed_foreground_insert=0, ${PINNED.replace('distributed_foreground_insert=1, ', '')}`])
+    expect(reads).toEqual([`SELECT 1 SETTINGS distributed_foreground_insert=0, materialized_views_ignore_errors=0, ${FIXED}, ${PROOF}`])
   })
 })
 
@@ -808,10 +809,11 @@ describe('assertPinnedInsertSettingsAccepted for the whole chunk INSERT', () => 
     await assertPinnedInsertSettingsAccepted({ planId: 'p1', query })
     await assertPinnedInsertSettingsAccepted({ planId: 'p1', query, insertSettings: { max_insert_threads: 2 }, cutover: true })
     const fixed = 'async_insert=0, asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0'
-    const pins = "allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, distributed_foreground_insert=1, materialized_views_ignore_errors=0, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0, log_queries_probability=1"
+    const delivery = 'distributed_foreground_insert=1, materialized_views_ignore_errors=0'
+    const pins = "allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0, log_queries_probability=1"
     expect(reads).toEqual([
-      `SELECT 1 SETTINGS ${fixed}, ${pins}`,
-      `SELECT 1 SETTINGS max_insert_threads=2, ${fixed}, insert_deduplicate=0, select_sequential_consistency=1, ${pins}`,
+      `SELECT 1 SETTINGS ${delivery}, ${fixed}, ${pins}`,
+      `SELECT 1 SETTINGS max_insert_threads=2, ${delivery}, ${fixed}, insert_deduplicate=0, select_sequential_consistency=1, ${pins}`,
     ])
   })
 })
@@ -828,7 +830,7 @@ describe('assertPinnedInsertSettingsAccepted for a token-bearing plan', () => {
       token: true,
     })
     expect(reads).toEqual([
-      "SELECT 1 SETTINGS max_insert_threads=2, async_insert=0, asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0, insert_deduplication_token='chkit_preflight', allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, distributed_foreground_insert=1, materialized_views_ignore_errors=0, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0, log_queries_probability=1",
+      "SELECT 1 SETTINGS max_insert_threads=2, distributed_foreground_insert=1, materialized_views_ignore_errors=0, async_insert=0, asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0, insert_deduplication_token='chkit_preflight', allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0, log_queries_probability=1",
     ])
   })
 })

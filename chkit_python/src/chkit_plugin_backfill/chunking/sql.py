@@ -265,21 +265,26 @@ def chunk_insert_settings_sql(
     cutover: bool = False,
 ) -> str:
     """The settings of a chunk INSERT (TS ``chunkInsertSettingsSql``), in one
-    list: the user's own first, delivery pins included, then everything chkit
-    requires, so that a later setting wins over whatever the user's set (a
-    settings profile included): the fixed settings, a cutover's, the dedup
-    token, and the pins, without the delivery ones the user sets."""
+    list, each later one winning over the earlier: the user's own settings (a
+    settings profile included), then the delivery pins, the user's value as
+    written or chkit's default, then everything chkit requires, the fixed
+    settings, a cutover's, the dedup token and the proof pins."""
     assert_insert_settings_keep_pinned(insert_settings, cutover=cutover)
     effective = effective_insert_settings(insert_settings)
-    parts = [f"{key}={_render_insert_setting_value(value)}" for key, value in effective.items()]
+    parts = [
+        f"{key}={_render_insert_setting_value(value)}"
+        for key, value in effective.items()
+        if key not in DELIVERY_PINS
+    ]
+    parts.extend(
+        f"{name}={_render_insert_setting_value(effective[name]) if name in effective else value}"
+        for name, value in PINNED_INSERT_SETTINGS.items()
+        if name in DELIVERY_PINS
+    )
     parts.extend(f"{name}={value}" for name, value in _fixed_settings(cutover=cutover).items())
     if token:
         parts.append(f"{_TOKEN_SETTING}='{token}'")
-    parts.extend(
-        f"{name}={value}"
-        for name, value in PINNED_INSERT_SETTINGS.items()
-        if not (name in DELIVERY_PINS and name in effective)
-    )
+    parts.append(_PROOF_PINS_SQL)
     return ", ".join(parts)
 
 
