@@ -368,6 +368,7 @@ def _run_backfill_locked(  # noqa: PLR0912, PLR0915 — mirrors TS runBackfill
                 query=db.query_rows,
                 insert_settings=insert_settings,
                 cutover=cutover,
+                token=plan.execution.require_idempotency_token and not cutover,
             ),
             stop,
             plan.plan_id,

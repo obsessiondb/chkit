@@ -344,7 +344,7 @@ describe('handleSubmit insertSettings', () => {
 			expect(task.sql.endsWith(`, ${pins}`)).toBe(true)
 		}
 		// Codex review r2: the preflight tries every setting the chunks run with.
-		expect(api.queries).toContain(`SELECT 1 SETTINGS distributed_foreground_insert=0, ${fixed}, ${pins}`)
+		expect(api.queries).toContain(`SELECT 1 SETTINGS distributed_foreground_insert=0, ${fixed}, insert_deduplication_token='chkit_preflight', ${pins}`)
 		expect(warnings).toEqual([
 			"Warning: insertSettings overrides what every backfill chunk INSERT sets by default: distributed_foreground_insert=0 (a chunk can be recorded done before its rows reach a Distributed table's shards).\n",
 		])

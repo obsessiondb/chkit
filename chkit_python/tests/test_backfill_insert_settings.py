@@ -9,6 +9,7 @@ live server; it hard-fails when ClickHouse is unreachable.
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -597,7 +598,8 @@ def test_handle_submit_honours_a_server_alias_of_a_delivery_pin_and_preflights_i
         assert "SETTINGS distributed_foreground_insert=0, async_insert=0, " in task.sql
         assert task.sql.endswith(f", {pins}")
     assert (
-        f"SELECT 1 SETTINGS distributed_foreground_insert=0, async_insert=0, {PINNED}, {pins}"
+        f"SELECT 1 SETTINGS distributed_foreground_insert=0, async_insert=0, {PINNED}, "
+        f"insert_deduplication_token='chkit_preflight', {pins}"
         in remote.reads
     )
     assert capsys.readouterr().err == (
@@ -757,23 +759,6 @@ def test_a_settings_profile_comes_before_every_setting_chkit_requires() -> None:
     )
 
 
-# Codex review r2: a numeric value equal to chkit's is the same value.
-def test_a_numeric_equivalent_of_a_compulsory_value_is_dropped() -> None:
-    sql = build_chunk_execution_sql(
-        plan_id="p", chunk=_chunk(), target="app.events", table=TABLE,
-        insert_settings={
-            "log_queries_probability": "1.0",
-            "log_queries": 1.0,
-            "parallel_distributed_insert_select": "0.0",
-            "async_insert": "+0",
-            "distributed_foreground_insert": "1.00",
-        },
-    )
-
-    assert _settings_line(sql) == f"SETTINGS async_insert=0, {PINNED}, {_PINNED_INSERT}"
-    assert delivery_override_warning({"distributed_foreground_insert": "1e0"}) is None
-
-
 # Codex review r2: the preflight tries every setting the chunks run with in
 # the plan's mode, the user's own first.
 def test_the_preflight_tries_every_setting_of_the_chunk_insert() -> None:
@@ -792,6 +777,82 @@ def test_the_preflight_tries_every_setting_of_the_chunk_insert() -> None:
         f"SELECT 1 SETTINGS async_insert=0, {PINNED}, {_PINNED_INSERT}",
         f"SELECT 1 SETTINGS max_insert_threads=2, async_insert=0, {PINNED}, "
         f"insert_deduplicate=0, select_sequential_consistency=1, {_PINNED_INSERT}",
+    ]
+
+
+# Codex review r3: a value equals chkit's only in the syntax ClickHouse reads
+# for that setting: plain ASCII digits (or true/false) for the Bool and UInt
+# settings, plain ASCII decimals for the Float log_queries_probability.
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"log_queries_probability": "1.00"},
+        {"log_queries_probability": 1},
+        {"log_queries": "1"},
+        {"log_queries": True},
+        {"async_insert": 0},
+        {"async_insert": False},
+        {"parallel_distributed_insert_select": "0"},
+    ],
+)
+def test_a_value_in_the_settings_own_syntax_equals_chkits(
+    settings: dict[str, str | int | bool],
+) -> None:
+    sql = build_chunk_execution_sql(
+        plan_id="p", chunk=_chunk(), target="app.events", table=TABLE, insert_settings=settings
+    )
+
+    assert _settings_line(sql) == f"SETTINGS async_insert=0, {PINNED}, {_PINNED_INSERT}"
+
+
+@pytest.mark.parametrize(
+    ("settings", "named"),
+    [
+        ({"parallel_distributed_insert_select": "0e0"}, "parallel_distributed_insert_select='0e0'"),
+        ({"log_queries": "1.0000000000000001"}, "log_queries='1.0000000000000001'"),
+        ({"log_queries": "\u0661"}, "log_queries='\u0661'"),
+        ({"log_queries": "+1"}, "log_queries='+1'"),
+        ({"log_queries_probability": "1e0"}, "log_queries_probability='1e0'"),
+        ({"log_queries_probability": "+1.0"}, "log_queries_probability='+1.0'"),
+    ],
+)
+def test_a_value_outside_the_settings_own_syntax_is_another_value(
+    settings: dict[str, str | int | bool], named: str
+) -> None:
+    with pytest.raises(BackfillConfigError, match=f"^insertSettings sets {re.escape(named)}, which"):
+        build_chunk_execution_sql(
+            plan_id="p", chunk=_chunk(), target="app.events", table=TABLE,
+            insert_settings=settings,
+        )
+
+
+def test_a_fixed_setting_outside_its_syntax_is_refused_and_a_delivery_one_kept() -> None:
+    with pytest.raises(BackfillConfigError, match=r"^insertSettings sets async_insert='\+0', which"):
+        build_chunk_execution_sql(
+            plan_id="p", chunk=_chunk(), target="app.events", table=TABLE,
+            insert_settings={"async_insert": "+0"},
+        )
+    assert effective_insert_settings({"distributed_foreground_insert": "1.0"}) == {
+        "distributed_foreground_insert": "1.0"
+    }
+
+
+# Codex review r3: a plan whose chunks carry a dedup token preflights one too,
+# in the same place, so a constraint on the token fails before anything runs.
+def test_the_preflight_of_a_token_bearing_plan_carries_a_token() -> None:
+    reads: list[str] = []
+
+    def query(sql: str, _settings: object = None) -> list[dict[str, object]]:
+        reads.append(sql)
+        return []
+
+    assert_pinned_insert_settings_accepted(
+        plan_id="p1", query=query, insert_settings={"max_insert_threads": 2}, token=True
+    )
+
+    assert reads == [
+        f"SELECT 1 SETTINGS max_insert_threads=2, async_insert=0, {PINNED}, "
+        f"insert_deduplication_token='chkit_preflight', {_PINNED_INSERT}"
     ]
 
 

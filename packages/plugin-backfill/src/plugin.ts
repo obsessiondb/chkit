@@ -172,7 +172,7 @@ async function runBackfillLocked(
     const warning = deliveryOverrideWarning(insertSettings)
     if (warning) process.stderr.write(`${warning}\n`)
     await untilAborted(
-      assertPinnedInsertSettingsAccepted({ planId: plan.planId, query: (sql, settings) => db.query(sql, settings), insertSettings, cutover }),
+      assertPinnedInsertSettingsAccepted({ planId: plan.planId, query: (sql, settings) => db.query(sql, settings), insertSettings, cutover, token: plan.execution.requireIdempotencyToken && !cutover }),
       signal,
       () => new BackfillInterruptedError(`Backfill plan ${plan.planId}: interrupted.`),
     )

@@ -261,7 +261,13 @@ async function checkedInsertSettings(context: SubmitContext, plan: BackfillPlanS
 	const insertSettings = effectiveInsertSettings(raw, aliases, { cutover })
 	const warning = deliveryOverrideWarning(insertSettings)
 	if (warning) process.stderr.write(`${warning}\n`)
-	await assertPinnedInsertSettingsAccepted({ planId: plan.planId, query, insertSettings, cutover })
+	await assertPinnedInsertSettingsAccepted({
+		planId: plan.planId,
+		query,
+		insertSettings,
+		cutover,
+		token: plan.execution.requireIdempotencyToken && !cutover,
+	})
 	return insertSettings
 }
 

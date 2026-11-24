@@ -57,6 +57,9 @@ _CUTOVER_INSERT_SETTINGS: dict[str, str] = {
 # Each chunk's own dedup token, which chkit writes when the plan requires one.
 _TOKEN_SETTING = "insert_deduplication_token"
 
+#: The dedup token a preflight tries in place of a chunk's (TS ``PREFLIGHT_TOKEN``).
+PREFLIGHT_TOKEN = "chkit_preflight"
+
 _JS_WS_CLASS = (
     "\\t\\n\\v\\f\\r \\u00a0\\u1680\\u2000-\\u200a"
     "\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff"
@@ -166,32 +169,45 @@ def _compulsory_name(
     return name if name in names else None
 
 
-# A decimal number as ClickHouse reads a numeric setting's value ("1.0", "+0", "1e0").
-_DECIMAL = re.compile(r"[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?")
+# How ClickHouse reads the compulsory settings that are not Bool or UInt (TS
+# ``SETTING_KINDS``): a Float, and an enum compared by name.
+_SETTING_KINDS: dict[str, str] = {
+    "log_queries_probability": "float",
+    "log_queries_min_type": "text",
+}
+
+# A plain ASCII decimal, as a Float setting reads it ("1", "1.0"); no sign or exponent.
+_ASCII_DECIMAL = re.compile(r"[0-9]+(\.[0-9]+)?")
 
 
-def _normal_text(text: str) -> str:
-    """A setting value as compared with chkit's (TS ``normalText``): unquoted,
-    lowercased, booleans as 1/0, and a number in its shortest form, so
-    ``'1.0'``, ``1`` and ``true`` are the same value."""
+def _normal_text(name: str, text: str) -> str:
+    """A value of the setting ``name`` as compared with chkit's (TS
+    ``normalText``), in the syntax ClickHouse reads for it: unquoted and
+    lowercased; for a Bool or UInt setting ``true``/``false`` are 1/0; for the
+    Float one a plain decimal drops its trailing fraction zeros (``1.00`` is
+    ``1``). Any other text stays as it is, so it differs from chkit's."""
     bare = text.strip("'").lower()
-    bare = {"true": "1", "false": "0"}.get(bare, bare)
-    return js_number_to_string(float(bare)) if _DECIMAL.fullmatch(bare) else bare
+    kind = _SETTING_KINDS.get(name, "int")
+    if kind == "int":
+        return {"true": "1", "false": "0"}.get(bare, bare)
+    if kind == "float" and _ASCII_DECIMAL.fullmatch(bare) and "." in bare:
+        return bare.rstrip("0").rstrip(".")
+    return bare
 
 
-def _normal_value(value: str | int | float | bool) -> str:
-    return _normal_text(_render_insert_setting_value(value))
+def _normal_value(name: str, value: str | int | float | bool) -> str:
+    return _normal_text(name, _render_insert_setting_value(value))
 
 
-def _same_value(value: str | int | float | bool, pinned: str) -> bool:
-    return _normal_value(value) == _normal_text(pinned)
+def _same_value(name: str, value: str | int | float | bool, pinned: str) -> bool:
+    return _normal_value(name, value) == _normal_text(name, pinned)
 
 
 def _kept_value(name: str, value: str | int | float | bool, *, cutover: bool) -> bool:
     """Whether ``value`` of the compulsory setting ``name`` is what chkit
     writes. The dedup token is per chunk, so no value is."""
     written = {**PINNED_INSERT_SETTINGS, **_fixed_settings(cutover=cutover)}.get(name)
-    return written is not None and _same_value(value, written)
+    return written is not None and _same_value(name, value, written)
 
 
 def compulsory_setting_names() -> list[str]:
@@ -261,7 +277,7 @@ def assert_insert_settings_keep_pinned(
         )
         raise BackfillConfigError(msg)
     for name, entries in seen.items():
-        if len({_normal_value(value) for _key, value in entries}) > 1:
+        if len({_normal_value(name, value) for _key, value in entries}) > 1:
             both = ", ".join(
                 f"{key}={_render_insert_setting_value(value)}" for key, value in entries
             )
@@ -286,7 +302,9 @@ def effective_insert_settings(
         name = _compulsory_name(key, aliases, cutover=cutover)
         if name is None:
             effective[key] = value
-        elif name in DELIVERY_PINS and not _same_value(value, PINNED_INSERT_SETTINGS[name]):
+        elif name in DELIVERY_PINS and not _same_value(
+            name, value, PINNED_INSERT_SETTINGS[name]
+        ):
             effective[name] = value
     return effective
 

@@ -262,16 +262,38 @@ describe('insertSettings order', () => {
     )
   })
 
-  // Codex review r2: a numeric value equal to chkit's is the same value.
-  test('a numeric equivalent of a compulsory value is dropped', () => {
-    expect(settingsLine({
-      log_queries_probability: '1.0',
-      log_queries: 1.0,
-      parallel_distributed_insert_select: '0.0',
-      async_insert: '+0',
-      distributed_foreground_insert: '1.00',
-    })).toBe(`SETTINGS async_insert=0, ${ASTERISK}, ${PINNED_INSERT_SETTINGS_SQL}`)
-    expect(deliveryOverrideWarning({ distributed_foreground_insert: '1e0' })).toBeUndefined()
+})
+
+// Codex review r3: a value equals chkit's only in the syntax ClickHouse reads
+// for that setting: plain ASCII digits (or true/false) for the Bool and UInt
+// settings, plain ASCII decimals for the Float log_queries_probability.
+describe('insertSettings value syntax', () => {
+  test.each([
+    { log_queries_probability: '1.00' },
+    { log_queries_probability: 1 },
+    { log_queries: '1' },
+    { log_queries: true },
+    { async_insert: 0 },
+    { async_insert: false },
+    { parallel_distributed_insert_select: '0' },
+  ] satisfies InsertSettings[])('a value in the setting\'s own syntax equals chkit\'s: %p', (settings) => {
+    expect(settingsLine(settings)).toBe(`SETTINGS async_insert=0, ${ASTERISK}, ${PINNED_INSERT_SETTINGS_SQL}`)
+  })
+
+  test.each([
+    [{ parallel_distributed_insert_select: '0e0' }, "parallel_distributed_insert_select='0e0'"],
+    [{ log_queries: '1.0000000000000001' }, "log_queries='1.0000000000000001'"],
+    [{ log_queries: '\u0661' }, "log_queries='\u0661'"],
+    [{ log_queries: '+1' }, "log_queries='+1'"],
+    [{ log_queries_probability: '1e0' }, "log_queries_probability='1e0'"],
+    [{ log_queries_probability: '+1.0' }, "log_queries_probability='+1.0'"],
+  ] satisfies Array<[InsertSettings, string]>)('a value outside the setting\'s own syntax is another value: %p', (settings, named) => {
+    expect(() => settingsLine(settings)).toThrow(`insertSettings sets ${named}, which`)
+  })
+
+  test('a fixed setting outside its syntax is refused, and a delivery one kept', () => {
+    expect(() => settingsLine({ async_insert: '+0' })).toThrow("insertSettings sets async_insert='+0', which")
+    expect(effectiveInsertSettings({ distributed_foreground_insert: '1.0' })).toEqual({ distributed_foreground_insert: '1.0' })
   })
 })
 

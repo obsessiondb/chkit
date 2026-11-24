@@ -50,6 +50,9 @@ const CUTOVER_INSERT_SETTINGS: Record<string, string> = {
 /** Each chunk's own dedup token, which chkit writes when the plan requires one. */
 const TOKEN_SETTING = 'insert_deduplication_token'
 
+/** The dedup token a preflight tries in place of a chunk's. */
+export const PREFLIGHT_TOKEN = 'chkit_preflight'
+
 /**
  * Settings every chunk INSERT runs with, in its own SETTINGS so they win over
  * profile defaults (#765). The INSERT never runs as secondary queries on other
@@ -159,22 +162,35 @@ function renderInsertSettingValue(value: string | number | boolean): string {
   return String(value)
 }
 
-// A decimal number as ClickHouse reads a numeric setting's value ("1.0", "+0", "1e0").
-const DECIMAL = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/
-
 /**
- * A setting value as compared with chkit's: unquoted, lowercased, booleans as
- * 1/0, and a number in its shortest form, so `'1.0'`, `1` and `true` are the
- * same value.
+ * How ClickHouse reads the compulsory settings that are not Bool or UInt: a
+ * Float, and an enum compared by name.
  */
-function normalText(text: string): string {
-  const unquoted = text.replace(/^'+|'+$/g, '').toLowerCase()
-  const bare = unquoted === 'true' ? '1' : unquoted === 'false' ? '0' : unquoted
-  return DECIMAL.test(bare) ? String(Number(bare)) : bare
+const SETTING_KINDS: Record<string, 'float' | 'text'> = {
+  log_queries_probability: 'float',
+  log_queries_min_type: 'text',
 }
 
-function sameValue(value: string | number | boolean, pinned: string): boolean {
-  return normalText(renderInsertSettingValue(value)) === normalText(pinned)
+// A plain ASCII decimal, as a Float setting reads it ("1", "1.0"); no sign or exponent.
+const ASCII_DECIMAL = /^[0-9]+(\.[0-9]+)?$/
+
+/**
+ * A value of the setting `name` as compared with chkit's, in the syntax
+ * ClickHouse reads for it: unquoted and lowercased; for a Bool or UInt
+ * setting `true`/`false` are 1/0; for the Float one a plain decimal drops its
+ * trailing fraction zeros (`1.00` is `1`). Any other text stays as it is, so
+ * it differs from chkit's.
+ */
+function normalText(name: string, text: string): string {
+  const bare = text.replace(/^'+|'+$/g, '').toLowerCase()
+  const kind = SETTING_KINDS[name] ?? 'int'
+  if (kind === 'int') return bare === 'true' ? '1' : bare === 'false' ? '0' : bare
+  if (kind === 'float' && ASCII_DECIMAL.test(bare) && bare.includes('.')) return bare.replace(/0+$/, '').replace(/\.$/, '')
+  return bare
+}
+
+function sameValue(name: string, value: string | number | boolean, pinned: string): boolean {
+  return normalText(name, renderInsertSettingValue(value)) === normalText(name, pinned)
 }
 
 /**
@@ -183,7 +199,7 @@ function sameValue(value: string | number | boolean, pinned: string): boolean {
  */
 function keptValue(name: string, value: string | number | boolean, cutover: boolean): boolean {
   const written = isPinnedSetting(name) ? PINNED_INSERT_SETTINGS[name] : fixedSettings(cutover)[name]
-  return written !== undefined && sameValue(value, written)
+  return written !== undefined && sameValue(name, value, written)
 }
 
 /**
@@ -234,7 +250,7 @@ export function assertInsertSettingsKeepPinned(
   }
   for (const name of new Set(compulsory.map((entry) => entry.name))) {
     const same = compulsory.filter((entry) => entry.name === name)
-    if (new Set(same.map(({ value }) => normalText(renderInsertSettingValue(value)))).size > 1) {
+    if (new Set(same.map(({ value }) => normalText(name, renderInsertSettingValue(value)))).size > 1) {
       throw new BackfillConfigError(
         `insertSettings sets ${name} more than once, with different values (${same.map(({ key, value }) => `${key}=${renderInsertSettingValue(value)}`).join(', ')}). Keep one of them.`,
       )
@@ -256,7 +272,7 @@ export function effectiveInsertSettings(
   for (const [key, value] of Object.entries(insertSettings ?? {})) {
     const name = compulsoryName(key, aliases, options.cutover ?? false)
     if (name === undefined) effective[key] = value
-    else if (isPinnedSetting(name) && isDeliveryPin(name) && !sameValue(value, PINNED_INSERT_SETTINGS[name])) effective[name] = value
+    else if (isPinnedSetting(name) && isDeliveryPin(name) && !sameValue(name, value, PINNED_INSERT_SETTINGS[name])) effective[name] = value
   }
   return effective
 }

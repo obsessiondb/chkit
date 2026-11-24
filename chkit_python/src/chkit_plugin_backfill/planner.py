@@ -17,7 +17,11 @@ from chkit_plugin_backfill.chunking.boundary_codec import (
     encode_chunk_plan_for_persistence,
 )
 from chkit_plugin_backfill.chunking.planner import generate_chunk_plan
-from chkit_plugin_backfill.chunking.sql import chunk_insert_settings_sql, compulsory_setting_names
+from chkit_plugin_backfill.chunking.sql import (
+    PREFLIGHT_TOKEN,
+    chunk_insert_settings_sql,
+    compulsory_setting_names,
+)
 from chkit_plugin_backfill.chunking.types import (
     GenerateChunkPlanInput,
     PlannerQuery,
@@ -116,12 +120,16 @@ def assert_pinned_insert_settings_accepted(
     query: PlannerQuery,
     insert_settings: Mapping[str, str | int | float | bool] | None = None,
     cutover: bool = False,
+    token: bool = False,
 ) -> None:
     """Fail before anything is submitted when the server would refuse the
     settings every chunk INSERT runs with in the plan's mode
-    (``chunk_insert_settings_sql``, the per-chunk dedup token aside): a user
-    with ``readonly = 1``, or a settings constraint on one of them."""
-    settings = chunk_insert_settings_sql(insert_settings, cutover=cutover)
+    (``chunk_insert_settings_sql``, with a placeholder dedup token where the
+    chunks carry one): a user with ``readonly = 1``, or a settings constraint
+    on one of them."""
+    settings = chunk_insert_settings_sql(
+        insert_settings, cutover=cutover, token=PREFLIGHT_TOKEN if token else ""
+    )
     try:
         query(f"SELECT 1 SETTINGS {settings}", None)
     except Exception as error:

@@ -816,6 +816,23 @@ describe('assertPinnedInsertSettingsAccepted for the whole chunk INSERT', () => 
   })
 })
 
+// Codex review r3: a plan whose chunks carry a dedup token preflights one too,
+// in the same place, so a constraint on the token fails before anything runs.
+describe('assertPinnedInsertSettingsAccepted for a token-bearing plan', () => {
+  test('carries a placeholder token where the chunks carry theirs', async () => {
+    const reads: string[] = []
+    await assertPinnedInsertSettingsAccepted({
+      planId: 'p1',
+      query: async <T>(sql: string) => { reads.push(sql); return [] as T[] },
+      insertSettings: { max_insert_threads: 2 },
+      token: true,
+    })
+    expect(reads).toEqual([
+      "SELECT 1 SETTINGS max_insert_threads=2, async_insert=0, asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0, insert_deduplication_token='chkit_preflight', allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, distributed_foreground_insert=1, materialized_views_ignore_errors=0, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0, log_queries_probability=1",
+    ])
+  })
+})
+
 describe('readPinnedSettingAliases', () => {
   test('reads the aliases from system.settings.alias_for', async () => {
     const reads: string[] = []
