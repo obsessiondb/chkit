@@ -536,7 +536,7 @@ of ``getRequiredEnv``, ``quoteIdent``, ``createRunTag``, ``createPrefix``,
 ``createJournalTableName``) so any package depending on
 ``@chkit/clickhouse`` can import it. The Python equivalent lives at
 ``tests/conftest.py`` (per-package fixtures) and the obsessiondb plugin's
-``e2e-testkit.ts`` pattern was already noted in the project CLAUDE.md as
+``e2e-testkit.ts`` pattern was already noted in the project AGENTS.md as
 having a "thinner version in tests/conftest.py".
 
 ~~Key intentional difference: **Python defaults to localhost Docker** when

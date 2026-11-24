@@ -667,6 +667,13 @@ def test_order_ignores_prerequisites_not_in_the_list() -> None:
     assert order_by_dependencies(["a", "b"], lambda x: x, lambda _: ["zzz"]) == ["a", "b"]
 
 
+def test_order_keeps_a_50000_item_cycle_in_input_order_without_recursion_error() -> None:
+    # Item i needs i+1 and the last item needs 0: the search walks all 50,000 before it returns.
+    n = 50_000
+    items = list(range(n))
+    assert order_by_dependencies(items, str, lambda key: [str((int(key) + 1) % n)]) == items
+
+
 # ---------- ADD COLUMN order by the columns an expression reads (#681) ----------
 
 
@@ -823,6 +830,17 @@ def test_drops_a_column_after_the_dropped_column_whose_expression_reads_it() -> 
     ]
 
 
+def test_drops_a_3000_column_alias_chain_from_the_last_column_to_the_first() -> None:
+    n = 3000
+    columns: list[dict[str, Any]] = [{"name": "c0", "type": "UInt64"}] + [
+        {"name": f"c{i}", "type": "UInt64", "default_kind": "ALIAS", "default": _expr(f"c{i - 1} + 1")}
+        for i in range(1, n)
+    ]
+    assert _sqls([_t(columns)], [_t([])]) == [
+        f"ALTER TABLE app.t DROP COLUMN IF EXISTS `c{i}`;" for i in reversed(range(n))
+    ]
+
+
 def test_a_function_call_named_like_a_column_is_not_a_read() -> None:
     assert _sqls(
         [_t([{"name": "length", "type": "UInt64"}])],
@@ -850,6 +868,73 @@ def test_a_lambda_parameter_named_like_a_column_is_not_a_read() -> None:
         "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT arraySum(arrayMap(c -> c, [1]));",
         "ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT a;",
         "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `c` UInt64 DEFAULT id;",
+    ]
+
+
+# ALTER's check for cyclic defaults counts a lambda parameter named like a
+# column as a read of it, so MODIFY `a` DEFAULT b first met the old `b`
+# DEFAULT that declares `a`: Cyclic alias detected (#799).
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "arraySum(arrayMap(a -> 1, [1]))",
+        "arraySum(arrayMap((x, a) -> x, [1], [2]))",
+        "arraySum(arrayMap(lambda(tuple(a), 1), [1]))",
+    ],
+)
+def test_an_old_lambda_parameter_named_like_a_column_holds_back_the_modify_that_reads_back(
+    expression: str,
+) -> None:
+    assert _sqls(
+        [_t([{"name": "a", "type": "UInt64"}, {"name": "b", "type": "UInt64", "default": _expr(expression)}])],
+        [_t([{"name": "a", "type": "UInt64", "default": _expr("b")}, {"name": "b", "type": "UInt64"}])],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `b` REMOVE DEFAULT;",
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64;",
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;",
+    ]
+
+
+def test_a_new_lambda_parameter_named_like_a_column_waits_for_the_release_of_its_old_read_back() -> None:
+    assert _sqls(
+        [_t([{"name": "a", "type": "UInt64"}, {"name": "b", "type": "UInt64", "default": _expr("a")}])],
+        [_t([
+            {"name": "a", "type": "UInt64", "default": _expr("arraySum(arrayMap(b -> 1, [1]))")},
+            {"name": "b", "type": "UInt64"},
+        ])],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `b` REMOVE DEFAULT;",
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64;",
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT arraySum(arrayMap(b -> 1, [1]));",
+    ]
+
+
+def test_a_lambda_parameter_use_reads_the_dotted_column_it_names() -> None:
+    assert _sqls(
+        [_t([
+            {"name": "w.z", "type": "UInt64"},
+            {"name": "b", "type": "UInt64", "default": _expr("arraySum(arrayMap(w -> w.z, [tuple(1)::Tuple(z UInt64)]))")},
+        ])],
+        [_t([{"name": "w.z", "type": "UInt64", "default": _expr("b")}, {"name": "b", "type": "UInt64"}])],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `b` REMOVE DEFAULT;",
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64;",
+        "ALTER TABLE app.t MODIFY COLUMN `w.z` UInt64 DEFAULT b;",
+    ]
+
+
+# ALTER's cycle check reads `w.a` as the column `w.a` or `w`, never `a`, so
+# the new `b` no longer reads `a` and its MODIFY releases the cycle (#799).
+def test_a_lambda_parameter_use_does_not_read_the_column_named_by_its_last_part() -> None:
+    assert _sqls(
+        [_t([{"name": "a", "type": "UInt64"}, {"name": "b", "type": "UInt64", "default": _expr("a")}])],
+        [_t([
+            {"name": "a", "type": "UInt64", "default": _expr("b")},
+            {"name": "b", "type": "UInt64", "default": _expr("arraySum(arrayMap(w -> w.a, [tuple(1)::Tuple(a UInt64)]))")},
+        ])],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT arraySum(arrayMap(w -> w.a, [tuple(1)::Tuple(a UInt64)]));",
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;",
     ]
 
 

@@ -39,6 +39,7 @@ dev = [
     "pytest>=8.3",
     "pytest-cov>=6.0",
     "pytest-httpx>=0.30",
+    "pytest-timeout>=2.4",
     "pytest-xdist>=3.6",
 ]
 publish = [
@@ -148,6 +149,8 @@ title_format = "## {version} — {project_date}"
 [tool.towncrier.fragment.fixed]
 
 [tool.pytest.ini_options]
+timeout = 600
+timeout_method = "thread"
 minversion = "8.0"
 addopts = "-ra --strict-markers --strict-config"
 testpaths = ["tests"]

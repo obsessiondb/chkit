@@ -125,28 +125,6 @@ describe('acquireRunLock (#765)', () => {
     await rm(join(runsDir, '..'), { recursive: true, force: true })
   })
 
-  test('one of several processes racing for the lock gets it', async () => {
-    const runsDir = await tempRunsDir()
-    const lockPath = runLockPath(runsDir, PLAN_ID)
-    const script = `
-      const { acquireRunLock } = await import(${JSON.stringify(RUN_LOCK_MODULE)})
-      try {
-        const lock = await acquireRunLock(${JSON.stringify(lockPath)}, ${JSON.stringify(PLAN_ID)})
-        console.log('acquired')
-        await new Promise((resolve) => setTimeout(resolve, 1000))
-        await lock.release()
-      } catch (error) {
-        console.log(error.message.includes('is locked by another run') ? 'busy' : error.message)
-      }
-    `
-
-    const results = await Promise.all(Array.from({ length: 6 }, () => runScript(script)))
-
-    const outcomes = results.map((result) => result.stdout.trim()).sort()
-    expect(outcomes).toEqual(['acquired', 'busy', 'busy', 'busy', 'busy', 'busy'])
-    expect(await readdir(runsDir)).toEqual([])
-    await rm(join(runsDir, '..'), { recursive: true, force: true })
-  }, 30_000)
 })
 
 describe('withRunLock on SIGINT (#765)', () => {
@@ -380,6 +358,58 @@ const runtimes = [
     },
   },
 ]
+
+for (const runtime of runtimes) {
+  test(`${runtime.name}: one of several processes racing for the lock gets it`, async () => {
+    const runsDir = await tempRunsDir()
+    const lockPath = runLockPath(runsDir, PLAN_ID)
+    const releasePath = join(runsDir, '..', 'release')
+    const script = `
+      const { existsSync } = await import('node:fs')
+      const { acquireRunLock } = await import(${JSON.stringify(runtime.modules.runLock)})
+      try {
+        const lock = await acquireRunLock(${JSON.stringify(lockPath)}, ${JSON.stringify(PLAN_ID)})
+        console.log('acquired')
+        while (!existsSync(${JSON.stringify(releasePath)})) {
+          await new Promise((resolve) => setTimeout(resolve, 10))
+        }
+        await lock.release()
+      } catch (error) {
+        console.log(error.message.includes('is locked by another run') ? 'busy' : error.message)
+      }
+    `
+    const runs = Array.from({ length: 6 }, () => {
+      const child = spawn(runtime.command, runtime.args(script), { stdio: ['ignore', 'pipe', 'pipe'] })
+      let stdout = ''
+      let stderr = ''
+      child.stderr.on('data', (chunk) => { stderr += String(chunk) })
+      const outcome = new Promise<string>((resolve, reject) => {
+        child.stdout.on('data', (chunk) => {
+          stdout += String(chunk)
+          if (stdout.includes('\n')) resolve(stdout.trim())
+        })
+        child.on('error', reject)
+        child.on('close', () => reject(new Error(`Lock contender exited before reporting: ${stderr}`)))
+      })
+      const exited = new Promise<number | null>((resolve) => child.on('close', resolve))
+      return { child, outcome, exited, stderr: () => stderr }
+    })
+    const timeout = setTimeout(() => {
+      for (const run of runs) run.child.kill('SIGKILL')
+    }, 25_000)
+    try {
+      const outcomes = await Promise.all(runs.map((run) => run.outcome))
+      expect(outcomes.sort()).toEqual(['acquired', 'busy', 'busy', 'busy', 'busy', 'busy'])
+    } finally {
+      await writeFile(releasePath, '')
+      const codes = await Promise.all(runs.map((run) => run.exited))
+      clearTimeout(timeout)
+      for (const [index, code] of codes.entries()) expect(code, runs[index]?.stderr()).toBe(0)
+    }
+    expect(await readdir(runsDir)).toEqual([])
+    await rm(join(runsDir, '..'), { recursive: true, force: true })
+  }, 30_000)
+}
 
 // Round 6: at a one-connection cap, with the first INSERT held open, the
 // second waits in chkit's send queue. An interrupt, either while it waits or

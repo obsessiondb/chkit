@@ -22,10 +22,19 @@ const REQUIRED_COLUMNS = [BATCH_ID_COLUMN, RUN_ID_COLUMN, INGESTED_AT_COLUMN]
 /** The budget arms a timer, whose delay cannot exceed a signed 32-bit millisecond count. */
 const MAX_DURATION_SECONDS = Math.floor(MAX_DURATION_MS / 1000)
 
+const RetryOptionsSchema = z.strictObject({
+  retries: z.number().int().nonnegative().optional(),
+  minTimeout: z.number().nonnegative().max(MAX_DURATION_MS).optional(),
+  maxTimeout: z.number().nonnegative().max(MAX_DURATION_MS).optional(),
+  randomize: z.boolean().optional(),
+  maxRetryTime: z.number().nonnegative().optional(),
+})
+
 const IngestOptionsSchema = z.object({
   journalTable: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'must be a table name of letters, digits and underscores').default(DEFAULT_JOURNAL_TABLE),
   /** Host-default execution budget in seconds. */
   maxDurationSeconds: z.number().positive().max(MAX_DURATION_SECONDS).default(3600),
+  retry: RetryOptionsSchema.optional(),
   prefetchBatches: z.number().int().positive().default(1),
 })
 type IngestOptions = z.infer<typeof IngestOptionsSchema>
@@ -41,6 +50,7 @@ const RUN_FLAGS = defineFlags([
   { name: '--backfill', type: 'string', description: 'Stable backfill id; uses an isolated checkpoint namespace', placeholder: '<id>' },
   { name: '--from', type: 'string', description: 'Backfill range lower bound (ISO timestamp)', placeholder: '<timestamp>' },
   { name: '--to', type: 'string', description: 'Backfill range upper bound (ISO timestamp)', placeholder: '<timestamp>' },
+  { name: '--retries', type: 'string', description: 'Retries after each initial source attempt (non-negative safe integer; overrides plugin count, default 5; 0 disables retries)', placeholder: '<count>' },
   { name: '--max-duration', type: 'string', description: 'Execution budget in seconds', placeholder: '<seconds>' },
 ] as const)
 
@@ -91,6 +101,7 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
           command: 'run',
           label: 'Ingest run',
           fn: async (context) => {
+            const retries = parseRetries(context.flags['--retries'])
             const selected = await loadSelection(context)
             const backfill = parseBackfill(context.flags)
             const maxDurationSeconds = parseMaxDuration(context.flags['--max-duration']) ?? context.options.maxDurationSeconds
@@ -115,6 +126,7 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
                   signal: abort.signal,
                   maxDurationMs: maxDurationSeconds * 1000,
                   prefetchBatches: context.options.prefetchBatches,
+                  retry: { ...context.options.retry, ...(retries === undefined ? {} : { retries }) },
                   log: context.jsonMode ? undefined : (message) => context.print(message),
                 }
               )
@@ -407,6 +419,14 @@ function parseTimestamp(raw: string | string[] | boolean | undefined, flag: stri
   const date = new Date(raw)
   if (Number.isNaN(date.getTime())) throw new IngestConfigError(`Invalid timestamp for ${flag}: ${raw}`)
   return date
+}
+
+function parseRetries(raw: string | string[] | boolean | undefined): number | undefined {
+  if (raw === undefined) return undefined
+  if (typeof raw !== 'string' || !/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
+    throw new IngestConfigError(`Invalid value for --retries: ${raw}. Use a non-negative safe integer (0 disables retries).`)
+  }
+  return Number(raw)
 }
 
 function parseMaxDuration(raw: string | string[] | boolean | undefined): number | undefined {

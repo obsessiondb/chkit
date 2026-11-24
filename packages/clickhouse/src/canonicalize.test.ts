@@ -240,3 +240,25 @@ describe('canonicalizeSqlFragments', () => {
     )
   })
 })
+
+test('unavailable storage analysis retains both formatted sides of a mismatch', async () => {
+  const expected = 'WITH c AS (SELECT 1 AS x) SELECT x FROM c UNION ALL SELECT x FROM c'
+  const actual = 'WITH c AS (SELECT 1 AS x) SELECT x FROM c UNION ALL WITH c AS (SELECT 1 AS x) SELECT x FROM c'
+  let attempts = 0
+  const executor = fakeExecutor([expected, actual], {})
+  const query = executor.query.bind(executor)
+  executor.query = async <T>(sql: string): Promise<T[]> => {
+    if (sql.startsWith('EXPLAIN')) {
+      attempts += 1
+      throw new Error('analysis unavailable')
+    }
+    return query<T>(sql)
+  }
+  const map = await canonicalizeSqlFragments(executor, [expected, actual], {
+    wrap: false, storedQueryPairs: [[expected, actual]],
+  })
+  expect(attempts).toBe(2)
+  expect(map.get(expected)).toBe(expected)
+  expect(map.get(actual)).toBe(actual)
+  expect(map.get(expected)).not.toBe(map.get(actual))
+})
