@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-import { createStatelessLiveExecutor, createPrefix, getLiveEnv, quoteIdent, waitForTable } from '@chkit/clickhouse/e2e-testkit'
+import { createStatelessLiveExecutor, createPrefix, getLiveEnv, pollUntil, quoteIdent, waitForTable } from '@chkit/clickhouse/e2e-testkit'
 import { createClickHouseDestination, runIngestion, selectStreams } from '@chkit/plugin-ingest'
 import { createMemoryJournal } from '@chkit/plugin-ingest/testing'
 
@@ -98,26 +98,36 @@ describe.serial('built Slack template installed into a consumer', () => {
       expect(result.ok, JSON.stringify(result)).toBe(true)
     }
     const table = (resource: string) => `${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(`${prefix}_${resource}_raw`)}`
-    const rawMessages = await executor.query<{ id: string; text: string; channel_id: string }>(
-      `SELECT id, JSONExtractString(toJSONString(raw), 'data', 'text') AS text, JSONExtractString(toJSONString(raw), 'channel_id') AS channel_id FROM ${table('messages')} FINAL ORDER BY id`,
-    )
-    expect(rawMessages).toEqual([
+    const expectedMessages = [
       { id: JSON.stringify(['slack.primary', 'messages', 'T1', 'C1', parentMessage.ts]), text: 'Edited observation', channel_id: 'C1' },
       { id: JSON.stringify(['slack.primary', 'messages', 'T1', 'C1', replyMessage.ts]), text: replyMessage.text, channel_id: 'C1' },
       { id: JSON.stringify(['slack.primary', 'messages', 'T1', 'C1', standaloneMessage.ts]), text: standaloneMessage.text, channel_id: 'C1' },
-    ])
+    ]
+    const rawMessages = await pollUntil(
+      () => executor.query<{ id: string; text: string; channel_id: string }>(
+        `SELECT id, JSONExtractString(toJSONString(raw), 'data', 'text') AS text, JSONExtractString(toJSONString(raw), 'channel_id') AS channel_id FROM ${table('messages')} FINAL ORDER BY id`,
+      ),
+      (rows) => JSON.stringify(rows) === JSON.stringify(expectedMessages),
+    )
+    expect(rawMessages).toEqual(expectedMessages)
     const nested = await executor.query<{ blocks: string; files: string; reactions: string }>(
       `SELECT JSONExtractRaw(toJSONString(raw), 'data', 'blocks') AS blocks, JSONExtractRaw(toJSONString(raw), 'data', 'files') AS files, JSONExtractRaw(toJSONString(raw), 'data', 'reactions') AS reactions FROM ${table('messages')} FINAL WHERE id = '${JSON.stringify(['slack.primary', 'messages', 'T1', 'C1', parentMessage.ts])}'`,
     )
     expect(JSON.parse(nested[0]?.blocks ?? 'null')).toEqual(parentMessage.blocks)
     expect(JSON.parse(nested[0]?.files ?? 'null')).toEqual(parentMessage.files)
     expect(JSON.parse(nested[0]?.reactions ?? 'null')).toEqual(parentMessage.reactions)
-    const rawUsers = await executor.query<{ id: string; value: string }>(
-      `SELECT id, JSONExtractString(toJSONString(raw), 'data', 'profile', 'fields', 'custom_field', 'value') AS value FROM ${table('users')} FINAL ORDER BY id`,
+    const rawUsers = await pollUntil(
+      () => executor.query<{ id: string; value: string }>(
+        `SELECT id, JSONExtractString(toJSONString(raw), 'data', 'profile', 'fields', 'custom_field', 'value') AS value FROM ${table('users')} FINAL ORDER BY id`,
+      ),
+      (rows) => rows.find((row) => row.id.includes(user.id))?.value === 'retained',
     )
     expect(rawUsers.find((row) => row.id.includes(user.id))?.value).toBe('retained')
-    const rawChannels = await executor.query<{ name: string }>(
-      `SELECT JSONExtractString(toJSONString(raw), 'data', 'name') AS name FROM ${table('channels')} FINAL`,
+    const rawChannels = await pollUntil(
+      () => executor.query<{ name: string }>(
+        `SELECT JSONExtractString(toJSONString(raw), 'data', 'name') AS name FROM ${table('channels')} FINAL`,
+      ),
+      (rows) => rows.length === 1 && rows[0]?.name === channel.name,
     )
     expect(rawChannels).toEqual([{ name: channel.name }])
     const preserved = await executor.query<{ id: string }>(`SELECT id FROM ${existingTable}`)
