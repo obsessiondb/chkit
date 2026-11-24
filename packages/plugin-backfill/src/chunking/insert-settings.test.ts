@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 
-import { PluginConfigSchema, ResumeSchema, RunSchema } from '../options.js'
+import { withFactoryDefaults } from '@chkit/core'
+
+import { insertSettingsFromOptions, PluginConfigSchema, ResumeSchema, RunSchema } from '../options.js'
 import {
   assertInsertSettingsKeepPinned,
   buildChunkExecutionSql,
@@ -22,7 +24,7 @@ const chunk: Chunk = {
   analysis: { lineage: [] },
 }
 const ASTERISK = 'asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0'
-const PROOF_PINS = "allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0"
+const PROOF_PINS = "allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0, log_queries_probability=1"
 const FOREGROUND_GUARANTEE = "a chunk can be recorded done before its rows reach a Distributed table's shards"
 const VIEWS_GUARANTEE = "a materialized view's failed write is dropped and the chunk is still recorded done"
 
@@ -176,15 +178,77 @@ describe('insertSettings delivery pins', () => {
   })
 })
 
-describe('insertSettings options', () => {
-  test('backfill({ insertSettings }) reaches run and resume', () => {
-    const insertSettings = { max_insert_threads: 4, log_comment: 'x', flag: true }
-    expect(PluginConfigSchema.parse({ insertSettings }).insertSettings).toEqual(insertSettings)
-    expect(RunSchema.parse({ planId: 'p', insertSettings }).insertSettings).toEqual(insertSettings)
-    expect(ResumeSchema.parse({ planId: 'p', insertSettings }).insertSettings).toEqual(insertSettings)
+// Codex review: settings chkit writes itself on a chunk INSERT, besides the
+// pins, cannot be changed either: the per-chunk dedup token, synchronous
+// inserts, SELECT * expansion, and a cutover's dedup and consistent reads.
+describe('insertSettings fixed settings', () => {
+  const FIXED = 'async_insert=0, asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0'
+  const cutoverSql = (insertSettings: InsertSettings) => buildChunkExecutionSql({
+    planId: 'p',
+    chunk,
+    target: 'app.events_shadow',
+    sourceTarget: 'app.events',
+    table: { sortKeys: [] },
+    targetColumns: ['id'],
+    cutoverKey: ['id'],
+    insertSettings,
   })
 
-  test('a value that is not a string, number or boolean is refused', () => {
-    expect(PluginConfigSchema.safeParse({ insertSettings: { max_insert_threads: [1, 2] } }).success).toBe(false)
+  test.each([
+    [{ insert_deduplication_token: 'shared' }, "insert_deduplication_token='shared'"],
+    [{ async_insert: 1 }, 'async_insert=1'],
+    [{ asterisk_include_alias_columns: true }, 'asterisk_include_alias_columns=true'],
+  ] satisfies Array<[InsertSettings, string]>)('a setting chkit writes itself is refused: %p', (settings, named) => {
+    expect(() => settingsLine(settings, 'tok')).toThrow(
+      `insertSettings sets ${named}, which chkit sets itself on every backfill chunk INSERT (${FIXED}, insert_deduplication_token per chunk): another value could drop, duplicate or delay a chunk's rows. Remove them from insertSettings.`,
+    )
+  })
+
+  test.each([
+    [{ select_sequential_consistency: 0 }, 'select_sequential_consistency=0'],
+    [{ insert_deduplicate: 1 }, 'insert_deduplicate=1'],
+  ] satisfies Array<[InsertSettings, string]>)('a setting a cutover copy writes itself is refused: %p', (settings, named) => {
+    expect(() => cutoverSql(settings)).toThrow(
+      `insertSettings sets ${named}, which chkit sets itself on every backfill chunk INSERT (${FIXED}, insert_deduplicate=0, select_sequential_consistency=1, insert_deduplication_token per chunk): another value could drop, duplicate or delay a chunk's rows. Remove them from insertSettings.`,
+    )
+  })
+
+  test('one with its value is dropped', () => {
+    // insert_deduplicate is the user's own outside a cutover copy.
+    expect(settingsLine({ async_insert: 0, insert_deduplicate: 1, max_insert_threads: 2 })).toBe(
+      `SETTINGS async_insert=0, ${ASTERISK}, insert_deduplicate=1, max_insert_threads=2, ${PINNED_INSERT_SETTINGS_SQL}`,
+    )
+    expect(cutoverSql({ select_sequential_consistency: true, insert_deduplicate: 0 }).split('\n').at(-1)).toBe(
+      `SETTINGS async_insert=0, ${ASTERISK}, insert_deduplicate=0, select_sequential_consistency=1, ${PINNED_INSERT_SETTINGS_SQL}`,
+    )
+  })
+
+  // Codex review: log_queries_probability = 0 would keep a chunk out of
+  // system.query_log, so it is a proof pin too.
+  test('log_queries_probability is a proof pin', () => {
+    expect(PINNED_INSERT_SETTINGS_SQL).toContain('log_queries_probability=1')
+    expect(() => settingsLine({ log_queries_probability: 0 })).toThrow('insertSettings sets log_queries_probability=0, which every')
+  })
+})
+
+describe('insertSettings options', () => {
+  const insertSettings = { max_insert_threads: 4, log_comment: 'x', flag: true }
+
+  test('come from the plugin options, factory or registration, never from a command', () => {
+    expect(PluginConfigSchema.parse({ insertSettings }).insertSettings).toEqual(insertSettings)
+    expect(insertSettingsFromOptions(withFactoryDefaults(PluginConfigSchema, { insertSettings }).safeParse({}))).toEqual(insertSettings)
+    expect(insertSettingsFromOptions(withFactoryDefaults(PluginConfigSchema, {}).safeParse({ insertSettings }))).toEqual(insertSettings)
+    // Codex review: as in chkit-py, run and resume take no insertSettings of their own.
+    expect(RunSchema.parse({ planId: 'p', insertSettings })).not.toHaveProperty('insertSettings')
+    expect(ResumeSchema.parse({ planId: 'p', insertSettings })).not.toHaveProperty('insertSettings')
+  })
+
+  test.each([
+    ['a list', { max_insert_threads: [1, 2] }],
+    ['NaN', { max_insert_threads: Number.NaN }],
+  ])('a value that is %s stops the command', (_label, invalid) => {
+    expect(() => insertSettingsFromOptions(withFactoryDefaults(PluginConfigSchema, { insertSettings: invalid }).safeParse({}))).toThrow(
+      /^Invalid backfill options: insertSettings\.max_insert_threads: /,
+    )
   })
 })

@@ -17,7 +17,7 @@ from chkit_plugin_backfill.chunking.boundary_codec import (
     encode_chunk_plan_for_persistence,
 )
 from chkit_plugin_backfill.chunking.planner import generate_chunk_plan
-from chkit_plugin_backfill.chunking.sql import PINNED_INSERT_SETTINGS, pinned_insert_settings_sql
+from chkit_plugin_backfill.chunking.sql import compulsory_setting_names, pinned_insert_settings_sql
 from chkit_plugin_backfill.chunking.types import (
     GenerateChunkPlanInput,
     PlannerQuery,
@@ -133,10 +133,11 @@ def assert_pinned_insert_settings_accepted(
 
 
 def read_pinned_setting_aliases(query: PlannerQuery) -> dict[str, str]:
-    """The server's other names of the pinned settings, from
-    ``system.settings.alias_for``. A server without that column, or a read
-    that fails, gives none: ``PINNED_SETTING_ALIASES`` still applies."""
-    names = ", ".join(f"'{name}'" for name in PINNED_INSERT_SETTINGS)
+    """The server's other names of the settings chkit writes on a chunk INSERT
+    (``compulsory_setting_names``), from ``system.settings.alias_for``. A
+    server without that column, or a read that fails, gives none:
+    ``PINNED_SETTING_ALIASES`` still applies."""
+    names = ", ".join(f"'{name}'" for name in compulsory_setting_names())
     try:
         rows = query(
             f"SELECT name, alias_for FROM system.settings WHERE alias_for IN ({names})", None

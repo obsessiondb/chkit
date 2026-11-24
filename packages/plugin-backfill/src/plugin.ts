@@ -7,6 +7,7 @@ import { generateIdempotencyToken } from './chunking/utils/ids.js'
 import { BackfillConfigError } from './errors.js'
 import {
   CheckSchema,
+  insertSettingsFromOptions,
   PLAN_FLAGS,
   PLAN_FLAG_MAP,
   PLAN_ID_FLAGS,
@@ -99,9 +100,10 @@ async function runBackfillLocked(
   paths: ReturnType<typeof backfillPaths>,
   signal: AbortSignal,
 ): Promise<number> {
-  // insertSettings that would undo the INSERT's proof pins are refused before
-  // anything is read or submitted.
-  assertInsertSettingsKeepPinned(input.insertSettings)
+  // insertSettings that would undo what chkit writes on the INSERT are
+  // refused before anything is read or submitted.
+  const cutover = Boolean(plan.execution.cutoverKey?.length && plan.execution.targetColumns?.length)
+  assertInsertSettingsKeepPinned(input.insertSettings, undefined, { cutover })
   // Check for existing run state
   const existingRun = await readRun(paths.runPath)
 
@@ -165,8 +167,8 @@ async function runBackfillLocked(
       signal,
       () => new BackfillInterruptedError(`Backfill plan ${plan.planId}: interrupted.`),
     )
-    assertInsertSettingsKeepPinned(input.insertSettings, aliases)
-    const insertSettings = effectiveInsertSettings(input.insertSettings, aliases)
+    assertInsertSettingsKeepPinned(input.insertSettings, aliases, { cutover })
+    const insertSettings = effectiveInsertSettings(input.insertSettings, aliases, { cutover })
     const warning = deliveryOverrideWarning(insertSettings)
     if (warning) process.stderr.write(`${warning}\n`)
     await untilAborted(
@@ -299,13 +301,14 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
   const runOptionsSchema = withFactoryDefaults(RunSchema, factoryOptions)
   const resumeOptionsSchema = withFactoryDefaults(ResumeSchema, factoryOptions)
   const statusOptionsSchema = withFactoryDefaults(StatusSchema, factoryOptions)
+  const pluginOptionsSchema = withFactoryDefaults(PluginConfigSchema, factoryOptions)
 
   return {
     manifest: {
       name: 'backfill',
       apiVersion: 1,
     },
-    optionsSchema: withFactoryDefaults(PluginConfigSchema, factoryOptions),
+    optionsSchema: pluginOptionsSchema,
     commands: [
       {
         name: 'plan',
@@ -419,7 +422,7 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
               concurrency: opts.concurrency,
               pollIntervalMs: opts.pollIntervalMs,
               stateDir: opts.stateDir,
-              insertSettings: opts.insertSettings,
+              insertSettings: insertSettingsFromOptions(pluginOptionsSchema.safeParse(context.rawOptions)),
               configPath: context.configPath,
               config: context.config,
               clickhouse: context.config.clickhouse,
@@ -454,7 +457,7 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
               concurrency: opts.concurrency,
               pollIntervalMs: opts.pollIntervalMs,
               stateDir: opts.stateDir,
-              insertSettings: opts.insertSettings,
+              insertSettings: insertSettingsFromOptions(pluginOptionsSchema.safeParse(context.rawOptions)),
               resume: { replayFailed: opts.replayFailed, acceptUnknown: opts.acceptUnknown },
               configPath: context.configPath,
               config: context.config,

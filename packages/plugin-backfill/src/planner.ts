@@ -4,7 +4,7 @@ import { parseCutoverMetadata, type CutoverMetadata, type MaterializedViewDefini
 import { loadSchemaDefinitions } from '@chkit/core/schema-loader'
 
 import { encodeChunkPlanForPersistence } from './chunking/boundary-codec.js'
-import { type InsertSettings, PINNED_INSERT_SETTINGS, pinnedInsertSettingsSql } from './chunking/sql.js'
+import { compulsorySettingNames, type InsertSettings, pinnedInsertSettingsSql } from './chunking/sql.js'
 import { generateChunkPlan } from './chunking/planner.js'
 import { findMvsForTarget, resolveMvReplaySource } from './detect.js'
 import { BackfillConfigError } from './errors.js'
@@ -135,12 +135,13 @@ export async function assertPinnedInsertSettingsAccepted(input: {
 }
 
 /**
- * The server's other names of the pinned settings, from
- * `system.settings.alias_for`. A server without that column, or a read that
- * fails, gives none: `PINNED_SETTING_ALIASES` still applies.
+ * The server's other names of the settings chkit writes on a chunk INSERT
+ * (`compulsorySettingNames`), from `system.settings.alias_for`. A server
+ * without that column, or a read that fails, gives none:
+ * `PINNED_SETTING_ALIASES` still applies.
  */
 export async function readPinnedSettingAliases(query: ClickHouseQuery): Promise<Record<string, string>> {
-  const names = Object.keys(PINNED_INSERT_SETTINGS).map((name) => `'${name}'`).join(', ')
+  const names = compulsorySettingNames().map((name) => `'${name}'`).join(', ')
   const rows = await query<{ name?: string; alias_for?: string }>(
     `SELECT name, alias_for FROM system.settings WHERE alias_for IN (${names})`,
   ).catch(() => [])

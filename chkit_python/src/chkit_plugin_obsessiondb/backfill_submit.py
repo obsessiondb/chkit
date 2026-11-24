@@ -15,8 +15,16 @@ from dataclasses import dataclass
 from typing import Any
 
 from chkit.core.jsnum import parse_js_number
+from chkit_plugin_backfill.chunking.sql import (
+    assert_insert_settings_keep_pinned,
+    effective_insert_settings,
+)
 from chkit_plugin_backfill.chunking.types import QuerySettings
 from chkit_plugin_backfill.options import PlanOptions, PluginConfig, parse_byte_size
+from chkit_plugin_backfill.planner import (
+    assert_pinned_insert_settings_accepted,
+    read_pinned_setting_aliases,
+)
 from chkit_plugin_backfill.sdk import (
     BackfillPlanState,
     build_backfill_plan,
@@ -223,10 +231,8 @@ def handle_submit(context: SubmitContext) -> int:
         plan = prepared.plan
 
         # Same INSERT settings the local executor applies (backfill({insertSettings})).
-        tasks = build_submit_tasks(plan, plugin_options.insert_settings)
-        warning = delivery_override_warning(plugin_options.insert_settings)
-        if warning is not None:
-            sys.stderr.write(f"{warning}\n")
+        insert_settings = _checked_insert_settings(context, plan, plugin_options.insert_settings)
+        tasks = build_submit_tasks(plan, insert_settings)
         job_id = jobs_submit(
             context.credentials,
             service_slug=context.service_slug,
@@ -305,6 +311,35 @@ def handle_submit(context: SubmitContext) -> int:
         else:
             context.print(f"Backfill submit failed: {message}")
         return 1
+
+
+def _checked_insert_settings(
+    context: SubmitContext,
+    plan: BackfillPlanState,
+    insert_settings: Mapping[str, str | int | float | bool] | None,
+) -> dict[str, str | int | float | bool]:
+    """``insert_settings`` checked as a local run checks them (TS
+    ``checkedInsertSettings``): refused when they change what chkit writes
+    itself, also through an alias the server lists, normalized to the pinned
+    names, warned about when they override a delivery pin, and preflighted, so
+    the server is known to accept the settings before the job is submitted."""
+    cutover = bool(plan.execution.cutover_key and plan.execution.target_columns)
+    assert_insert_settings_keep_pinned(insert_settings, cutover=cutover)
+    executor = create_remote_executor(context.credentials, service_slug=context.service_slug)
+
+    def query(sql: str, settings: QuerySettings | None) -> list[dict[str, object]]:
+        return executor.query(sql, dict(settings) if settings is not None else None).rows
+
+    aliases = read_pinned_setting_aliases(query)
+    assert_insert_settings_keep_pinned(insert_settings, aliases, cutover=cutover)
+    effective = effective_insert_settings(insert_settings, aliases, cutover=cutover)
+    warning = delivery_override_warning(effective)
+    if warning is not None:
+        sys.stderr.write(f"{warning}\n")
+    assert_pinned_insert_settings_accepted(
+        plan_id=plan.plan_id, query=query, insert_settings=effective
+    )
+    return effective
 
 
 @dataclass(frozen=True)

@@ -3,12 +3,16 @@ import type { ResolvedChxConfig } from '@chkit/core'
 import {
 	type BackfillPlanState,
 	buildBackfillPlan,
+	assertInsertSettingsKeepPinned,
+	assertPinnedInsertSettingsAccepted,
 	buildChunkExecutionSql,
 	deliveryOverrideWarning,
+	effectiveInsertSettings,
 	generateIdempotencyToken,
 	type InsertSettings,
 	parseByteSize,
 	PlanSchema,
+	readPinnedSettingAliases,
 	recordBackfillSubmission,
 } from '@chkit/plugin-backfill/sdk'
 
@@ -17,7 +21,7 @@ import type { Credentials } from '../auth/index.js'
 import { createRemoteExecutor } from '../query/remote-executor.js'
 import { createJobsClient, type JobsClient } from './client.js'
 import { buildJobConsoleUrl } from './console-url.js'
-import { resolveBackfillPluginOptions, resolveBackfillStateDir } from './plugin-options.js'
+import { resolveBackfillInsertSettings, resolveBackfillPluginOptions, resolveBackfillStateDir } from './plugin-options.js'
 import { loadPlanForResubmit, type ReplacedJob } from './resubmit.js'
 
 interface SubmitTask {
@@ -169,10 +173,8 @@ export async function handleSubmit(
 				: await prepareNewPlan(context)
 
 		// Same INSERT settings the local executor applies (backfill({ insertSettings })).
-		const insertSettings = backfillInsertSettings(context.config.plugins)
+		const insertSettings = await checkedInsertSettings(context, plan)
 		const tasks = buildSubmitTasks(plan, insertSettings)
-		const warning = deliveryOverrideWarning(insertSettings)
-		if (warning) process.stderr.write(`${warning}\n`)
 		const { jobId } = await jobs.submit({
 			serviceSlug: context.serviceSlug,
 			type: 'backfill',
@@ -236,23 +238,31 @@ export async function handleSubmit(
 	}
 }
 
-/** The backfill plugin's `insertSettings`, or undefined when it has none. */
-function backfillInsertSettings(plugins: unknown): InsertSettings | undefined {
-	const { insertSettings } = resolveBackfillPluginOptions(plugins)
-	if (insertSettings === undefined) return undefined
-	if (!isInsertSettings(insertSettings)) {
-		throw new Error('Invalid backfill insertSettings. Expected an object of string, number or boolean values.')
-	}
+/**
+ * The backfill plugin's `insertSettings`, checked as a local run checks them
+ * (chkit-py `_checked_insert_settings`): validated strictly, refused when
+ * they change what chkit writes itself, also through an alias the server
+ * lists, normalized to the pinned names, warned about when they override a
+ * delivery pin, and preflighted, so the server is known to accept the
+ * settings before the job is submitted.
+ */
+async function checkedInsertSettings(context: SubmitContext, plan: BackfillPlanState): Promise<InsertSettings> {
+	const raw = resolveBackfillInsertSettings(context.config.plugins)
+	const cutover = Boolean(plan.execution.cutoverKey?.length && plan.execution.targetColumns?.length)
+	assertInsertSettingsKeepPinned(raw, undefined, { cutover })
+	const executor = createRemoteExecutor({
+		credentials: context.credentials,
+		serviceSlug: context.serviceSlug,
+	})
+	const query = <T>(sql: string, settings?: Record<string, string | number | boolean | undefined>) =>
+		executor.query<T>(sql, settings as ClickHouseSettings | undefined)
+	const aliases = await readPinnedSettingAliases(query)
+	assertInsertSettingsKeepPinned(raw, aliases, { cutover })
+	const insertSettings = effectiveInsertSettings(raw, aliases, { cutover })
+	const warning = deliveryOverrideWarning(insertSettings)
+	if (warning) process.stderr.write(`${warning}\n`)
+	await assertPinnedInsertSettingsAccepted({ planId: plan.planId, query, insertSettings })
 	return insertSettings
-}
-
-function isInsertSettings(value: unknown): value is InsertSettings {
-	return (
-		typeof value === 'object' &&
-		value !== null &&
-		!Array.isArray(value) &&
-		Object.values(value).every((item) => ['string', 'number', 'boolean'].includes(typeof item))
-	)
 }
 
 interface PreparedSubmission {

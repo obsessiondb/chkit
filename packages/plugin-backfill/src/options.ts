@@ -73,7 +73,8 @@ function normalizePlanId(raw: string): string {
 // ───── Plugin config schema (what backfill({...}) accepts) ─────
 
 // Extra ClickHouse settings for every chunk INSERT (e.g. max_insert_threads).
-const InsertSettingsSchema = z.record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
+// Plugin-level only, as in chkit-py: no command takes them.
+export const InsertSettingsSchema = z.record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
 
 export const PluginConfigSchema = z.object({
   maxChunkBytes: z.number().positive().optional(),
@@ -94,6 +95,27 @@ export const PluginConfigSchema = z.object({
 })
 
 export type PluginConfig = z.input<typeof PluginConfigSchema>
+
+/**
+ * The plugin-level `insertSettings`, from the backfill plugin's options
+ * schema applied to its factory and registration options. An invalid option
+ * stops the command instead of being dropped, as chkit-py's backfill({...})
+ * refuses it.
+ */
+export function insertSettingsFromOptions(
+  result:
+    | { success: true; data: unknown }
+    | { success: false; error: { issues: Array<{ path: PropertyKey[]; message: string }> } },
+): z.infer<typeof InsertSettingsSchema> | undefined {
+  if (!result.success) {
+    const issue = result.error.issues[0]
+    throw new BackfillConfigError(
+      `Invalid backfill options: ${issue ? `${issue.path.map(String).join('.')}: ${issue.message}` : 'unknown error'}.`,
+    )
+  }
+  const data = typeof result.data === 'object' && result.data !== null ? result.data : {}
+  return InsertSettingsSchema.optional().parse('insertSettings' in data ? data.insertSettings : undefined)
+}
 
 // ───── Per-command schemas ─────
 
@@ -136,7 +158,6 @@ export const RunSchema = z.object({
   concurrency: z.number().int().positive().default(3),
   pollIntervalMs: z.number().nonnegative().default(5000),
   stateDir: z.string().min(1).optional(),
-  insertSettings: InsertSettingsSchema.optional(),
 })
 export type RunOptions = z.infer<typeof RunSchema>
 

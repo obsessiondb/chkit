@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { backfill } from '@chkit/plugin-backfill'
+import { backfill, createBackfillPlugin } from '@chkit/plugin-backfill'
 import * as backfillSdk from '@chkit/plugin-backfill/sdk'
 import type { BackfillPlanState } from '@chkit/plugin-backfill/sdk'
 
@@ -224,12 +224,7 @@ describe('handleSubmit', () => {
 			plan,
 			planPath: join(dir, 'chkit/meta/backfill/plans', `${plan.planId}.json`),
 		})
-		globalThis.fetch = mock(async () =>
-			new Response(JSON.stringify({ json: { jobId: 'job-123' } }), {
-				status: 200,
-				headers: { 'content-type': 'application/json' },
-			}),
-		) as typeof fetch
+		mockServiceApi()
 		const printed: unknown[] = []
 
 		const result = await handleSubmit({
@@ -261,12 +256,7 @@ describe('handleSubmit', () => {
 			plan,
 			planPath: join(dir, 'state/backfill/plans', `${plan.planId}.json`),
 		})
-		globalThis.fetch = mock(async () =>
-			new Response(JSON.stringify({ json: { jobId: 'job-123' } }), {
-				status: 200,
-				headers: { 'content-type': 'application/json' },
-			}),
-		) as typeof fetch
+		mockServiceApi()
 
 		const result = await handleSubmit({
 			flags: { '--target': 'app.events' },
@@ -298,8 +288,7 @@ describe('handleSubmit insertSettings', () => {
 		mock.restore()
 	})
 
-	// #821: an override of a delivery pin reaches the managed job, with one warning.
-	test('carries the backfill plugin insertSettings and warns once about a delivery override', async () => {
+	async function submitWith(registration: Record<string, unknown>, aliases: Record<string, string> = {}) {
 		const dir = await mkdtemp(join(tmpdir(), 'chkit-submit-'))
 		const plan = makePlan()
 		spyOn(backfillSdk, 'buildBackfillPlan').mockResolvedValue({
@@ -307,41 +296,87 @@ describe('handleSubmit insertSettings', () => {
 			planPath: join(dir, 'chkit/meta/backfill/plans', `${plan.planId}.json`),
 		})
 		const stderr = spyOn(process.stderr, 'write').mockImplementation(() => true)
-		const bodies: string[] = []
-		globalThis.fetch = mock(async (input: unknown, init?: RequestInit) => {
-			bodies.push(input instanceof Request ? await input.text() : String(init?.body))
-			return new Response(JSON.stringify({ json: { jobId: 'job-123' } }), {
-				status: 200,
-				headers: { 'content-type': 'application/json' },
-			})
-		}) as unknown as typeof fetch
-
+		const api = mockServiceApi(aliases)
+		const printed: unknown[] = []
 		const result = await handleSubmit({
 			flags: { '--target': 'app.events' },
 			configPath: join(dir, 'clickhouse.config.ts'),
 			jsonMode: true,
-			config: {
-				metaDir: './chkit/meta',
-				schema: [],
-				plugins: [backfill({ insertSettings: { max_insert_threads: 6, materialized_views_ignore_errors: 1 } })],
-			},
-			print: () => {},
+			config: { metaDir: './chkit/meta', schema: [], plugins: [registration] },
+			print: (value) => printed.push(value),
 			credentials: { access_token: 'test-tok', base_url: 'https://api.example.com' },
 			serviceSlug: 'svc',
 		})
+		return { result, printed, api, warnings: stderr.mock.calls.map(([line]) => String(line)) }
+	}
+
+	// #821: an override of a delivery pin reaches the managed job, with one warning.
+	test('carries the backfill plugin insertSettings and warns once about a delivery override', async () => {
+		const { result, api, warnings } = await submitWith(backfill({ insertSettings: { max_insert_threads: 6, materialized_views_ignore_errors: 1 } }))
 
 		expect(result).toEqual({ handled: true, exitCode: 0 })
-		expect(bodies).toHaveLength(1)
-		const tasks: Array<{ sql: string }> = JSON.parse(bodies[0] ?? '').json.tasks
-		expect(tasks).toHaveLength(2)
-		for (const task of tasks) {
+		expect(api.tasks).toHaveLength(2)
+		for (const task of api.tasks) {
 			expect(task.sql).toContain('max_insert_threads=6, ')
 			expect(task.sql).toContain('materialized_views_ignore_errors=1, ')
 			expect(task.sql).not.toContain('materialized_views_ignore_errors=0')
 		}
-		expect(stderr.mock.calls.map(([line]) => String(line))).toEqual([
+		expect(warnings).toEqual([
 			"Warning: insertSettings overrides what every backfill chunk INSERT sets by default: materialized_views_ignore_errors=1 (a materialized view's failed write is dropped and the chunk is still recorded done).\n",
 		])
+	})
+
+	// Codex review: a managed submit resolves the server's aliases like a local
+	// run, so an override through an alias only the server lists is honoured,
+	// and the server is asked first whether it accepts the settings.
+	test('honours a server alias of a delivery pin and preflights it', async () => {
+		const { result, api, warnings } = await submitWith(
+			backfill({ insertSettings: { foreground_alias: 0 } }),
+			{ foreground_alias: 'distributed_foreground_insert' },
+		)
+
+		expect(result).toEqual({ handled: true, exitCode: 0 })
+		const overridden = "allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, distributed_foreground_insert=0, materialized_views_ignore_errors=0, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0, log_queries_probability=1"
+		for (const task of api.tasks) {
+			expect(task.sql).not.toContain('foreground_alias')
+			expect(task.sql.endsWith(`, ${overridden}`)).toBe(true)
+		}
+		expect(api.queries).toContain(`SELECT 1 SETTINGS ${overridden}`)
+		expect(warnings).toEqual([
+			"Warning: insertSettings overrides what every backfill chunk INSERT sets by default: distributed_foreground_insert=0 (a chunk can be recorded done before its rows reach a Distributed table's shards).\n",
+		])
+	})
+
+	test('refuses a server alias of a proof pin before submitting', async () => {
+		const { result, api, printed } = await submitWith(
+			backfill({ insertSettings: { log_alias: 0 } }),
+			{ log_alias: 'log_queries' },
+		)
+
+		expect(result).toEqual({ handled: true, exitCode: 1 })
+		expect(api.tasks).toEqual([])
+		expect(printed).toEqual([{
+			ok: false,
+			command: 'backfill submit',
+			error: "insertSettings sets log_alias=0 (an alias of log_queries), which every backfill chunk INSERT pins (allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0, log_queries_probability=1): with another value, its failure cannot be proven from system.query_log, and a replay could write its rows twice. Remove them from insertSettings.",
+		}])
+	})
+
+	// Codex review: an invalid factory or registration insertSettings stops the
+	// submit, as it stops a local run, instead of being dropped.
+	test.each([
+		['a list', { distributed_foreground_insert: 0, max_insert_threads: [4] }],
+		['NaN', { max_insert_threads: Number.NaN }],
+	])('refuses an insertSettings value that is %s', async (_label, insertSettings) => {
+		const factory = createBackfillPlugin({ insertSettings } as Parameters<typeof createBackfillPlugin>[0])
+		for (const registration of [{ plugin: factory, options: {} }, { plugin: createBackfillPlugin(), options: { insertSettings } }]) {
+			const { result, api, printed } = await submitWith(registration)
+
+			expect(result).toEqual({ handled: true, exitCode: 1 })
+			expect(api.tasks).toEqual([])
+			expect(printed).toEqual([{ ok: false, command: 'backfill submit', error: expect.stringMatching(/^Invalid backfill options: insertSettings\.max_insert_threads: /) }])
+			mock.restore()
+		}
 	})
 })
 
@@ -399,6 +434,8 @@ describe('handleSubmit --plan-id', () => {
 		globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 			const request = new Request(input, init)
 			const procedure = new URL(request.url).pathname.replace(/^\/rpc\//, '')
+			// The workbench queries a submit runs first (aliases, preflight) answer no rows.
+			if (procedure.startsWith('workbench/')) return orpcResponse(queryResult([]))
 			calls.push({ procedure, body: await request.json() })
 			if (procedure === 'jobs/submit') return orpcResponse({ jobId: 'job-new' })
 			return orpcResponse(jobDetail(status, doneTaskIds))
@@ -592,6 +629,34 @@ function jobTask(id: string, taskIndex: number, runStatus: 'done' | 'failed') {
 			},
 		],
 	}
+}
+
+function queryResult(rows: Array<Record<string, string>>) {
+	return { data: rows, meta: Object.keys(rows[0] ?? {}).map((name) => ({ name, type: 'String' })), rows: rows.length }
+}
+
+/**
+ * Answers the workbench queries a submit runs (the server's aliases of the
+ * settings chkit writes, and the preflight) and jobs/submit with job-123;
+ * records the queries and the submitted tasks.
+ */
+function mockServiceApi(aliases: Record<string, string> = {}) {
+	const api = { queries: [] as string[], tasks: [] as Array<{ sql: string }> }
+	globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+		const request = new Request(input, init)
+		const procedure = new URL(request.url).pathname.replace(/^\/rpc\//, '')
+		const body = (await request.json()) as { json: { query?: string; tasks?: Array<{ sql: string }> } }
+		if (procedure.startsWith('workbench/')) {
+			const sql = body.json.query ?? ''
+			api.queries.push(sql)
+			return orpcResponse(queryResult(sql.includes('system.settings')
+				? Object.entries(aliases).map(([name, aliasFor]) => ({ name, alias_for: aliasFor }))
+				: []))
+		}
+		api.tasks.push(...(body.json.tasks ?? []))
+		return orpcResponse({ jobId: 'job-123' })
+	}) as typeof fetch
+	return api
 }
 
 function orpcResponse(data: unknown): Response {

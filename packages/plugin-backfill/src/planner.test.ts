@@ -770,7 +770,7 @@ describe('unprovableTargetFailures', () => {
 // Opus delta review: a server that refuses the INSERT's pinned settings
 // (readonly = 1, a settings constraint) fails the run before it submits.
 describe('assertPinnedInsertSettingsAccepted', () => {
-  const PINNED = "allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, distributed_foreground_insert=1, materialized_views_ignore_errors=0, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0"
+  const PINNED = "allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, distributed_foreground_insert=1, materialized_views_ignore_errors=0, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0, log_queries_probability=1"
 
   test('reads SELECT 1 with the pinned settings', async () => {
     const reads: string[] = []
@@ -807,7 +807,7 @@ describe('readPinnedSettingAliases', () => {
     })
     expect(aliases).toEqual({ enable_parallel_replicas: 'allow_experimental_parallel_reading_from_replicas' })
     expect(reads).toEqual([
-      "SELECT name, alias_for FROM system.settings WHERE alias_for IN ('allow_experimental_parallel_reading_from_replicas', 'parallel_distributed_insert_select', 'distributed_foreground_insert', 'materialized_views_ignore_errors', 'log_queries', 'log_queries_min_type', 'log_queries_min_query_duration_ms')",
+      "SELECT name, alias_for FROM system.settings WHERE alias_for IN ('allow_experimental_parallel_reading_from_replicas', 'parallel_distributed_insert_select', 'distributed_foreground_insert', 'materialized_views_ignore_errors', 'log_queries', 'log_queries_min_type', 'log_queries_min_query_duration_ms', 'log_queries_probability', 'async_insert', 'asterisk_include_materialized_columns', 'asterisk_include_alias_columns', 'insert_deduplicate', 'select_sequential_consistency', 'insert_deduplication_token')",
     ])
   })
 

@@ -208,7 +208,8 @@ def test_insert_settings_that_change_a_pinned_setting_are_refused(
 _PROOF_PINS = (
     "allow_experimental_parallel_reading_from_replicas=0, "
     "parallel_distributed_insert_select=0, log_queries=1, "
-    "log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0"
+    "log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0, "
+    "log_queries_probability=1"
 )
 _DELIVERY_WARNING = {
     "distributed_foreground_insert": (
@@ -380,7 +381,9 @@ def test_the_server_aliases_come_from_system_settings_alias_for() -> None:
         "'allow_experimental_parallel_reading_from_replicas', "
         "'parallel_distributed_insert_select', 'distributed_foreground_insert', 'materialized_views_ignore_errors', "
         "'log_queries', 'log_queries_min_type', "
-        "'log_queries_min_query_duration_ms')"
+        "'log_queries_min_query_duration_ms', 'log_queries_probability', 'async_insert', "
+        "'asterisk_include_materialized_columns', 'asterisk_include_alias_columns', "
+        "'insert_deduplicate', 'select_sequential_consistency', 'insert_deduplication_token')"
     ]
 
 
@@ -422,6 +425,12 @@ def test_plugin_config_accepts_insert_settings_by_alias_and_field_name() -> None
     assert by_name.insert_settings == {"max_insert_threads": 4}
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_plugin_config_rejects_a_non_finite_insert_setting(value: float) -> None:
+    with pytest.raises(ValueError, match=r"insertSettings\.max_insert_threads must be a finite number"):
+        PluginConfig.model_validate({"insertSettings": {"max_insert_threads": value}})
+
+
 def test_plugin_config_rejects_non_scalar_insert_settings() -> None:
     with pytest.raises(ValueError, match="insertSettings"):
         PluginConfig.model_validate({"insertSettings": {"max_insert_threads": [1, 2]}})
@@ -444,7 +453,9 @@ def test_handle_submit_uses_the_backfill_plugin_insert_settings(
 ) -> None:
     submitted: list[dict[str, Any]] = []
     monkeypatch.setattr(
-        backfill_submit_module, "create_remote_executor", lambda _creds, *, service_slug: None
+        backfill_submit_module,
+        "create_remote_executor",
+        lambda _creds, *, service_slug: _FakeRemote({}),
     )
     monkeypatch.setattr(
         backfill_submit_module,
@@ -483,14 +494,33 @@ def test_handle_submit_uses_the_backfill_plugin_insert_settings(
     )
 
 
-def test_handle_submit_carries_a_delivery_override_and_warns_once(
+class _FakeRemote:
+    """The workbench a managed submit reads: the server's aliases of the
+    compulsory settings, and the preflight ``SELECT 1``."""
+
+    def __init__(self, aliases: dict[str, str]) -> None:
+        self.aliases = aliases
+        self.reads: list[str] = []
+
+    def query(self, sql: str, _settings: object = None) -> SimpleNamespace:
+        self.reads.append(sql)
+        if "system.settings" in sql:
+            return SimpleNamespace(
+                rows=[{"name": name, "alias_for": to} for name, to in self.aliases.items()]
+            )
+        return SimpleNamespace(rows=[])
+
+
+def _submit_with(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+    insert_settings: dict[str, str | int | float | bool],
+    remote: _FakeRemote,
+) -> tuple[int, list[dict[str, Any]], list[object]]:
     submitted: list[dict[str, Any]] = []
+    printed: list[object] = []
     monkeypatch.setattr(
-        backfill_submit_module, "create_remote_executor", lambda _creds, *, service_slug: None
+        backfill_submit_module, "create_remote_executor", lambda _creds, *, service_slug: remote
     )
     monkeypatch.setattr(
         backfill_submit_module,
@@ -505,21 +535,29 @@ def test_handle_submit_carries_a_delivery_override_and_warns_once(
         return "job-1"
 
     monkeypatch.setattr(backfill_submit_module, "jobs_submit", fake_jobs_submit)
-    config = SimpleNamespace(
-        meta_dir="meta",
-        plugins=[backfill({"insertSettings": {"materialized_views_ignore_errors": 1}})],
-    )
-
     code = handle_submit(
         SubmitContext(
             flags={"--target": "app.events"},
             config_path=str(tmp_path / "cfg.py"),
             json_mode=True,
-            config=config,
-            print=lambda _value: None,
+            config=SimpleNamespace(
+                meta_dir="meta", plugins=[backfill({"insertSettings": insert_settings})]
+            ),
+            print=printed.append,
             credentials=Credentials(access_token="tok", base_url="https://api.test"),
             service_slug="svc-1",
         )
+    )
+    return code, submitted, printed
+
+
+def test_handle_submit_carries_a_delivery_override_and_warns_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, submitted, _printed = _submit_with(
+        monkeypatch, tmp_path, {"materialized_views_ignore_errors": 1}, _FakeRemote({})
     )
 
     assert code == 0
@@ -532,6 +570,143 @@ def test_handle_submit_carries_a_delivery_override_and_warns_once(
         "Warning: insertSettings overrides what every backfill chunk INSERT sets by "
         f"default: {_DELIVERY_WARNING['materialized_views_ignore_errors']}.\n"
     )
+
+
+# Codex review: a managed submit resolves the server's aliases like a local
+# run, so an override through an alias only the server lists is honoured, and
+# the server is asked first whether it accepts the settings.
+def test_handle_submit_honours_a_server_alias_of_a_delivery_pin_and_preflights_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    remote = _FakeRemote({"foreground_alias": "distributed_foreground_insert"})
+    code, submitted, _printed = _submit_with(
+        monkeypatch, tmp_path, {"foreground_alias": 0}, remote
+    )
+
+    assert code == 0
+    [call] = submitted
+    overridden = _PINNED_INSERT.replace(
+        "distributed_foreground_insert=1", "distributed_foreground_insert=0"
+    )
+    for task in call["tasks"]:
+        assert "foreground_alias" not in task.sql
+        assert task.sql.endswith(f", {overridden}")
+    assert f"SELECT 1 SETTINGS {overridden}" in remote.reads
+    assert capsys.readouterr().err == (
+        "Warning: insertSettings overrides what every backfill chunk INSERT sets by "
+        f"default: {_DELIVERY_WARNING['distributed_foreground_insert']}.\n"
+    )
+
+
+def test_handle_submit_refuses_a_server_alias_of_a_proof_pin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    remote = _FakeRemote({"log_alias": "log_queries"})
+    code, submitted, printed = _submit_with(monkeypatch, tmp_path, {"log_alias": 0}, remote)
+
+    assert code == 1
+    assert submitted == []
+    assert printed == [
+        {
+            "ok": False,
+            "command": "backfill submit",
+            "error": (
+                "insertSettings sets log_alias=0 (an alias of log_queries), which every "
+                f"backfill chunk INSERT pins ({_PROOF_PINS}): with another value, its failure "
+                "cannot be proven from system.query_log, and a replay could write its rows "
+                "twice. Remove them from insertSettings."
+            ),
+        }
+    ]
+
+
+# Codex review: settings chkit writes itself on a chunk INSERT, besides the
+# pins, cannot be changed either: the per-chunk dedup token, synchronous
+# inserts, SELECT * expansion, and a cutover's dedup and consistent reads.
+_FIXED = "async_insert=0, asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0"
+
+
+@pytest.mark.parametrize(
+    ("settings", "named"),
+    [
+        ({"insert_deduplication_token": "shared"}, "insert_deduplication_token='shared'"),
+        ({"async_insert": 1}, "async_insert=1"),
+        ({"asterisk_include_alias_columns": True}, "asterisk_include_alias_columns=true"),
+    ],
+)
+def test_a_setting_chkit_writes_itself_is_refused(
+    settings: dict[str, str | int | bool], named: str
+) -> None:
+    with pytest.raises(BackfillConfigError) as raised:
+        build_chunk_execution_sql(
+            plan_id="p", chunk=_chunk(), target="app.events", table=TABLE,
+            idempotency_token="tok", insert_settings=settings,
+        )
+
+    assert str(raised.value) == (
+        f"insertSettings sets {named}, which chkit sets itself on every backfill chunk "
+        f"INSERT ({_FIXED}, insert_deduplication_token per chunk): another value could "
+        "drop, duplicate or delay a chunk's rows. Remove them from insertSettings."
+    )
+
+
+@pytest.mark.parametrize(
+    ("settings", "named"),
+    [
+        ({"select_sequential_consistency": 0}, "select_sequential_consistency=0"),
+        ({"insert_deduplicate": 1}, "insert_deduplicate=1"),
+    ],
+)
+def test_a_setting_a_cutover_copy_writes_itself_is_refused(
+    settings: dict[str, str | int | bool], named: str
+) -> None:
+    with pytest.raises(BackfillConfigError) as raised:
+        build_chunk_execution_sql(
+            plan_id="p", chunk=_chunk(), target="app.events_shadow", source_target="app.events",
+            table=TABLE, target_columns=["id"], cutover_key=["id"], insert_settings=settings,
+        )
+
+    assert str(raised.value) == (
+        f"insertSettings sets {named}, which chkit sets itself on every backfill chunk "
+        f"INSERT ({_FIXED}, insert_deduplicate=0, select_sequential_consistency=1, "
+        "insert_deduplication_token per chunk): another value could drop, duplicate or "
+        "delay a chunk's rows. Remove them from insertSettings."
+    )
+
+
+def test_a_setting_chkit_writes_itself_with_its_value_is_dropped() -> None:
+    copy = build_chunk_execution_sql(
+        plan_id="p", chunk=_chunk(), target="app.events", table=TABLE,
+        insert_settings={"async_insert": 0, "insert_deduplicate": 1, "max_insert_threads": 2},
+    )
+    cutover = build_chunk_execution_sql(
+        plan_id="p", chunk=_chunk(), target="app.events_shadow", source_target="app.events",
+        table=TABLE, target_columns=["id"], cutover_key=["id"],
+        insert_settings={"select_sequential_consistency": True, "insert_deduplicate": 0},
+    )
+
+    # insert_deduplicate is the user's own outside a cutover copy.
+    assert _settings_line(copy) == (
+        f"SETTINGS async_insert=0, {PINNED}, insert_deduplicate=1, max_insert_threads=2, "
+        f"{_PINNED_INSERT}"
+    )
+    assert _settings_line(cutover) == (
+        f"SETTINGS async_insert=0, {PINNED}, insert_deduplicate=0, "
+        f"select_sequential_consistency=1, {_PINNED_INSERT}"
+    )
+
+
+# Codex review: log_queries_probability = 0 would keep a chunk out of
+# system.query_log, so it is a proof pin too.
+def test_log_queries_probability_is_a_proof_pin() -> None:
+    assert "log_queries_probability=1" in _PINNED_INSERT
+    with pytest.raises(BackfillConfigError, match="log_queries_probability=0, which every"):
+        build_chunk_execution_sql(
+            plan_id="p", chunk=_chunk(), target="app.events", table=TABLE,
+            insert_settings={"log_queries_probability": 0},
+        )
 
 
 # ---------- live ClickHouse ----------

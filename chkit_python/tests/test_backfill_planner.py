@@ -857,7 +857,7 @@ def test_a_target_whose_engine_cannot_be_read_cannot_either(
 # (readonly = 1, a settings constraint) fails the run before it submits.
 _PINNED_SQL = (
     "allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, distributed_foreground_insert=1, materialized_views_ignore_errors=0, log_queries=1, "
-    "log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0"
+    "log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0, log_queries_probability=1"
 )
 
 

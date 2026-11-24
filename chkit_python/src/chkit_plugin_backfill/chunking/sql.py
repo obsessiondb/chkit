@@ -38,12 +38,24 @@ _TRAILING_CLAUSE_KEYWORDS = (
     "SETTINGS",
 )
 
-# Pinned in every chunk INSERT so ``SELECT *`` expands to the insertable columns
-# regardless of the user's profile (see ``_build_settings_clause``).
-_ASTERISK_SETTINGS = (
-    "asterisk_include_materialized_columns=0",
-    "asterisk_include_alias_columns=0",
-)
+# Written first in every chunk INSERT: a synchronous insert, and ``SELECT *``
+# expanded to the insertable columns regardless of the user's profile (see
+# ``_build_settings_clause``). ``insertSettings`` cannot change them.
+_FIXED_INSERT_SETTINGS: dict[str, str] = {
+    "async_insert": "0",
+    "asterisk_include_materialized_columns": "0",
+    "asterisk_include_alias_columns": "0",
+}
+
+# Written by a cutover copy after ``_FIXED_INSERT_SETTINGS`` (see
+# ``_build_cutover_chunk_sql``).
+_CUTOVER_INSERT_SETTINGS: dict[str, str] = {
+    "insert_deduplicate": "0",
+    "select_sequential_consistency": "1",
+}
+
+# Each chunk's own dedup token, which chkit writes when the plan requires one.
+_TOKEN_SETTING = "insert_deduplication_token"
 
 _JS_WS_CLASS = (
     "\\t\\n\\v\\f\\r \\u00a0\\u1680\\u2000-\\u200a"
@@ -98,6 +110,7 @@ PINNED_INSERT_SETTINGS: dict[str, str] = {
     "log_queries": "1",
     "log_queries_min_type": "'QUERY_START'",
     "log_queries_min_query_duration_ms": "0",
+    "log_queries_probability": "1",
 }
 
 PINNED_INSERT_SETTINGS_SQL = ", ".join(
@@ -138,12 +151,19 @@ PINNED_SETTING_ALIASES: dict[str, str] = {
 _SETTING_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
-def _pinned_name(key: str, aliases: Mapping[str, str] | None) -> str | None:
-    """The pinned setting ``key`` names, itself or through an alias."""
-    if key in PINNED_INSERT_SETTINGS:
-        return key
-    name = {**PINNED_SETTING_ALIASES, **(aliases or {})}.get(key)
-    return name if name in PINNED_INSERT_SETTINGS else None
+def _fixed_settings(*, cutover: bool) -> dict[str, str]:
+    """The settings chkit writes itself on a chunk INSERT before the user's,
+    besides the dedup token (``_TOKEN_SETTING``)."""
+    return {**_FIXED_INSERT_SETTINGS, **(_CUTOVER_INSERT_SETTINGS if cutover else {})}
+
+
+def _compulsory_name(
+    key: str, aliases: Mapping[str, str] | None, *, cutover: bool
+) -> str | None:
+    """The pinned or fixed setting ``key`` names, itself or through an alias."""
+    names = {*PINNED_INSERT_SETTINGS, *_fixed_settings(cutover=cutover), _TOKEN_SETTING}
+    name = key if key in names else {**PINNED_SETTING_ALIASES, **(aliases or {})}.get(key)
+    return name if name in names else None
 
 
 def _normal_value(value: str | int | float | bool) -> str:
@@ -156,17 +176,39 @@ def _same_value(value: str | int | float | bool, pinned: str) -> bool:
     return _normal_value(value) == {"true": "1", "false": "0"}.get(bare, bare)
 
 
+def _kept_value(name: str, value: str | int | float | bool, *, cutover: bool) -> bool:
+    """Whether ``value`` of the compulsory setting ``name`` is what chkit
+    writes. The dedup token is per chunk, so no value is."""
+    written = {**PINNED_INSERT_SETTINGS, **_fixed_settings(cutover=cutover)}.get(name)
+    return written is not None and _same_value(value, written)
+
+
+def compulsory_setting_names() -> list[str]:
+    """Every setting chkit writes on a chunk INSERT in any mode, for reading
+    the server's aliases of them (``read_pinned_setting_aliases``)."""
+    return [
+        *PINNED_INSERT_SETTINGS,
+        *_FIXED_INSERT_SETTINGS,
+        *_CUTOVER_INSERT_SETTINGS,
+        _TOKEN_SETTING,
+    ]
+
+
 def assert_insert_settings_keep_pinned(
     insert_settings: Mapping[str, str | int | float | bool] | None,
     aliases: Mapping[str, str] | None = None,
+    *,
+    cutover: bool = False,
 ) -> None:
-    """Refuse ``insertSettings`` that set a proof pin (``PINNED_INSERT_SETTINGS``
-    but not ``DELIVERY_PINS``), or an alias of one, to another value: the chunk
-    INSERT must not run as secondary queries, and must be logged. One with the
-    pinned value is dropped (``effective_insert_settings``). A delivery pin
-    may be overridden, but not set twice (itself and an alias) to different
-    values. ``aliases`` adds the server's own (``system.settings.alias_for``)
-    to ``PINNED_SETTING_ALIASES``."""
+    """Refuse ``insertSettings`` that set a setting chkit writes itself, or an
+    alias of one, to another value: a proof pin (``PINNED_INSERT_SETTINGS`` but
+    not ``DELIVERY_PINS``), which keeps the chunk INSERT off secondary queries
+    and logged, or a fixed one (``_FIXED_INSERT_SETTINGS``, a cutover copy's
+    ``_CUTOVER_INSERT_SETTINGS``, the dedup token). One with chkit's value is
+    dropped (``effective_insert_settings``). A delivery pin may be overridden,
+    but not set twice (itself and an alias) to different values. ``aliases``
+    adds the server's own (``system.settings.alias_for``) to
+    ``PINNED_SETTING_ALIASES``."""
     invalid = [key for key in insert_settings or {} if not _SETTING_NAME.fullmatch(key)]
     if invalid:
         names = ", ".join(f"'{key}'" for key in invalid)
@@ -175,23 +217,36 @@ def assert_insert_settings_keep_pinned(
             "is letters, digits and underscores, not starting with a digit."
         )
         raise BackfillConfigError(msg)
-    conflicts = []
+    proof_conflicts: list[str] = []
+    fixed_conflicts: list[str] = []
     seen: dict[str, list[tuple[str, str | int | float | bool]]] = {}
     for key, value in (insert_settings or {}).items():
-        name = _pinned_name(key, aliases)
+        name = _compulsory_name(key, aliases, cutover=cutover)
         if name is None:
             continue
         seen.setdefault(name, []).append((key, value))
-        if name in DELIVERY_PINS or _same_value(value, PINNED_INSERT_SETTINGS[name]):
+        if name in DELIVERY_PINS or _kept_value(name, value, cutover=cutover):
             continue
         rendered = f"{key}={_render_insert_setting_value(value)}"
-        conflicts.append(rendered if name == key else f"{rendered} (an alias of {name})")
-    if conflicts:
+        named = rendered if name == key else f"{rendered} (an alias of {name})"
+        (proof_conflicts if name in PINNED_INSERT_SETTINGS else fixed_conflicts).append(named)
+    if proof_conflicts:
         msg = (
-            f"insertSettings sets {', '.join(conflicts)}, which every backfill chunk INSERT "
-            f"pins ({_PROOF_PINS_SQL}): with another value, its failure cannot be "
+            f"insertSettings sets {', '.join(proof_conflicts)}, which every backfill chunk "
+            f"INSERT pins ({_PROOF_PINS_SQL}): with another value, its failure cannot be "
             "proven from system.query_log, and a replay could write its rows twice. "
             "Remove them from insertSettings."
+        )
+        raise BackfillConfigError(msg)
+    if fixed_conflicts:
+        fixed = ", ".join(
+            f"{name}={value}" for name, value in _fixed_settings(cutover=cutover).items()
+        )
+        msg = (
+            f"insertSettings sets {', '.join(fixed_conflicts)}, which chkit sets itself on "
+            f"every backfill chunk INSERT ({fixed}, {_TOKEN_SETTING} per chunk): another "
+            "value could drop, duplicate or delay a chunk's rows. Remove them from "
+            "insertSettings."
         )
         raise BackfillConfigError(msg)
     for name, entries in seen.items():
@@ -209,13 +264,15 @@ def assert_insert_settings_keep_pinned(
 def effective_insert_settings(
     insert_settings: Mapping[str, str | int | float | bool] | None,
     aliases: Mapping[str, str] | None = None,
+    *,
+    cutover: bool = False,
 ) -> dict[str, str | int | float | bool]:
-    """``insert_settings`` without the pinned settings and their aliases, except
-    an override of a delivery pin, kept under the pinned name: a pinned
-    setting appears once in the INSERT's SETTINGS, in its place."""
+    """``insert_settings`` without the settings chkit writes itself and their
+    aliases, except an override of a delivery pin, kept under the pinned
+    name: such a setting appears once in the INSERT's SETTINGS, in its place."""
     effective: dict[str, str | int | float | bool] = {}
     for key, value in (insert_settings or {}).items():
-        name = _pinned_name(key, aliases)
+        name = _compulsory_name(key, aliases, cutover=cutover)
         if name is None:
             effective[key] = value
         elif name in DELIVERY_PINS and not _same_value(value, PINNED_INSERT_SETTINGS[name]):
@@ -255,19 +312,27 @@ def delivery_override_warning(
     )
 
 
-def _render_settings_parts(
+def _render_settings(
     insert_settings: Mapping[str, str | int | float | bool] | None,
-) -> tuple[list[str], str]:
-    """The user's own settings, rendered, and the pinned settings with their
-    overrides, for one SETTINGS clause."""
-    assert_insert_settings_keep_pinned(insert_settings)
-    effective = effective_insert_settings(insert_settings)
-    own = [
+    token: str,
+    *,
+    cutover: bool,
+) -> str:
+    """The single SETTINGS clause (ClickHouse rejects a second one on INSERT ...
+    SELECT): what chkit writes itself, the user's own settings, then the pinned
+    settings with their overrides."""
+    assert_insert_settings_keep_pinned(insert_settings, cutover=cutover)
+    effective = effective_insert_settings(insert_settings, cutover=cutover)
+    parts = [f"{name}={value}" for name, value in _fixed_settings(cutover=cutover).items()]
+    if token:
+        parts.append(f"{_TOKEN_SETTING}='{token}'")
+    parts.extend(
         f"{key}={_render_insert_setting_value(value)}"
         for key, value in effective.items()
         if key not in DELIVERY_PINS
-    ]
-    return own, pinned_insert_settings_sql(effective)
+    )
+    parts.append(pinned_insert_settings_sql(effective))
+    return f"SETTINGS {', '.join(parts)}"
 
 
 def build_chunk_execution_sql(
@@ -366,15 +431,6 @@ def _build_cutover_chunk_sql(
             continue
         shadow_conditions.extend(_build_range_bound_conditions(range_, sort_key))
     narrowed = f" WHERE {' AND '.join(shadow_conditions)}" if shadow_conditions else ""
-    parts = [
-        "async_insert=0",
-        *_ASTERISK_SETTINGS,
-        "insert_deduplicate=0",
-        "select_sequential_consistency=1",
-    ]
-    own, pinned = _render_settings_parts(insert_settings)
-    parts.extend(own)
-    parts.append(pinned)
     lines = [
         header,
         f"INSERT INTO {target} ({columns})",
@@ -383,7 +439,7 @@ def _build_cutover_chunk_sql(
         f"WHERE _partition_id = {_quote_sql_string(chunk.partition_id)}",
         *(f"  AND {condition}" for condition in chunk_conditions),
         f"  AND ({key}) NOT IN (SELECT {key} FROM {target}{narrowed})",
-        f"SETTINGS {', '.join(parts)}",
+        _render_settings(insert_settings, "", cutover=True),
     ]
     return "\n".join(lines)
 
@@ -837,16 +893,9 @@ def _build_settings_clause(
     # column-count mismatch and an mv_replay ``SELECT *`` can shift values into
     # the wrong target columns. Query-level SETTINGS override the profile and
     # cover every ``*`` in the query, including each UNION ALL branch.
-    parts = ["async_insert=0", *_ASTERISK_SETTINGS]
-    if token:
-        parts.append(f"insert_deduplication_token='{token}'")
     # Per-chunk insert settings from the plugin config (e.g. max_insert_threads,
-    # min_insert_block_size_rows). Rendered into the single SETTINGS clause because
-    # ClickHouse rejects a second SETTINGS clause on INSERT ... SELECT.
-    own, pinned = _render_settings_parts(insert_settings)
-    parts.extend(own)
-    parts.append(pinned)
-    return f"SETTINGS {', '.join(parts)}"
+    # min_insert_block_size_rows) follow what chkit writes itself.
+    return _render_settings(insert_settings, token, cutover=False)
 
 
 def _render_insert_setting_value(value: str | int | float | bool) -> str:

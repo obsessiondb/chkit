@@ -32,8 +32,23 @@ const TRAILING_CLAUSE_KEYWORDS = [
  * mode then fails on a column-count mismatch, and an mv_replay `SELECT *` can
  * shift values into the wrong target columns. Query-level SETTINGS override the
  * profile and cover every `*` in the query, including each UNION ALL branch.
+ * These, written first with `async_insert = 0` for a synchronous insert, are
+ * settings `insertSettings` cannot change.
  */
-const ASTERISK_SETTINGS = 'asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0'
+const FIXED_INSERT_SETTINGS: Record<string, string> = {
+  async_insert: '0',
+  asterisk_include_materialized_columns: '0',
+  asterisk_include_alias_columns: '0',
+}
+
+/** Written by a cutover copy after `FIXED_INSERT_SETTINGS` (see `buildCutoverChunkSql`). */
+const CUTOVER_INSERT_SETTINGS: Record<string, string> = {
+  insert_deduplicate: '0',
+  select_sequential_consistency: '1',
+}
+
+/** Each chunk's own dedup token, which chkit writes when the plan requires one. */
+const TOKEN_SETTING = 'insert_deduplication_token'
 
 /**
  * Settings every chunk INSERT runs with, in its own SETTINGS so they win over
@@ -62,6 +77,7 @@ export const PINNED_INSERT_SETTINGS = {
   log_queries: '1',
   log_queries_min_type: "'QUERY_START'",
   log_queries_min_query_duration_ms: '0',
+  log_queries_probability: '1',
 } as const
 
 export const PINNED_INSERT_SETTINGS_SQL = Object.entries(PINNED_INSERT_SETTINGS)
@@ -110,11 +126,27 @@ function isDeliveryPin(name: string): boolean {
   return Object.hasOwn(DELIVERY_PINS, name)
 }
 
-/** The pinned setting `key` names, itself or through an alias. */
-function pinnedName(key: string, aliases: Record<string, string> = {}): PinnedSetting | undefined {
-  if (isPinnedSetting(key)) return key
-  const name = aliases[key] ?? PINNED_SETTING_ALIASES[key]
-  return name !== undefined && isPinnedSetting(name) ? name : undefined
+/**
+ * The settings chkit writes itself on a chunk INSERT before the user's,
+ * besides the dedup token (`TOKEN_SETTING`).
+ */
+function fixedSettings(cutover: boolean): Record<string, string> {
+  return { ...FIXED_INSERT_SETTINGS, ...(cutover ? CUTOVER_INSERT_SETTINGS : {}) }
+}
+
+/**
+ * Every setting chkit writes on a chunk INSERT in any mode, for reading the
+ * server's aliases of them (`readPinnedSettingAliases`).
+ */
+export function compulsorySettingNames(): string[] {
+  return [...Object.keys(PINNED_INSERT_SETTINGS), ...Object.keys(FIXED_INSERT_SETTINGS), ...Object.keys(CUTOVER_INSERT_SETTINGS), TOKEN_SETTING]
+}
+
+/** The pinned or fixed setting `key` names, itself or through an alias. */
+function compulsoryName(key: string, aliases: Record<string, string> | undefined, cutover: boolean): string | undefined {
+  const names = new Set([...Object.keys(PINNED_INSERT_SETTINGS), ...Object.keys(fixedSettings(cutover)), TOKEN_SETTING])
+  const name = names.has(key) ? key : (aliases?.[key] ?? PINNED_SETTING_ALIASES[key])
+  return name !== undefined && names.has(name) ? name : undefined
 }
 
 /**
@@ -137,18 +169,30 @@ function sameValue(value: string | number | boolean, pinned: string): boolean {
 }
 
 /**
- * Refuse `insertSettings` that set a proof pin (`PINNED_INSERT_SETTINGS` but
- * not `DELIVERY_PINS`), or an alias of one, to another value: the chunk
- * INSERT must not run as secondary queries, and must be logged. One with the
- * pinned value is dropped (`effectiveInsertSettings`). A delivery pin may be
- * overridden, but not set twice (itself and an alias) to different values.
- * `aliases` adds the server's own (`system.settings.alias_for`) to
- * `PINNED_SETTING_ALIASES`.
+ * Whether `value` of the compulsory setting `name` is what chkit writes. The
+ * dedup token is per chunk, so no value is.
+ */
+function keptValue(name: string, value: string | number | boolean, cutover: boolean): boolean {
+  const written = isPinnedSetting(name) ? PINNED_INSERT_SETTINGS[name] : fixedSettings(cutover)[name]
+  return written !== undefined && sameValue(value, written)
+}
+
+/**
+ * Refuse `insertSettings` that set a setting chkit writes itself, or an alias
+ * of one, to another value: a proof pin (`PINNED_INSERT_SETTINGS` but not
+ * `DELIVERY_PINS`), which keeps the chunk INSERT off secondary queries and
+ * logged, or a fixed one (`FIXED_INSERT_SETTINGS`, a cutover copy's
+ * `CUTOVER_INSERT_SETTINGS`, the dedup token). One with chkit's value is
+ * dropped (`effectiveInsertSettings`). A delivery pin may be overridden, but
+ * not set twice (itself and an alias) to different values. `aliases` adds the
+ * server's own (`system.settings.alias_for`) to `PINNED_SETTING_ALIASES`.
  */
 export function assertInsertSettingsKeepPinned(
   insertSettings: InsertSettings | undefined,
   aliases?: Record<string, string>,
+  options: { cutover?: boolean } = {},
 ): void {
+  const cutover = options.cutover ?? false
   const entries = Object.entries(insertSettings ?? {})
   const invalid = entries.map(([key]) => key).filter((key) => !SETTING_NAME.test(key))
   if (invalid.length > 0) {
@@ -156,23 +200,31 @@ export function assertInsertSettingsKeepPinned(
       `insertSettings has a key that is not a setting name: ${invalid.map((key) => `'${key}'`).join(', ')}. A setting name is letters, digits and underscores, not starting with a digit.`,
     )
   }
-  const pinned = entries.flatMap(([key, value]) => {
-    const name = pinnedName(key, aliases)
+  const compulsory = entries.flatMap(([key, value]) => {
+    const name = compulsoryName(key, aliases, cutover)
     return name === undefined ? [] : [{ key, value, name }]
   })
-  const conflicts = pinned
-    .filter(({ value, name }) => !isDeliveryPin(name) && !sameValue(value, PINNED_INSERT_SETTINGS[name]))
+  const conflicts = compulsory
+    .filter(({ value, name }) => !isDeliveryPin(name) && !keptValue(name, value, cutover))
     .map(({ key, value, name }) => {
       const rendered = `${key}=${renderInsertSettingValue(value)}`
-      return name === key ? rendered : `${rendered} (an alias of ${name})`
+      return { pinned: isPinnedSetting(name), named: name === key ? rendered : `${rendered} (an alias of ${name})` }
     })
-  if (conflicts.length > 0) {
+  const proofConflicts = conflicts.filter((conflict) => conflict.pinned).map((conflict) => conflict.named)
+  if (proofConflicts.length > 0) {
     throw new BackfillConfigError(
-      `insertSettings sets ${conflicts.join(', ')}, which every backfill chunk INSERT pins (${PROOF_PINS_SQL}): with another value, its failure cannot be proven from system.query_log, and a replay could write its rows twice. Remove them from insertSettings.`,
+      `insertSettings sets ${proofConflicts.join(', ')}, which every backfill chunk INSERT pins (${PROOF_PINS_SQL}): with another value, its failure cannot be proven from system.query_log, and a replay could write its rows twice. Remove them from insertSettings.`,
     )
   }
-  for (const name of new Set(pinned.map((entry) => entry.name))) {
-    const same = pinned.filter((entry) => entry.name === name)
+  const fixedConflicts = conflicts.filter((conflict) => !conflict.pinned).map((conflict) => conflict.named)
+  if (fixedConflicts.length > 0) {
+    const fixed = Object.entries(fixedSettings(cutover)).map(([name, value]) => `${name}=${value}`).join(', ')
+    throw new BackfillConfigError(
+      `insertSettings sets ${fixedConflicts.join(', ')}, which chkit sets itself on every backfill chunk INSERT (${fixed}, ${TOKEN_SETTING} per chunk): another value could drop, duplicate or delay a chunk's rows. Remove them from insertSettings.`,
+    )
+  }
+  for (const name of new Set(compulsory.map((entry) => entry.name))) {
+    const same = compulsory.filter((entry) => entry.name === name)
     if (new Set(same.map(({ value }) => normalText(renderInsertSettingValue(value)))).size > 1) {
       throw new BackfillConfigError(
         `insertSettings sets ${name} more than once, with different values (${same.map(({ key, value }) => `${key}=${renderInsertSettingValue(value)}`).join(', ')}). Keep one of them.`,
@@ -182,19 +234,20 @@ export function assertInsertSettingsKeepPinned(
 }
 
 /**
- * `insertSettings` without the pinned settings and their aliases, except an
- * override of a delivery pin, kept under the pinned name: a pinned setting
- * appears once in the INSERT's SETTINGS, in its place.
+ * `insertSettings` without the settings chkit writes itself and their
+ * aliases, except an override of a delivery pin, kept under the pinned name:
+ * such a setting appears once in the INSERT's SETTINGS, in its place.
  */
 export function effectiveInsertSettings(
   insertSettings: InsertSettings | undefined,
   aliases?: Record<string, string>,
+  options: { cutover?: boolean } = {},
 ): InsertSettings {
   const effective: InsertSettings = {}
   for (const [key, value] of Object.entries(insertSettings ?? {})) {
-    const name = pinnedName(key, aliases)
+    const name = compulsoryName(key, aliases, options.cutover ?? false)
     if (name === undefined) effective[key] = value
-    else if (isDeliveryPin(name) && !sameValue(value, PINNED_INSERT_SETTINGS[name])) effective[name] = value
+    else if (isPinnedSetting(name) && isDeliveryPin(name) && !sameValue(value, PINNED_INSERT_SETTINGS[name])) effective[name] = value
   }
   return effective
 }
@@ -226,16 +279,20 @@ export function deliveryOverrideWarning(insertSettings: InsertSettings | undefin
 }
 
 /**
- * The user's own settings and the pinned ones, with their overrides, for the
- * single SETTINGS clause (ClickHouse rejects a second one on INSERT ... SELECT).
+ * The single SETTINGS clause (ClickHouse rejects a second one on INSERT ...
+ * SELECT): what chkit writes itself, the user's own settings, then the pinned
+ * settings with their overrides.
  */
-function renderInsertSettings(insertSettings: InsertSettings | undefined): string {
-  assertInsertSettingsKeepPinned(insertSettings)
-  const effective = effectiveInsertSettings(insertSettings)
-  const own = Object.entries(effective)
-    .filter(([key]) => !isDeliveryPin(key))
-    .map(([key, value]) => `${key}=${renderInsertSettingValue(value)}`)
-  return [...own, pinnedInsertSettingsSql(effective)].join(', ')
+function renderSettingsClause(insertSettings: InsertSettings | undefined, token: string, cutover: boolean): string {
+  assertInsertSettingsKeepPinned(insertSettings, undefined, { cutover })
+  const effective = effectiveInsertSettings(insertSettings, undefined, { cutover })
+  const parts = Object.entries(fixedSettings(cutover)).map(([name, value]) => `${name}=${value}`)
+  if (token) parts.push(`${TOKEN_SETTING}='${token}'`)
+  for (const [key, value] of Object.entries(effective)) {
+    if (!isDeliveryPin(key)) parts.push(`${key}=${renderInsertSettingValue(value)}`)
+  }
+  parts.push(pinnedInsertSettingsSql(effective))
+  return `SETTINGS ${parts.join(', ')}`
 }
 
 // ── Chunk execution SQL ──────────────────────────────────────────────────────
@@ -332,7 +389,7 @@ function buildCutoverChunkSql(input: {
     `WHERE _partition_id = ${quoteSqlString(input.chunk.partitionId)}`,
     ...input.chunkConditions.map((condition) => `  AND ${condition}`),
     `  AND (${key}) NOT IN (SELECT ${key} FROM ${input.target}${shadowConditions.length > 0 ? ` WHERE ${shadowConditions.join(' AND ')}` : ''})`,
-    `SETTINGS async_insert=0, ${ASTERISK_SETTINGS}, insert_deduplicate=0, select_sequential_consistency=1, ${renderInsertSettings(input.insertSettings)}`,
+    renderSettingsClause(input.insertSettings, '', true),
   ]
   return lines.join('\n')
 }
@@ -734,10 +791,7 @@ function buildRangeBoundConditions(range: ChunkRange, sortKey: SortKey): string[
 }
 
 function buildSettingsClause(token: string, insertSettings: InsertSettings | undefined): string {
-  if (token) {
-    return `SETTINGS async_insert=0, ${ASTERISK_SETTINGS}, insert_deduplication_token='${token}', ${renderInsertSettings(insertSettings)}`
-  }
-  return `SETTINGS async_insert=0, ${ASTERISK_SETTINGS}, ${renderInsertSettings(insertSettings)}`
+  return renderSettingsClause(insertSettings, token, false)
 }
 
 function buildChunkConditions(chunk: Pick<Chunk, 'ranges'>, sortKeys: SortKey[]): string[] {
