@@ -11,7 +11,7 @@ sidebar:
 `@chkit/plugin-backfill` builds a saved plan from ClickHouse's physical partitions and sorting keys, then executes its chunks with local checkpoints or a managed job. This page describes the current TypeScript planner.
 
 :::caution[Choose the data operation first]
-A backfill writes rows. A direct-table replay selects from and inserts into the **same table**; on ordinary MergeTree this can duplicate logical rows. For a transformation into a replacement table, use the [data-preserving migration recipe](/guides/data-preserving-migrations/), rather than treating table replay as UPDATE.
+A backfill writes rows. A direct-table replay selects from and inserts into the **same table**; on ordinary MergeTree this can duplicate logical rows. A transformation into a replacement table needs reviewed SQL rather than treating table replay as UPDATE.
 :::
 
 ## Choose a strategy
@@ -21,7 +21,7 @@ A backfill writes rows. A direct-table replay selects from and inserts into the 
 | Populate an existing MV's empty destination from historical source rows | `mv_replay`, selected automatically from your schema's materialized views |
 | Replay rows into the same table | Table copy, only after reviewing the engine and retry/duplicate semantics |
 | Copy the rows of a `chkit generate --cutover` into its shadow table | `--cutover <database.table>` on `plan` or `submit` ([cutover copy](#cutover-copy)) |
-| Change sorting/partition keys or transform source rows into a shadow table | A [zero-downtime cutover](/guides/data-preserving-migrations/), or a reviewed tracked SQL migration with copy, validation and swap |
+| Change sorting/partition keys or transform source rows into a shadow table | A zero-downtime cutover, or a reviewed tracked SQL migration with copy, validation and swap |
 
 MV replay runs each materialized view's SELECT over the source chunks and inserts the result into its destination. A destination fed by several views replays their queries together with `UNION ALL`. Source-based chunking requires every view to resolve to the same simple `FROM` table; verify that source in the saved plan. Unresolved or different sources fall back to destination metadata and are unsuitable for this empty-target bootstrap. With a resolved source, chunk sizing uses the **source** table, so the destination may start empty. Define the source, destination and MVs in the configured schema before planning.
 
@@ -95,7 +95,7 @@ The result rows must match exactly; also verify that the source rows are unchang
 
 ## Cutover copy
 
-A [zero-downtime cutover](/guides/data-preserving-migrations/) generated with `--cutover-copy backfill` leaves the copy of the existing rows to this plugin. Once `chkit migrate --apply` has stopped at the cutover's copy check, plan the copy by naming the table instead of a target:
+A zero-downtime cutover generated with `--cutover-copy backfill` leaves the copy of the existing rows to this plugin. Once `chkit migrate --apply` has stopped at the cutover's copy check, plan the copy by naming the table instead of a target:
 
 ```sh
 chkit plugin backfill plan --cutover analytics.events --json
