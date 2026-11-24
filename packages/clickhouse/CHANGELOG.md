@@ -1,5 +1,15 @@
 # @chkit/clickhouse
 
+## 0.2.0-beta.17
+
+### Patch Changes
+
+- 85b2b8e: Names now sort by Unicode code point, as in chkit-py, so `generate`, `drift`, snapshots and codegen use the same order in both (#489). After upgrading, run `chkit codegen` once (`codegen --check` and `check` report the reordered output as stale), and check imports where two tables map to the same type name, since which one gets the `_2` suffix can change.
+- befd69f: Drift canonicalizes SQL function names through the server's `system.functions` registry instead of lowercasing every call (#731). Spelling differences that ClickHouse itself normalizes (`FLOOR` stored as `floor`, the alias `CEILING` stored as `ceil`) no longer report drift, while case-sensitive and unknown names keep their written spelling instead of being lowercased into a different function.
+- 8dbb7bb: `migrate --apply` takes a lock in the journal, so a second run against the same target stops with `migrate_locked` and names the run that holds it instead of applying the same migrations again; a crashed run's lock is taken over once it has not changed for a while, `--break-lock <claim>` releases it sooner, and `CHKIT_MIGRATE_LOCK=off` turns the lock off.
+- 03a9e9f: Migration journal and query-status reads reject missing or truncated responses instead of treating recorded work as absent, while valid empty results still succeed.
+- Updated dependencies: `@chkit/core@0.2.0-beta.17`
+
 ## 0.2.0-beta.16
 
 ### Patch Changes

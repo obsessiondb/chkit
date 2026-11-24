@@ -1,5 +1,12 @@
 # create-chkit
 
+## 0.2.0-beta.17
+
+### Patch Changes
+
+- a8f94b9: `create-chkit --connect` rejects a value other than `claim`, `account`, `clickhouse` or `later` before writing any file, as `chkit init --connect` already does.
+- Updated dependencies: `@chkit/plugin-obsessiondb@0.2.0-beta.17`
+
 ## 0.2.0-beta.16
 
 ### Patch Changes

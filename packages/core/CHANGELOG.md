@@ -1,5 +1,14 @@
 # @chkit/core
 
+## 0.2.0-beta.17
+
+### Patch Changes
+
+- 85b2b8e: Names now sort by Unicode code point, as in chkit-py, so `generate`, `drift`, snapshots and codegen use the same order in both (#489). After upgrading, run `chkit codegen` once (`codegen --check` and `check` report the reordered output as stale), and check imports where two tables map to the same type name, since which one gets the `_2` suffix can change.
+- 2205acd: A plugin flag (`FlagDef`) can declare a short form with `short: '-o'`; `parseFlags` reads it as the long flag, and the new `expandShortFlags` rewrites declared short flags to their long form.
+- 75d4600: `.nullable()`, `.optional()` and `t.nullable()` on a `t.lowCardinality(...)` type now render `LowCardinality(Nullable(T))` instead of throwing.
+- 729783a: `generate` no longer fails on a refreshable materialized view without `APPEND` that targets a `Replicated*` table. ObsessionDB, ClickHouse Cloud and `Replicated` databases accept replace-mode refreshes, so chkit now only warns that a non-replicated (`Atomic`) database refuses them.
+
 ## 0.2.0-beta.16
 
 ## 0.2.0-beta.15

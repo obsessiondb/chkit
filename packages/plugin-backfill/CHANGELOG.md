@@ -1,5 +1,16 @@
 # @chkit/plugin-backfill
 
+## 0.2.0-beta.17
+
+### Patch Changes
+
+- dfc0831: `chkit plugin backfill resume` no longer submits a chunk again unless the server shows its last attempt failed before it wrote a row: when the outcome is unknown (no row in `system.query_log`, a failure after written rows, lost contact while polling, a replica the user may not read, or a checkpoint from an older release), it stops and names the chunk and its query id, and the new `--accept-unknown` flag replays those chunks.
+- 6a10e83: Every `chkit plugin backfill` chunk INSERT now runs with `allow_experimental_parallel_reading_from_replicas = 0` (`enable_parallel_replicas` from 24.10 on), `parallel_distributed_insert_select = 0` and full query logging, so a failed chunk is never replayed on top of rows its replicas or shards wrote; a chunk INSERT that relied on parallel replicas, or on a Distributed INSERT SELECT running on the shards, now runs on the node that receives it, and a user who may not change those settings gets an error before anything is sent.
+- 7684c62: `chkit plugin backfill plan` works on ClickHouse 24.9 and older: it now turns parallel replicas off with `allow_experimental_parallel_reading_from_replicas`, which every version accepts, instead of `enable_parallel_replicas`, which servers before 24.10 reject.
+- cd8aa70: `chkit plugin backfill resume --replay-failed` no longer marks a replayed chunk failed again when the replay starts within a minute of the failure, and a resume after a run stopped mid-replay no longer runs that chunk a second time; each replay now runs under a query id of its own.
+- dfc0831: `chkit plugin backfill run`, `resume` and `cancel` now hold a lock on the plan, so a second one of the same plan fails at once instead of writing its checkpoint or submitting its chunks a second time; Ctrl-C releases the lock cleanly, and each checkpoint write is synced to disk.
+- Updated dependencies: `@chkit/core@0.2.0-beta.17`, `@chkit/clickhouse@0.2.0-beta.17`
+
 ## 0.2.0-beta.16
 
 ### Patch Changes

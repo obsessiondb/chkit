@@ -1,5 +1,14 @@
 # @chkit/plugin-pull
 
+## 0.2.0-beta.17
+
+### Patch Changes
+
+- 85b2b8e: Names now sort by Unicode code point, as in chkit-py, so `generate`, `drift`, snapshots and codegen use the same order in both (#489). After upgrading, run `chkit codegen` once (`codegen --check` and `check` report the reordered output as stale), and check imports where two tables map to the same type name, since which one gets the `_2` suffix can change.
+- 09261d7: `chkit pull` refuses to replace a dangling symlink at the output path unless `--force` is set, as it already did for any other existing file.
+- 2f1e88c: `chkit pull` reads refreshable materialized view `DEPENDS ON` names as ClickHouse quotes them: escaped backticks are unescaped, and names containing dots, commas or keywords are kept whole.
+- Updated dependencies: `@chkit/core@0.2.0-beta.17`, `@chkit/clickhouse@0.2.0-beta.17`
+
 ## 0.2.0-beta.16
 
 ### Patch Changes

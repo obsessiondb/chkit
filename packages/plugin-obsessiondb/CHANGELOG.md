@@ -1,5 +1,16 @@
 # @chkit/plugin-obsessiondb
 
+## 0.2.0-beta.17
+
+### Patch Changes
+
+- 85b2b8e: Names now sort by Unicode code point, as in chkit-py, so `generate`, `drift`, snapshots and codegen use the same order in both (#489). After upgrading, run `chkit codegen` once (`codegen --check` and `check` report the reordered output as stale), and check imports where two tables map to the same type name, since which one gets the `_2` suffix can change.
+- 0cddea2: `chkit obsessiondb login` no longer waits for a service choice when stdin is not a terminal and you have several services; it prints the hint to run `chkit obsessiondb service select` and exits 0.
+- 2205acd: `chkit obsessiondb service alias set` rejects an alias that starts with `-`, which the command line would read as a flag (#491).
+- c3c7c11: The service picker of `chkit obsessiondb login`, `service select` and `service claim` writes its `Select service` prompt to stderr, so `--json` output on stdout parses as JSON.
+- c03a30a: `chkit obsessiondb service` with no subcommand prints a one-line usage message, so `--json` prints one JSON document, as in chkit-py.
+- Updated dependencies: `@chkit/plugin-backfill@0.2.0-beta.17`, `@chkit/core@0.2.0-beta.17`, `@chkit/clickhouse@0.2.0-beta.17`
+
 ## 0.2.0-beta.16
 
 ### Patch Changes
