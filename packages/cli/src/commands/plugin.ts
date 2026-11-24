@@ -1,5 +1,6 @@
 import { typedFlags, type ChxPluginCommand, type ParsedFlags } from '../plugins.js'
 import {
+  findForwardedPlugin,
   forwardedCommandFlags,
   parsePluginCommandArgs,
   reportStrayArgs,
@@ -56,8 +57,10 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
     }
 
     console.log('Configured plugins:')
+    const hasSync = payload.plugins.some((plugin) => plugin.name === 'sync')
     for (const plugin of payload.plugins) {
-      console.log(`- ${plugin.name}${plugin.version ? ` (v${plugin.version})` : ''}`)
+      const name = plugin.name === 'ingest' && !hasSync ? 'sync' : plugin.name
+      console.log(`- ${name}${plugin.version ? ` (v${plugin.version})` : ''}`)
       if (plugin.commands.length === 0) {
         console.log('  (no commands)')
         continue
@@ -69,7 +72,7 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
     return 0
   }
 
-  const selectedPlugin = plugins.find((entry) => entry.plugin.manifest.name === pluginName)
+  const selectedPlugin = findForwardedPlugin(plugins, pluginName)
   if (!selectedPlugin) {
     const known = plugins.map((entry) => entry.plugin.manifest.name).sort(compareCodePoints)
     throw new Error(
@@ -83,7 +86,7 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
       description: command.description ?? '',
     }))
     const payload = {
-      plugin: selectedPlugin.plugin.manifest.name,
+      plugin: pluginName,
       commands,
     }
 
@@ -93,11 +96,11 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
     }
 
     if (commands.length === 0) {
-      console.log(`Plugin "${selectedPlugin.plugin.manifest.name}" has no registered commands.`)
+      console.log(`Plugin "${pluginName}" has no registered commands.`)
       return 0
     }
 
-    console.log(`Plugin commands for "${selectedPlugin.plugin.manifest.name}":`)
+    console.log(`Plugin commands for "${pluginName}":`)
     for (const command of commands) {
       console.log(`- ${command.name}${command.description ? `: ${command.description}` : ''}`)
     }
@@ -117,7 +120,8 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
     }
     return 1
   }
-  const commandFlags = forwardedCommandFlags(pluginRuntime.plugins, pluginName, targetCommand)
+  const manifestName = selectedPlugin.plugin.manifest.name
+  const commandFlags = forwardedCommandFlags(pluginRuntime.plugins, manifestName, targetCommand)
   // Parse even when the command declares no flags, so an unknown flag is
   // rejected as in `chkit <plugin> <command>` instead of reaching the args (#491).
   // As there, the command gets its flags in `flags` and only the positionals
@@ -157,7 +161,7 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
     tableScope = resolveTableScope(tableSelector, [])
   }
 
-  const exitCode = await pluginRuntime.runPluginCommand(pluginName, commandName, {
+  const exitCode = await pluginRuntime.runPluginCommand(manifestName, commandName, {
     config,
     configPath,
     jsonMode,

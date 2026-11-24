@@ -1,8 +1,8 @@
 import { afterAll, expect, test } from 'bun:test'
 import { createLiveExecutor, createPrefix, getLiveEnv, pollUntil, quoteIdent, waitForTable } from '@chkit/clickhouse/e2e-testkit'
 import { toCreateSQL } from '@chkit/core'
-import { createClickHouseDestination, rawTable, runIngestion, selectStreams } from '@chkit/plugin-ingest'
-import { createMemoryJournal } from '@chkit/plugin-ingest/testing'
+import { createClickHouseDestination, rawTable, runIngestion, selectStreams } from '@chkit/plugin-sync'
+import { createMemoryJournal } from '@chkit/plugin-sync/testing'
 
 import { circlebackConfig } from '../config.js'
 import { createCirclebackPipeline } from '../pipeline.js'

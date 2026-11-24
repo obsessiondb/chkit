@@ -22,7 +22,8 @@ This is a monorepo managed with Bun workspaces and Turborepo.
 | `packages/plugin-pull` | `@chkit/plugin-pull` | Plugin: introspect live ClickHouse into schema files |
 | `packages/plugin-tinybird` | `@chkit/plugin-tinybird` | Plugin: import a Tinybird project as a chkit schema and typed queries |
 | `packages/plugin-backfill` | `@chkit/plugin-backfill` | Plugin: time-windowed data backfill with checkpoints |
-| `packages/plugin-ingest` | `@chkit/plugin-ingest` | Plugin: scheduled pull ingestion with journaled checkpoints |
+| `packages/plugin-sync` | `@chkit/plugin-sync` | Plugin: scheduled API sync with journaled checkpoints |
+| `packages/plugin-ingest` | `@chkit/plugin-ingest` | Compatibility package for Sync |
 | `packages/plugin-obsessiondb` | `@chkit/plugin-obsessiondb` | Plugin: ObsessionDB integration; auto-rewrites `Shared` engines for non-ObsessionDB targets |
 
 ### Documentation
@@ -77,7 +78,7 @@ Tests use the local stack unless `CLICKHOUSE_URL` or `CLICKHOUSE_HOST` is set; t
 
 `bun run test:obsessiondb` runs the suite against ObsessionDB (set the variables above, e.g. through Doppler). It sets `CHKIT_E2E_TARGET=obsessiondb` and leaves out the Kafka suite, whose broker only exists in the local stack.
 
-The ingest package's normal `test` includes the staged-loader E2Es and builds their public Node consumers through `packages/plugin-ingest/turbo.json`. These destructive failure/recovery fixtures always use disposable local databases and honor `CHKIT_TEST_PORT`, even when other tests target a remote server. The package ensures the existing local test stack is running, so Docker is also required for these cases during `test:obsessiondb`; they do not verify managed staged-loader support.
+The Sync package's normal `test` includes the staged-loader E2Es and builds their public Node consumers through `packages/plugin-sync/turbo.json`. These destructive failure/recovery fixtures always use disposable local databases and honor `CHKIT_TEST_PORT`, even when other tests target a remote server. The package ensures the existing local test stack is running, so Docker is also required for these cases during `test:obsessiondb`; they do not verify managed staged-loader support.
 
 plugin-tinybird's fixture E2E compares imported Tinybird objects with the DDL, copy schedules and endpoint SQL recorded from Tinybird Local in `packages/plugin-tinybird/test/fixtures/`. Tinybird runs on plain ClickHouse, so it always uses the local test stack (honoring `CHKIT_TEST_PORT`), also during `test:obsessiondb`. The live parity harness, which builds a Tinybird project on Tinybird Local and compares it with what chkit creates in the same ClickHouse, is opt-in and not in `verify`: `bun run --cwd packages/plugin-tinybird parity -- --project <dir>` (needs the `tinybird-local` container and a built CLI); `--record <file>` re-records a fixture oracle.
 
@@ -123,7 +124,7 @@ Regenerate with `bun run registry:release -- --base origin/main <provider>` and 
 
 ### Releasing (GitHub Actions)
 
-Versions are semver; all 11 published packages share one version (a changesets `fixed` group). A release takes two steps, so the version reaches git before npm and any failure can be re-run:
+Versions are semver; all published packages share one version (a changesets `fixed` group). A release takes two steps, so the version reaches git before npm and any failure can be re-run:
 
 1. **Release: prepare** (`.github/workflows/release-prepare.yml`, manual, repo admins only). Pick `beta` (the next beta) or `stable` (graduates the beta line to GA). It runs `changeset version`, pushes a `release/v<version>` branch, opens a `release: v<version>` PR with the changelog as its body, and starts CI on that branch. A PR opened with `GITHUB_TOKEN` does not trigger `pull_request` runs, so `ci.yml` has a `workflow_dispatch` trigger for this. Re-running prepare refreshes the PR and closes release PRs for other versions.
 2. **Merge the release PR.** That is the release decision. **Release: publish** (`.github/workflows/release-publish.yml`) runs on every push to `main`; its `detect` job lets through only a commit whose subject is `release: v<version>` (keep the squash title) or a merge of `release/v<version>`. It runs the quality gates and release guards, publishes with `npm publish`, moves dist-tags, then creates the `v<version>` tag and GitHub release. Beta versions publish under `beta` and move `latest` onto them; stable versions publish straight to `latest`. The publish job also requires an admin: when someone else merged, an admin re-runs it.
@@ -132,7 +133,7 @@ Publish refuses a release commit that still has unreleased changesets (changeset
 
 Publishing authenticates via **OIDC Trusted Publishing**, so the job runs on a GitHub-hosted runner (`ubuntu-24.04`): Trusted Publishing does not support self-hosted runners, which is how Blacksmith runners register. `bun publish` can't do OIDC, so packages publish with `npm publish --provenance`. `npm publish` copies `workspace:*` into the tarball verbatim, so the script resolves every internal dependency to the current workspace version first (`scripts/workspace-deps.ts`), and `check:packed-deps` packs with `npm pack` after the same resolution. The beta `latest` sync (`npm dist-tag add`) also authenticates via OIDC, which needs npm >= 11.21.0, so the workflow pins `npm@^11.21.0` (npm 12 needs a newer Node than the pinned 22.14.0). No npm token is stored anywhere. The quality gates run `bun run verify` against the local test stack.
 
-**One-time setup** (out of band): on each of the 11 packages, add a Trusted Publisher (GitHub Actions → `obsessiondb/chkit` → `release-publish.yml` → environment `release`) and enable **Allow npm dist-tag** on it (off by default; without it a beta release publishes, then fails moving `latest`, and needs a re-run). Create the `release` GitHub environment with deployment branches limited to `main`. Install the pkg.pr.new GitHub App for previews.
+**One-time setup** (out of band): on each published package, add a Trusted Publisher (GitHub Actions → `obsessiondb/chkit` → `release-publish.yml` → environment `release`) and enable **Allow npm dist-tag** on it (off by default; without it a beta release publishes, then fails moving `latest`, and needs a re-run). Create the `release` GitHub environment with deployment branches limited to `main`. A package owner must publish the first version of a new npm package before configuring its Trusted Publisher. Install the pkg.pr.new GitHub App for previews.
 
 **Previews:** `.github/workflows/preview.yml` publishes every push to `main` to pkg.pr.new, not npm: `bun add -d https://pkg.pr.new/chkit@<sha>` (or `@main`).
 

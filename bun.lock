@@ -156,12 +156,7 @@
       "name": "@chkit/plugin-ingest",
       "version": "0.2.0-beta.18",
       "dependencies": {
-        "@chkit/clickhouse": "workspace:*",
-        "@chkit/core": "workspace:*",
-        "@opentelemetry/api": "^1.9.1",
-        "p-limit": "^7.2.0",
-        "p-retry": "^7.1.1",
-        "zod": "^4.3.6",
+        "@chkit/plugin-sync": "workspace:*",
       },
     },
     "packages/plugin-obsessiondb": {
@@ -186,6 +181,18 @@
         "zod": "^4.3.6",
       },
     },
+    "packages/plugin-sync": {
+      "name": "@chkit/plugin-sync",
+      "version": "0.2.0-beta.18",
+      "dependencies": {
+        "@chkit/clickhouse": "workspace:*",
+        "@chkit/core": "workspace:*",
+        "@opentelemetry/api": "^1.9.1",
+        "p-limit": "^7.2.0",
+        "p-retry": "^7.1.1",
+        "zod": "^4.3.6",
+      },
+    },
     "packages/plugin-tinybird": {
       "name": "@chkit/plugin-tinybird",
       "version": "0.2.0-beta.18",
@@ -205,7 +212,7 @@
       "devDependencies": {
         "@chkit/clickhouse": "workspace:*",
         "@chkit/core": "workspace:*",
-        "@chkit/plugin-ingest": "workspace:*",
+        "@chkit/plugin-sync": "workspace:*",
         "@types/bun": "^1.2.0",
         "chkit": "workspace:*",
         "zod": "^4.3.6",
@@ -360,6 +367,8 @@
     "@chkit/plugin-obsessiondb": ["@chkit/plugin-obsessiondb@workspace:packages/plugin-obsessiondb"],
 
     "@chkit/plugin-pull": ["@chkit/plugin-pull@workspace:packages/plugin-pull"],
+
+    "@chkit/plugin-sync": ["@chkit/plugin-sync@workspace:packages/plugin-sync"],
 
     "@chkit/plugin-tinybird": ["@chkit/plugin-tinybird@workspace:packages/plugin-tinybird"],
 
@@ -1617,11 +1626,11 @@
 
     "@chkit/plugin-codegen/zod": ["zod@4.3.6", "", {}, "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg=="],
 
-    "@chkit/plugin-ingest/zod": ["zod@4.3.6", "", {}, "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg=="],
-
     "@chkit/plugin-obsessiondb/zod": ["zod@4.3.6", "", {}, "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg=="],
 
     "@chkit/plugin-pull/zod": ["zod@4.3.6", "", {}, "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg=="],
+
+    "@chkit/plugin-sync/zod": ["zod@4.3.6", "", {}, "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg=="],
 
     "@chkit/plugin-tinybird/zod": ["zod@4.3.6", "", {}, "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg=="],
 

@@ -10,7 +10,7 @@ Run ingestion as a finite process, use an external scheduler for cadence, and re
 Start by running the source once with the CLI:
 
 ```sh
-chkit ingest run --tag stream:helpdesk.tickets
+chkit sync run --tag stream:helpdesk.tickets
 ```
 
 Apply destination schema migrations first. The CLI uses the configured ClickHouse journal and destination. Check the result, then schedule the command with cron, CI, or a job runner.
@@ -19,11 +19,11 @@ Apply destination schema migrations first. The CLI uses the configured ClickHous
 
 | Selection | Command |
 |---|---|
-| Entire loaded graph | `chkit ingest run` |
-| Pipeline | `chkit ingest run --tag pipeline:helpdesk` |
-| Stream | `chkit ingest run --tag stream:helpdesk.tickets` |
-| Shared cadence | `chkit ingest run --tag schedule:1h` |
-| Intersection of tags | `chkit ingest run --tag schedule:1h --tag account:42` |
+| Entire loaded graph | `chkit sync run` |
+| Pipeline | `chkit sync run --tag pipeline:helpdesk` |
+| Stream | `chkit sync run --tag stream:helpdesk.tickets` |
+| Shared cadence | `chkit sync run --tag schedule:1h` |
+| Intersection of tags | `chkit sync run --tag schedule:1h --tag account:42` |
 
 Tags are exact and case-sensitive. Effective tags combine pipeline tags, stream tags, and derived `pipeline:<id>` / `stream:<id>` tags; declared tags cannot start with those two prefixes. Repeated `--tag` uses AND semantics; an explicit filter matching nothing fails before execution.
 
@@ -43,7 +43,7 @@ Journal reads disable the query cache and request `select_sequential_consistency
 
 ## Retries and provider errors
 
-Retry defaults and execution-wide overrides are documented in the [plugin retry policy](/plugins/ingest/#retry-policy). `context.fetch` throws `HttpError` for unsuccessful responses; requests made another way throw `HttpError.fromResponse(response)` themselves. The classification treats 429 as rate limiting, 408/425/5xx as transient, and other 4xx as permanent.
+Retry defaults and execution-wide overrides are documented in the [plugin retry policy](/plugins/sync/#retry-policy). `context.fetch` throws `HttpError` for unsuccessful responses; requests made another way throw `HttpError.fromResponse(response)` themselves. The classification treats 429 as rate limiting, 408/425/5xx as transient, and other 4xx as permanent.
 
 Requests of one pipeline share a request queue across its streams. `maxFetches` limits how many run at once, and a rate-limited response with `Retry-After` pauses the whole queue until then, so other streams of the pipeline do not run into the same limit. A rate-limit retry that the provider schedules at least the initial backoff ahead does not count against the retry limit; the retry time budget and the execution budget still bound it. Templates therefore send requests without fixed pauses.
 
@@ -85,7 +85,7 @@ A failure anywhere else in the reader, its strategy, or checkpoint parsing fails
 | `randomize` | `true` | Add jitter |
 | `maxRetryTime` | `600_000` ms | Retry time budget |
 
-`chkit ingest run` uses these values. A host that embeds `runIngestion` can pass `retry` with any of these fields, for example `{ retries: 0 }` in a test. Insert and journal writes keep their fixed budgets.
+`chkit sync run` uses these values. A host that embeds `runIngestion` can pass `retry` with any of these fields, for example `{ retries: 0 }` in a test. Insert and journal writes keep their fixed budgets.
 
 </details>
 
@@ -93,13 +93,13 @@ A failure anywhere else in the reader, its strategy, or checkpoint parsing fails
 
 | Control | Default | Behavior |
 |---|---|---|
-| `ingest({ maxDurationSeconds })` | `3600` seconds | Bounds execution, including journal operations; at most `2147483` seconds |
+| `sync({ maxDurationSeconds })` | `3600` seconds | Bounds execution, including journal operations; at most `2147483` seconds |
 | `--max-duration <seconds>` | Plugin value | Overrides duration for one run |
 | Stream `budget.maxChunks` | Unlimited | Stops after a source chunk budget; the run is incomplete |
 | Stream `budget.maxChunkRows` | `100_000` | Fails a stream that yields a larger chunk |
-| `ingest({ journalTable })` | `_chkit_ingestion_journal` | Journal table in the configured database |
+| `sync({ journalTable })` | `_chkit_ingestion_journal` | Journal table in the configured database |
 
-A run that exhausts its budget retains committed progress and ends as incomplete. The CLI returns `1` for an incomplete execution; `0` means every selected stream succeeded. A configuration error exits `2` before any stream runs, for example an invalid pipeline definition, a definition module that fails to load, a `--tag` that matches no stream, a missing ClickHouse connection, `--from`/`--to` without `--backfill`, or an invalid backfill id or `--max-duration` value. See [`chkit ingest` exit codes](/cli/ingest/#exit-codes). Cancellation also retains committed progress. Shutdown and terminal journal writes have bounded grace periods, so shutdown can extend past the main duration budget.
+A run that exhausts its budget retains committed progress and ends as incomplete. The CLI returns `1` for an incomplete execution; `0` means every selected stream succeeded. A configuration error exits `2` before any stream runs, for example an invalid pipeline definition, a definition module that fails to load, a `--tag` that matches no stream, a missing ClickHouse connection, `--from`/`--to` without `--backfill`, or an invalid backfill id or `--max-duration` value. See [`chkit sync` exit codes](/cli/sync/#exit-codes). Cancellation also retains committed progress. Shutdown and terminal journal writes have bounded grace periods, so shutdown can extend past the main duration budget.
 
 Treat the journal as durable operational state. Changing the journal name or configured target identity starts a different checkpoint history. Do not change them as routine retry handling.
 
@@ -108,7 +108,7 @@ Treat the journal as durable operational state. Changing the journal name or con
 Use the timestamp strategy (or a custom range-aware strategy) to read an explicit historical interval:
 
 ```sh
-chkit ingest run --tag stream:helpdesk.tickets \
+chkit sync run --tag stream:helpdesk.tickets \
   --backfill tickets-jan-2026 \
   --from 2026-01-01T00:00:00Z --to 2026-02-01T00:00:00Z
 ```
@@ -122,9 +122,9 @@ For data already in ClickHouse that needs transformation or materialized-view re
 ## Inspect progress and recover
 
 ```sh
-chkit ingest list --tag pipeline:helpdesk --json
-chkit ingest run --tag pipeline:helpdesk --json
-chkit ingest status --tag pipeline:helpdesk --json
+chkit sync list --tag pipeline:helpdesk --json
+chkit sync run --tag pipeline:helpdesk --json
+chkit sync status --tag pipeline:helpdesk --json
 ```
 
 `list` inspects exported streams. `status` shows ordinary stream checkpoints; it is not a history of run outcomes and has no `--backfill` selection flag. Use run JSON and the journal for historical namespaces and failures. Run JSON includes each stream's `outcome`, row/batch/chunk counts, checkpoint version, and any error. The runtime emits OpenTelemetry execution, stream, and load spans. Configure a tracer provider/exporter in the host to collect them.
@@ -142,29 +142,29 @@ chkit ingest status --tag pipeline:helpdesk --json
 | Journal source table is missing | Restore its evidence before repair; changing table names does not restore history |
 | Doctor reports a malformed run tail | Review the retained checkpoint and repair plan; valid acknowledged progress remains resumable |
 
-Retry with `ingest run` after fixing the error; the validated journal supplies committed state. Keep the stream ID to preserve its checkpoint history. Changing the ID starts a new history.
+Retry with `chkit sync run` after fixing the error; the validated journal supplies committed state. Keep the stream ID to preserve its checkpoint history. Changing the ID starts a new history.
 
 ### Review and materialize journal recovery
 
 1. Diagnose the selected namespace without changing data:
 
    ```sh
-   chkit ingest doctor --tag stream:helpdesk.tickets --json
+   chkit sync doctor --tag stream:helpdesk.tickets --json
    ```
 
 2. If recovery is needed, stop every writer using the journal table. Review the retained checkpoint, evidence counts, activation instructions, and fingerprint:
 
    ```sh
-   chkit ingest repair --tag stream:helpdesk.tickets --json
+   chkit sync repair --tag stream:helpdesk.tickets --json
    ```
 
 3. Materialize the exact reviewed snapshot:
 
    ```sh
-   chkit ingest repair --tag stream:helpdesk.tickets --apply <fingerprint>
+   chkit sync repair --tag stream:helpdesk.tickets --apply <fingerprint>
    ```
 
-4. Keep writers stopped. Set `ingest({ journalTable: '<replacementTable>' })` in the project config to the replacement table returned by the command, then restart ingestion.
+4. Keep writers stopped. Set `sync({ journalTable: '<replacementTable>' })` in the project config to the replacement table returned by the command, then restart ingestion.
 
 Add `--backfill <id>` to both diagnostic and repair commands for an isolated historical namespace. Applying recovery requires exactly one selected stream. Any source-table change invalidates the fingerprint and requires a new review.
 

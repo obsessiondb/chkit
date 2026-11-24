@@ -1,4 +1,4 @@
-import { rawRows, rawTable, type SourceContext } from '@chkit/plugin-ingest'
+import { rawRows, rawTable, type SourceContext } from '@chkit/plugin-sync'
 import { z } from 'zod'
 
 import { circlebackId, circlebackTags, createCirclebackClient, nonBlankString } from '../client.js'

@@ -5,7 +5,7 @@ sidebar:
   order: 5
 ---
 
-`@chkit/plugin-ingest` implements [chkit Sync (beta)](/sync/), the optional TypeScript layer for loading application API data into tables defined with chkit Schema.
+`@chkit/plugin-sync` implements [chkit Sync (beta)](/sync/), the optional TypeScript layer for loading application API data into tables defined with chkit Schema.
 
 Start with the [Sync quickstart](/api-sync/quickstart/) for a complete first sync. Read the [API sync model](/api-sync/) for stream and checkpoint concepts, or install the [authoring skill](/api-sync/agent-skill/) for a coding agent.
 
@@ -28,20 +28,31 @@ Configure a direct `clickhouse` connection for ingestion. Host-provided executor
 ```ts
 // clickhouse.config.ts
 import { defineConfig } from '@chkit/core'
-import { ingest } from '@chkit/plugin-ingest'
+import { sync } from '@chkit/plugin-sync'
 
 export default defineConfig({
   entry: './src/chkit.ts',
-  plugins: [ingest()],
+  plugins: [sync()],
   clickhouse: { url: process.env.CLICKHOUSE_URL ?? '' },
 })
 ```
+
+### Upgrade from the ingest plugin
+
+The transition release still accepts `@chkit/plugin-ingest` and its `/testing` entry point, `ingest()`, `chkit ingest`, and `chkit plugin ingest` as deprecated aliases. The old CLI forms print a deprecation notice to stderr. Existing config files and scheduled jobs can migrate independently.
+
+1. Upgrade `chkit` and add `@chkit/plugin-sync` at the same version. If both package names are still in use, upgrade `@chkit/plugin-ingest` to that version too so both imports share a runtime.
+2. Update imports in the config, source modules, and fixtures to `@chkit/plugin-sync` or `@chkit/plugin-sync/testing`. Replace the existing `ingest(options)` registration with `sync(options)`, keeping the same options. If you use `createIngestPlugin`, `IngestPlugin`, or `IngestPluginOptions`, switch to `createSyncPlugin`, `SyncPlugin`, or `SyncPluginOptions`.
+3. Update scheduled invocations to `chkit sync` or `chkit plugin sync`. If a script checks the top-level CLI error envelope's `command` field, update it to expect `"sync"` when invoking `chkit sync`.
+4. Remove the deprecated package once all project imports have moved. For a project that uses registry templates, see [existing template installs](/api-sync/templates/#existing-installs).
+
+Keep the existing target, journal table, pipeline and stream IDs, and incremental strategy IDs and versions. The default journal remains `_chkit_ingestion_journal`. The rename requires no schema migration or checkpoint reset. The destination metadata columns, `ingestionColumns`, and `runIngestion` keep their existing names. The plugin identifier in `chkit plugin --json` and `chkit check --json` remains `ingest`.
 
 ### Journal and overlapping runs
 
 The target needs CREATE, SELECT, and INSERT permissions for the journal and destination tables. ChKit stores checkpoints entirely in ClickHouse journal evidence.
 
-With `clickhouse.cluster` set, `ingest run` creates the journal `ON CLUSTER` as one `ReplicatedMergeTree` shared by every replica and waits until each replica has it. A journal that is local to a node, replicated per shard, or missing on a replica fails the run before ingestion; chkit does not convert it.
+With `clickhouse.cluster` set, `chkit sync run` creates the journal `ON CLUSTER` as one `ReplicatedMergeTree` shared by every replica and waits until each replica has it. A journal that is local to a node, replicated per shard, or missing on a replica fails the run before ingestion; chkit does not convert it.
 
 Every run records its starting checkpoint and local event sequence. Event identity includes the run, so overlapping executions and stale reads cannot reuse another run's identities. Complete snapshot validation selects acknowledged progress from valid histories. Malformed tails are diagnosed and excluded; normal overlapping runs need no repair. A stale valid snapshot may replay work, so destination keys and versioning must reconcile repeats.
 
@@ -54,7 +65,7 @@ A stream is a destination table plus a `read` generator. Fetching and mapping ar
 ```ts
 // src/chkit.ts
 import { table } from '@chkit/core'
-import { definePipeline, defineStream, ingestionColumns, paginate, timestampWindow } from '@chkit/plugin-ingest'
+import { definePipeline, defineStream, ingestionColumns, paginate, timestampWindow } from '@chkit/plugin-sync'
 
 export const tickets = table({
   database: 'crm',
@@ -108,7 +119,7 @@ export const helpdesk = definePipeline({ id: 'helpdesk', streams: [ticketStream]
 
 `context.fetch` goes through the pipeline's request queue, retries only transient failures, aborts on cancellation or after 30 seconds, and throws `HttpError` for unsuccessful responses. Larger sources keep requests, credentials, and response parsing in a provider client built at the start of `read`; see [Readers and pagination](/api-sync/readers/#requests-and-provider-clients).
 
-Importing a definition never throws, so schema commands such as `generate` and `migrate` keep working while an ingestion definition is invalid. An invalid stream or pipeline definition fails when an ingest command selects it, with exit code `2`, and `chkit check` reports it. Source configuration and credentials are checked by the reader when its stream runs.
+Importing a definition never throws, so schema commands such as `generate` and `migrate` keep working while an ingestion definition is invalid. An invalid stream or pipeline definition fails when a sync command selects it, with exit code `2`, and `chkit check` reports it. Source configuration and credentials are checked by the reader when its stream runs.
 
 Add `ingestionColumns` to custom destination tables. The loader fills `_chkit_batch_id` and `_chkit_run_id`; ClickHouse sets `_chkit_ingested_at` at the physical insert.
 
@@ -122,7 +133,7 @@ Retain raw objects when the query shape may change and storage is affordable. Ma
 
 ```ts
 import { view } from '@chkit/core'
-import { defineStream, paginate, rawRows, rawTable } from '@chkit/plugin-ingest'
+import { defineStream, paginate, rawRows, rawTable } from '@chkit/plugin-sync'
 
 export const rawTickets = rawTable({ database: 'crm', name: 'tickets_raw' })
 
@@ -186,7 +197,7 @@ Requests use [`p-retry`](https://github.com/sindresorhus/p-retry) with exponenti
 
 Only transient failures are retried: network error codes, timeouts, and retryable HTTP statuses. Only requests made with `context.fetch`, `context.attempt`, or a `paginate` page are retried. Any other failure fails the stream, whatever its type, and the next run resumes from the latest committed checkpoint. See [retry boundaries](/api-sync/operations/#retry-boundaries).
 
-Configure this execution-wide policy with `ingest({ retry: { retries: 2 } })`. It applies independently to every source attempt (`context.fetch`, `context.attempt`, and pagination), across all selected streams; it is not a shared pool of retries for the run. `retries` counts retries after the initial attempt. Setting it to `0` disables all source retries, including provider-directed retries. With retries enabled and count remaining, provider-directed waits that do not consume the count remain bounded by `maxRetryTime` and the execution duration.
+Configure this execution-wide policy with `sync({ retry: { retries: 2 } })`. It applies independently to every source attempt (`context.fetch`, `context.attempt`, and pagination), across all selected streams; it is not a shared pool of retries for the run. `retries` counts retries after the initial attempt. Setting it to `0` disables all source retries, including provider-directed retries. With retries enabled and count remaining, provider-directed waits that do not consume the count remain bounded by `maxRetryTime` and the execution duration.
 
 Supported `retry` fields (all optional):
 
@@ -198,28 +209,28 @@ Supported `retry` fields (all optional):
 | `randomize` | `true` | Boolean |
 | `maxRetryTime` | `600000` | Finite non-negative milliseconds |
 
-Unknown retry fields, including classifier hooks, are rejected. Unspecified fields retain their defaults. Registration options override factory options at the top level (a registration `retry` object replaces the factory `retry` object). For one run, [`--retries`](/cli/ingest/#run-only) overrides only `retry.retries`, preserving other resolved retry settings. There are no stream or pipeline retry options.
+Unknown retry fields, including classifier hooks, are rejected. Unspecified fields retain their defaults. Registration options override factory options at the top level (a registration `retry` object replaces the factory `retry` object). For one run, [`--retries`](/cli/sync/#run-only) overrides only `retry.retries`, preserving other resolved retry settings. There are no stream or pipeline retry options.
 
 ## Commands
 
 ```sh
-chkit ingest list                       # streams in the loaded graph
-chkit ingest run                        # run every stream
-chkit ingest run --tag schedule:1h      # exact tag match; repeat --tag for AND
-chkit ingest run --tag stream:helpdesk.tickets
-chkit ingest status                     # committed checkpoint per stream
-chkit ingest doctor --tag stream:helpdesk.tickets
-chkit ingest repair --tag stream:helpdesk.tickets
-chkit ingest run --backfill jan --from 2026-01-01 --to 2026-02-01
+chkit sync list                       # streams in the loaded graph
+chkit sync run                        # run every stream
+chkit sync run --tag schedule:1h      # exact tag match; repeat --tag for AND
+chkit sync run --tag stream:helpdesk.tickets
+chkit sync status                     # committed checkpoint per stream
+chkit sync doctor --tag stream:helpdesk.tickets
+chkit sync repair --tag stream:helpdesk.tickets
+chkit sync run --backfill jan --from 2026-01-01 --to 2026-02-01
 ```
 
 Every stream also carries the derived tags `pipeline:<id>` and `stream:<id>`; declared tags cannot use those prefixes. `schedule:<cadence>` is a convention only: chkit never interprets it. A `--tag` filter that matches nothing fails before any work runs.
 
 A backfill uses its own checkpoint namespace, so it never moves the scheduled bookmark. Reusing its ID reuses that state, but resumption depends on the strategy: explicit timestamp bounds take precedence over the watermark and reread that range. The bundled `fullSync()` and `cursorState()` strategies do not interpret date bounds; custom provider strategies may honor or reject them. See the source's documentation and [Backfill source data](/api-sync/operations/#backfill-source-data).
 
-`doctor` reads and validates evidence without changing tables. `repair` previews recovery by default. After reviewing the plan, pass its fingerprint to `repair --apply <fingerprint>` with exactly one selected stream. Add `--backfill <id>` to either command to inspect or repair that historical namespace. With writers stopped, repair preserves evidence and materializes a separately validated journal. Set `ingest({ journalTable: '<replacementTable>' })` to the returned table before restarting writers; activation is explicit. Uncertain work may be replayed. See the [command reference](/cli/ingest/#repair) for details.
+`doctor` reads and validates evidence without changing tables. `repair` previews recovery by default. After reviewing the plan, pass its fingerprint to `repair --apply <fingerprint>` with exactly one selected stream. Add `--backfill <id>` to either command to inspect or repair that historical namespace. With writers stopped, repair preserves evidence and materializes a separately validated journal. Set `sync({ journalTable: '<replacementTable>' })` to the returned table before restarting writers; activation is explicit. Uncertain work may be replayed. See the [command reference](/cli/sync/#repair) for details.
 
-`chkit check` verifies that every stream destination carries the ingestion metadata columns. See [`chkit ingest`](/cli/ingest/) for the full flag reference, exit codes, and JSON output.
+`chkit check` verifies that every stream destination carries the ingestion metadata columns. See [`chkit sync`](/cli/sync/) for the full flag reference, exit codes, and JSON output.
 
 ## Delivery guarantee
 
@@ -244,7 +255,7 @@ Overlapping processes record independent histories. Scheduler concurrency contro
 
 ## Related pages
 
-- [`chkit ingest`](/cli/ingest/): command flags, exit codes, and JSON output.
+- [`chkit sync`](/cli/sync/): command flags, exit codes, and JSON output.
 - [Destinations and transformations](/api-sync/destinations/): raw or shaped storage and where to map fields.
 - [Loading and batching](/api-sync/loading/): loader choices, insert sizing, and concurrency defaults.
 - [Scheduling and recovery](/api-sync/operations/): retry defaults, execution limits, and troubleshooting.

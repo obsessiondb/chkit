@@ -5,7 +5,7 @@ import { z } from 'zod'
 import type { PackageManager } from '../runtime/deps.js'
 import { installDependencies, planDependencies } from './dependencies.js'
 import { assertProjectPath, readOptional } from './files.js'
-import { hashContent, isSafeRelativePath, type RegistryItem } from './model.js'
+import { hashContent, isSafeRelativePath, requireDependency, SYNC_PLUGIN_PACKAGES, type RegistryItem } from './model.js'
 import { planProjectConfig } from './project-config.js'
 
 const lockSchema = z.object({
@@ -76,9 +76,13 @@ export async function planInstallation(input: {
   const configPath = resolve(cwd, input.configPath ?? 'clickhouse.config.ts')
   await assertProjectPath(cwd, configPath)
   await assertProjectPath(cwd, resolve(cwd, 'package.json'))
+  const packages = input.item.dependencies.map((spec) => requireDependency(spec).name)
+  const pluginPackage = SYNC_PLUGIN_PACKAGES.find((name) => packages.includes(name))
+  if (!pluginPackage) throw new Error('Template is missing a Sync plugin dependency')
   const config = await planProjectConfig({
     cwd, configPath, providerEntry: resolve(cwd, root, meta.entry), exportNames: meta.exports,
     providerFiles: selectedFiles.map((file) => resolve(cwd, root, file.target.slice(meta.root.length + 1))),
+    pluginPackage,
   })
   for (const file of config.files) {
     await assertProjectPath(cwd, file.path)

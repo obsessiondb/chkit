@@ -39,7 +39,7 @@ const IngestOptionsSchema = z.object({
 })
 type IngestOptions = z.infer<typeof IngestOptionsSchema>
 
-export type IngestPluginOptions = Partial<IngestOptions>
+export type SyncPluginOptions = Partial<IngestOptions>
 
 const SELECTION_FLAGS = defineFlags([
   { name: '--tag', type: 'string[]', description: 'Exact tag every selected stream must carry (repeatable, AND)', placeholder: '<tag>' },
@@ -64,7 +64,7 @@ const REPAIR_FLAGS = defineFlags([
   { name: '--apply', type: 'string', description: 'Materialize the reviewed fingerprint with writers stopped (select one stream)', placeholder: '<fingerprint>' },
 ] as const)
 
-interface IngestPluginCommandContext {
+interface SyncPluginCommandContext {
   args: string[]
   flags: Record<string, string | string[] | boolean | undefined>
   jsonMode: boolean
@@ -82,9 +82,9 @@ class IngestConfigError extends Error {
   }
 }
 
-const runCommand = createPluginRunner<IngestPluginCommandContext>({ configErrorClass: IngestConfigError })
+const runCommand = createPluginRunner<SyncPluginCommandContext>({ configErrorClass: IngestConfigError })
 
-export function createIngestPlugin(options: IngestPluginOptions = {}) {
+export function createSyncPlugin(options: SyncPluginOptions = {}) {
   const optionsSchema = withFactoryDefaults(IngestOptionsSchema, options)
 
   return {
@@ -99,7 +99,7 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
         optionsSchema,
         run: runCommand({
           command: 'run',
-          label: 'Ingest run',
+          label: 'Sync run',
           fn: async (context) => {
             const retries = parseRetries(context.flags['--retries'])
             const selected = await loadSelection(context)
@@ -134,7 +134,7 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
                 context.print({ command: 'run', ...result })
               } else {
                 const rows = result.streams.reduce((sum, stream) => sum + stream.rows, 0)
-                context.print(`Ingest run ${result.runId}: ${result.ok ? 'ok' : 'incomplete'} (${result.streams.length} streams, ${rows} rows)`)
+                context.print(`Sync run ${result.runId}: ${result.ok ? 'ok' : 'incomplete'} (${result.streams.length} streams, ${rows} rows)`)
                 for (const line of formatStreamErrors(result.streams)) context.print(line)
               }
               return result.ok ? 0 : 1
@@ -154,7 +154,7 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
         optionsSchema,
         run: runCommand({
           command: 'list',
-          label: 'Ingest list',
+          label: 'Sync list',
           fn: async (context) => {
             const selected = await loadSelection(context)
             const streams = selected.map(describeStream)
@@ -177,7 +177,7 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
         optionsSchema,
         run: runCommand({
           command: 'doctor',
-          label: 'Ingest doctor',
+          label: 'Sync doctor',
           fn: async (context) => {
             const selected = await loadSelection(context)
             const backfill = parseBackfill(context.flags)
@@ -213,7 +213,7 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
         optionsSchema,
         run: runCommand({
           command: 'repair',
-          label: 'Ingest repair',
+          label: 'Sync repair',
           fn: async (context) => {
             const selected = await loadSelection(context)
             const backfill = parseBackfill(context.flags)
@@ -244,7 +244,7 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
                   context.print(`Evidence: ${plan.evidenceRows} rows ${applied ? 'preserved in' : 'will be archived to'} ${applied ? plan.archiveTable : `${plan.archiveTable}_<copy id>`}; original table retained.`)
                   context.print(plan.replayWarning)
                   context.print(plan.activation)
-                  if (!applied && !plan.healthy && plan.repairable) context.print(`Review this plan, then run ingest repair --tag stream:${plan.namespaceId.split('#backfill:')[0]}${backfill ? ` --backfill ${backfill.id}` : ''} --apply ${plan.fingerprint}`)
+                  if (!applied && !plan.healthy && plan.repairable) context.print(`Review this plan, then run chkit sync repair --tag stream:${plan.namespaceId.split('#backfill:')[0]}${backfill ? ` --backfill ${backfill.id}` : ''} --apply ${plan.fingerprint}`)
                 }
               }
               return 0
@@ -262,7 +262,7 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
         optionsSchema,
         run: runCommand({
           command: 'status',
-          label: 'Ingest status',
+          label: 'Sync status',
           fn: async (context) => {
             const selected = await loadSelection(context)
             const target = openTarget(context)
@@ -312,11 +312,20 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
   }
 }
 
-export type IngestPlugin = ReturnType<typeof createIngestPlugin>
+export type SyncPlugin = ReturnType<typeof createSyncPlugin>
 
-export function ingest(options: IngestPluginOptions = {}): ChxInlinePluginRegistration<IngestPlugin, IngestPluginOptions> {
-  return { plugin: createIngestPlugin(options), name: 'ingest', enabled: true, options }
+export function sync(options: SyncPluginOptions = {}): ChxInlinePluginRegistration<SyncPlugin, SyncPluginOptions> {
+  return { plugin: createSyncPlugin(options), name: 'ingest', enabled: true, options }
 }
+
+/** @deprecated Use sync(). */
+export const ingest = sync
+/** @deprecated Use createSyncPlugin(). */
+export const createIngestPlugin = createSyncPlugin
+/** @deprecated Use SyncPlugin. */
+export type IngestPlugin = SyncPlugin
+/** @deprecated Use SyncPluginOptions. */
+export type IngestPluginOptions = SyncPluginOptions
 
 export function formatStreamErrors(streams: readonly StreamResult[]): string[] {
   const groups = new Map<string, { outcome: string; error: string; namespaces: string[] }>()
@@ -366,7 +375,7 @@ async function loadGraph(config: ResolvedChxConfig): Promise<PipelineDefinition[
   return collectPipelines(await loadDefinitionModules(config.schema, { cwd: process.cwd() }))
 }
 
-async function loadSelection(context: IngestPluginCommandContext): Promise<SelectedStream[]> {
+async function loadSelection(context: SyncPluginCommandContext): Promise<SelectedStream[]> {
   try {
     const pipelines = await loadGraph(context.config)
     if (pipelines.length === 0) {
@@ -381,7 +390,7 @@ async function loadSelection(context: IngestPluginCommandContext): Promise<Selec
   }
 }
 
-function openTarget(context: IngestPluginCommandContext) {
+function openTarget(context: SyncPluginCommandContext) {
   const clickhouse = context.config.clickhouse
   // Ingestion requires JSONEachRow and per-insert deduplication settings.
   // The host executor contract does not guarantee either capability.
@@ -402,7 +411,7 @@ function targetIdOf(url: string, database: string): string {
   }
 }
 
-function parseBackfill(flags: IngestPluginCommandContext['flags']): BackfillRequest | undefined {
+function parseBackfill(flags: SyncPluginCommandContext['flags']): BackfillRequest | undefined {
   const id = flags['--backfill']
   const from = parseTimestamp(flags['--from'], '--from')
   const to = parseTimestamp(flags['--to'], '--to')
