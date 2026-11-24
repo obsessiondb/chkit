@@ -59,6 +59,13 @@ from chkit.plugins import (
 
 NO_PLUGINS_MESSAGE = "No plugins configured. Add entries to config.plugins first."
 
+# The shortcuts that report a missing plugin by name, as TS
+# ``WELL_KNOWN_PLUGIN_COMMANDS`` (#776).
+_WELL_KNOWN_PLUGIN_COMMANDS: dict[str, str] = {
+    "codegen": "Codegen",
+    "obsessiondb": "ObsessionDB",
+}
+
 class UnknownPluginError(LookupError):
     """No configured plugin has the name. As in TS, a plain error of the
     command: its message on stderr, exit 1 and the ``error`` envelope under
@@ -352,11 +359,12 @@ def dispatch_plugin_command(  # noqa: PLR0912, PLR0915
                 _fail_no_plugins(json_mode=output_json)
 
         if entry is None:
-            if invoking_command == "codegen":
+            well_known = _WELL_KNOWN_PLUGIN_COMMANDS.get(invoking_command)
+            if well_known is not None:
                 # As TS reports a well-known plugin command whose plugin is missing.
                 report_usage_error(
-                    "codegen",
-                    "Codegen plugin is not configured. Add it to config.plugins first.",
+                    invoking_command,
+                    f"{well_known} plugin is not configured. Add it to config.plugins first.",
                     json_mode=output_json,
                     code="plugin_not_configured",
                 )

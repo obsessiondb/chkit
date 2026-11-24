@@ -21,8 +21,8 @@ export type MigrateErrorCode =
 export class MigrateError extends Error {
   readonly code: MigrateErrorCode
 
-  constructor(code: MigrateErrorCode, message: string) {
-    super(message)
+  constructor(code: MigrateErrorCode, message: string, options?: ErrorOptions) {
+    super(message, options)
     this.name = 'MigrateError'
     this.code = code
   }

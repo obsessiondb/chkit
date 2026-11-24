@@ -31,7 +31,7 @@ class _LaggingClient:
     stale_rows: list[dict[str, Any]]
     executed: list[str] = field(default_factory=list[str])
 
-    def query(self, sql: str) -> _Result:
+    def query(self, sql: str, settings: object = None) -> _Result:
         return _Result(self.stale_rows)
 
     def execute(self, sql: str) -> None:

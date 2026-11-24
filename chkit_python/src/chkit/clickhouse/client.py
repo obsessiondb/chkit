@@ -7,25 +7,36 @@ client returns ``Any`` extensively; this wrapper narrows it down.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import re
+import socket
 import threading
+import time
 import uuid
 from collections.abc import Callable
-from typing import Any, Literal, NoReturn, Self, TypeVar
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from typing import Any, Literal, NoReturn, Protocol, Self, TypeVar
 from urllib.parse import unquote, urlparse
 
 import clickhouse_connect  # type: ignore[import-untyped]
 import httpx
+from clickhouse_connect.driver import httputil  # type: ignore[import-untyped]
 from clickhouse_connect.driver.exceptions import (  # type: ignore[import-untyped]
     DatabaseError,
 )
 from pydantic import BaseModel, ConfigDict
 from urllib3 import HTTPConnectionPool, HTTPSConnectionPool, Timeout
 from urllib3.connection import HTTPConnection, HTTPSConnection
-from urllib3.exceptions import HTTPError
+from urllib3.exceptions import (
+    ConnectTimeoutError,
+    HTTPError,
+    NameResolutionError,
+    NewConnectionError,
+)
 
 from chkit.clickhouse.control import (
     STRICT_CONTROL_SETTINGS,
@@ -118,7 +129,20 @@ class QueryStatus(BaseModel):
 class ClickHouseClient:
     """Imperative client wrapper. Use as a context manager."""
 
-    __slots__ = ("_client", "_closed", "_config", "_submit_client", "_submit_client_lock")
+    #: ``submit_once`` asks ``SEND_ADMISSION`` at its transport (#765): an
+    #: executor needs this marker for an interruptible backfill.
+    transport_admission = True
+
+    __slots__ = (
+        "_client",
+        "_closed",
+        "_config",
+        "_send_once_client",
+        "_send_once_inflight",
+        "_send_once_pool",
+        "_submit_client",
+        "_submit_client_lock",
+    )
 
     def __init__(self, client: Any, config: ChxResolvedClickHouseConfig) -> None:
         self._client: Any = client
@@ -126,6 +150,12 @@ class ClickHouseClient:
         # The driver `submit` sends through, opened on first use.
         self._submit_client: Any = None
         self._submit_client_lock = threading.Lock()
+        # The driver submit_once sends through, with a pool of its own.
+        self._send_once_client: Any = None
+        self._send_once_pool: Any = None
+        # submit_once calls in progress, by pool: the last one to end after
+        # close() unregisters that pool again (see submit_once).
+        self._send_once_inflight: dict[int, int] = {}
         self._closed = False
 
     @classmethod
@@ -195,8 +225,14 @@ class ClickHouseClient:
         self._client.close()
         with self._submit_client_lock:
             submit_client, self._submit_client = self._submit_client, None
+            send_once_client, self._send_once_client = self._send_once_client, None
+            send_once_pool, self._send_once_pool = self._send_once_pool, None
         if submit_client is not None:
             submit_client.close()
+        if send_once_client is not None:
+            send_once_client.close()
+        if send_once_pool is not None:
+            _dispose_pool(send_once_pool)
 
     def __enter__(self) -> Self:
         return self
@@ -236,12 +272,13 @@ class ClickHouseClient:
         settings = {**self._write_settings(), **(settings or {})}
         check()
         try:
-            self._client.command(statement, settings=settings)
+            self._client.command(statement, settings=settings, transport_settings={"X-DDL": "1"})
         except DatabaseError as error:
             if not is_unknown_database_error(error):
                 raise
             check()
-            self._client.command(statement, settings=settings, use_database=False)
+            self._client.command(statement, settings=settings, use_database=False,
+                                 transport_settings={"X-DDL": "1"})
 
     def execute_tracked(
         self,
@@ -279,6 +316,7 @@ class ClickHouseClient:
                     **(settings or {}), "query_id": query_id,
                 },
                 use_database=use_database,
+                transport_settings={"X-DDL": "1"},
             )
         finally:
             self._client.http = pool
@@ -293,28 +331,35 @@ class ClickHouseClient:
             url = httpx.URL(scheme=parsed.scheme, host=parsed.hostname or "", port=parsed.port)
             username = unquote(parsed.username) if parsed.username else self._config.username
             password = unquote(parsed.password) if parsed.password else self._config.password
+            bodyless = bool(re.match(
+                r"INSERT\b|KILL\b[\s\S]*\bASYNC\s*;?$", statement.lstrip(), re.I
+            ))
             with httpx.Client(transport=httpx.HTTPTransport(retries=0)) as control:
                 response = control.post(
                     url,
                     auth=(username, password),
                     params={
-                        "database": self._config.database, "default_format": "JSONEachRow",
+                        "database": self._config.database,
                         **{key: str(value) for key, value in (settings or {}).items()
-                           if key != "query_id" and value is not None},
+                           if key not in ("query_id", "default_format") and value is not None},
                         **STRICT_CONTROL_SETTINGS,
                         "wait_end_of_query": "1",
                         **({"query_id": query_id} if query_id else {}),
                     },
                     headers={"Connection": "close"},
-                    content=statement,
+                    content=(statement if bodyless else
+                             statement.rstrip().rstrip(";") + "\nFORMAT JSONStrings"),
                     timeout=remaining_control_seconds(deadline),
                 )
                 if response.is_error or response.headers.get("X-ClickHouse-Exception-Code") not in (
                     None, "", "0",
                 ):
                     raise DatabaseError(response.text)
-                rows = [json.loads(line) for line in response.text.splitlines() if line.strip()]
-                return QueryResult(column_names=list(rows[0]) if rows else [], rows=rows)
+                if bodyless:
+                    return QueryResult(column_names=[], rows=[])
+                payload = response.json()
+                return QueryResult(column_names=[column["name"] for column in payload["meta"]],
+                                   rows=payload["data"])
 
         return run_control_request(request, timeout_ms)
 
@@ -334,7 +379,16 @@ class ClickHouseClient:
             if settings is not None
             else None
         )
-        result = self._client.query(statement, settings=effective_settings)
+        if effective_settings and effective_settings.get("default_format") == "JSONStrings":
+            effective_settings.pop("default_format")
+            payload = json.loads(
+                self._client.raw_query(statement, settings=effective_settings, fmt="JSONStrings",
+                                       transport_settings={"X-DDL": "1"})
+            )
+            return QueryResult(column_names=[column["name"] for column in payload["meta"]],
+                               rows=payload["data"])
+        result = self._client.query(statement, settings=effective_settings,
+                                    transport_settings={"X-DDL": "1"})
         column_names: list[str] = list(result.column_names)
         rows: list[dict[str, Any]] = [
             dict(zip(column_names, row, strict=True)) for row in result.result_rows
@@ -352,7 +406,8 @@ class ClickHouseClient:
         """
         query_id = str(uuid.uuid4())
         body = self._client.raw_query(
-            js_trim(statement).rstrip(";"), settings={"query_id": query_id}, fmt="JSON"
+            js_trim(statement).rstrip(";"), settings={"query_id": query_id}, fmt="JSON",
+            transport_settings={"X-DDL": "1"}
         )
         return ClickHouseJsonQueryResult.model_validate(
             {**parse_json_result(body), "query_id": query_id}
@@ -397,6 +452,84 @@ class ClickHouseClient:
         finally:
             _SUBMIT_SEND.before_send = None
         return qid
+
+    def submit_once(
+        self,
+        statement: str,
+        query_id: str,
+        settings: dict[str, Any] | None = None,
+    ) -> str:
+        """``submit`` with one physical send: clickhouse-connect 0.15.1 resends a
+        request whose connection the remote closed, even with
+        ``query_retries=0``, and the same id must never name a second send of
+        a write (a backfill chunk could run twice). A connection failure
+        raises instead. TS's client sends a request once.
+
+        It sends through a driver with a urllib3 pool of its own, whose
+        ``urlopen`` asks the ``SEND_ADMISSION`` of this request only (a
+        context variable: an unrelated request, or another thread's, never
+        answers for it). When the admission refuses, nothing is sent and
+        ``SendNotAdmittedError`` is raised. ``prepare_submit_once`` opens
+        that driver ahead of the send."""
+        driver = self.prepare_submit_once()
+        pool = driver.http
+        with self._submit_client_lock:
+            self._send_once_inflight[id(pool)] = self._send_once_inflight.get(id(pool), 0) + 1
+        send = _Send(SEND_ADMISSION.get())
+        token = _CURRENT_SEND.set(send)
+        try:
+            driver.command(statement, settings={**(settings or {}), "query_id": query_id})
+        except SendNotAdmittedError:
+            raise
+        except Exception as error:
+            if send.sent and not send.handed_off and _timed_out(error):
+                raise SendConnectTimeoutError(_connect_timeout_message()) from error
+            raise
+        finally:
+            _CURRENT_SEND.reset(token)
+            with self._submit_client_lock:
+                left = self._send_once_inflight[id(pool)] - 1
+                if left:
+                    self._send_once_inflight[id(pool)] = left
+                else:
+                    del self._send_once_inflight[id(pool)]
+                # The driver's connection-expiry check can register the pool
+                # again after close() dropped it; the last call out drops it.
+                if not left and self._closed:
+                    httputil.all_managers.pop(pool, None)
+        return query_id
+
+    def prepare_submit_once(self) -> Any:
+        """Open the driver ``submit_once`` sends through, if it is not open
+        yet: connection setup, which may stall, done before a caller admits
+        a send."""
+        with self._submit_client_lock:
+            client = self._send_once_client
+        if client is None and not self._closed:
+            pool = _own_pool_manager(self._config.url)
+            # Opened outside the lock, so close() does not wait for it.
+            try:
+                opened = self._open_driver(
+                    self._config, autogenerate_session_id=False, pool_mgr=pool
+                )
+            except BaseException:
+                _dispose_pool(pool)
+                raise
+            # Bounded until the request is written (connect, TLS handshake and
+            # the write itself); the wait for the INSERT's response is not.
+            opened.timeout = Timeout(connect=SEND_CONNECT_TIMEOUT_MS / 1000, read=None)
+            with self._submit_client_lock:
+                if self._send_once_client is None and not self._closed:
+                    self._send_once_client = opened
+                    self._send_once_pool = pool
+                client = self._send_once_client
+            if client is not opened:
+                opened.close()
+                _dispose_pool(pool)
+        if self._closed or client is None:
+            msg = "ClickHouse client is closed."
+            raise RuntimeError(msg)
+        return client
 
     def _submit_driver(self) -> Any:
         with self._submit_client_lock:
@@ -492,7 +625,9 @@ class ClickHouseClient:
         def source(table: str) -> str:
             return all_replicas(fanout, table) if fanout else table
 
-        read_settings = {"skip_unavailable_shards": 0 if every_replica else 1}
+        read_settings = {
+            "skip_unavailable_shards": 0 if every_replica else 1, "default_format": "JSONStrings"
+        }
         running_sql = (
             "SELECT read_rows, read_bytes, written_rows, written_bytes, elapsed "
             f"FROM {source('system.processes')} "
@@ -575,6 +710,292 @@ class ClickHouseClient:
         )
 
         return list_table_details(self, databases)
+
+
+class SendAdmission(Protocol):
+    """Asked by ``submit_once`` right before its request enters the transport
+    (#765). ``admit`` returning False sends nothing. ``handed_off`` is called
+    once urllib3 has written the whole request (request line, headers and
+    body) to the socket; a caller also ends its own wait when ``submit_once``
+    returns or raises without getting there. A caller that stops can
+    therefore wait until every admitted send has handed off, and know that no
+    request of it starts afterwards. An admission may also have
+    ``attach(abandon)``, called once ``admit`` returned True, with the
+    request's ``abandon``: calling it destroys the request's socket and
+    refuses any later write, so no more of the request is sent (TS's
+    ``abandon``)."""
+
+    def admit(self) -> bool: ...
+
+    def handed_off(self) -> None: ...
+
+
+#: How long an admitted request may take to connect (TCP and TLS) and write
+#: itself to its socket (TS ``SEND_CONNECT_TIMEOUT_MS``). Past it, the send
+#: fails: a connection that never completes (a stalled load balancer or TLS
+#: terminator) must not hold a backfill's interrupt (#765). The wait for the
+#: INSERT's response has no limit.
+SEND_CONNECT_TIMEOUT_MS = 10_000
+
+
+class SendConnectTimeoutError(RuntimeError):
+    """``submit_once``'s request did not connect and get written in time."""
+
+
+class SendAbandonedError(RuntimeError):
+    """``submit_once``'s request was abandoned before it was written."""
+
+
+def _connect_timeout_message() -> str:
+    return (
+        f"The request could not connect and be written within {SEND_CONNECT_TIMEOUT_MS} ms "
+        "(name lookup, TCP connect, TLS handshake and the request itself), so it was destroyed. "
+        "It may have reached the server."
+    )
+
+
+def _timed_out(error: BaseException) -> bool:
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, TimeoutError) or type(current).__name__.endswith("TimeoutError"):
+            return True
+        if any(isinstance(arg, BaseException) and _timed_out(arg) for arg in current.args):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+#: Set by a caller that must not send once it stops (#765), asked after any
+#: lazy connection setup.
+SEND_ADMISSION: ContextVar[SendAdmission | None] = ContextVar(
+    "chkit_send_admission", default=None
+)
+
+
+class SendNotAdmittedError(RuntimeError):
+    """``submit_once`` did not send: ``SEND_ADMISSION`` refused it."""
+
+
+@dataclass
+class _Send:
+    """One ``submit_once`` request: its admission, whether it was sent and
+    handed off, and what ``abandon`` needs: the connection it writes to."""
+
+    admission: SendAdmission | None
+    sent: bool = False
+    handed_off: bool = False
+    abandoned: bool = False
+    conn: Any = None
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def writing(self, conn: Any) -> None:
+        """Called by the connection right before it writes the request: from
+        then on, ``abandon`` shuts its socket down."""
+        with self.lock:
+            if self.abandoned:
+                raise SendAbandonedError(_ABANDONED_MESSAGE)
+            self.conn = conn
+
+    def abandon(self) -> None:
+        """No more of the request is written: a later write is refused, and a
+        write in progress fails on its shut-down socket."""
+        with self.lock:
+            self.abandoned = True
+            conn = self.conn
+        sock = getattr(conn, "sock", None)
+        if sock is not None:
+            # socket.socket's own shutdown: SSLSocket's would also drop its
+            # TLS state under the writing thread.
+            with contextlib.suppress(OSError):
+                socket.socket.shutdown(sock, socket.SHUT_RDWR)
+
+
+_ABANDONED_MESSAGE = (
+    "The request was abandoned before it was written: its caller stopped waiting for it. "
+    "It may have reached the server."
+)
+
+
+_CURRENT_SEND: ContextVar[_Send | None] = ContextVar("chkit_current_send", default=None)
+
+
+def _own_pool_manager(url: str) -> Any:
+    """A urllib3 pool for ``submit_once`` alone, routed as clickhouse-connect
+    routes a driver without a pool of its own: an HTTPS URL takes
+    ``HTTPS_PROXY``, then (like any URL) ``HTTP_PROXY``, each unless
+    ``NO_PROXY`` names the host; otherwise a direct pool. Its ``urlopen``
+    carries a stable hook that resolves the current request's own ``_Send``.
+    It is never shared, and ``_dispose_pool`` clears and unregisters it."""
+    parsed = urlparse(url)
+    scheme = parsed.scheme
+    host = parsed.hostname or ""
+    port = parsed.port or (443 if scheme == "https" else 80)
+    https_proxy = httputil.check_env_proxy("https", host, port) if scheme == "https" else None
+    http_proxy = None if https_proxy else httputil.check_env_proxy("http", host, port)
+    if https_proxy:
+        pool = httputil.get_pool_manager(https_proxy=https_proxy)
+    elif http_proxy:
+        pool = httputil.get_pool_manager(http_proxy=http_proxy)
+    else:
+        pool = httputil.get_pool_manager()
+    install_send_hook(pool)
+    return pool
+
+
+def _dispose_pool(pool: Any) -> None:
+    """Close a ``submit_once`` pool and drop it from clickhouse-connect's
+    process-wide registry of managers, which would keep it alive."""
+    pool.clear()
+    httputil.all_managers.pop(pool, None)
+
+
+def _body_after_handoff(kwargs: dict[str, Any], send: _Send) -> dict[str, Any]:
+    """``urlopen``'s arguments with the body as an iterable that reports the
+    handoff once urllib3 has written it (it asks for the next part only after
+    writing the last), as TS reports it on the request's ``finish``. The
+    body's Content-Length is set explicitly, so urllib3 sends it as is, not
+    chunked: some proxies reject chunked POSTs."""
+    body = kwargs.get("body")
+    data = body.encode() if isinstance(body, str) else (body or b"")
+    admission = send.admission
+
+    def chunks() -> Any:
+        if data:
+            yield data
+        send.handed_off = True
+        if admission is not None:
+            admission.handed_off()
+
+    headers = {
+        **{key: value for key, value in (kwargs.get("headers") or {}).items()
+           if key.lower() not in {"content-length", "transfer-encoding"}},
+        "Content-Length": str(len(data)),
+    }
+    return {**kwargs, "body": chunks(), "headers": headers}
+
+
+def install_send_hook(pool: Any) -> None:
+    """Make ``pool.urlopen`` ask the current request's admission (#765)."""
+    original = pool.urlopen
+
+    def urlopen(method: str, url: str, *args: Any, **kwargs: Any) -> Any:
+        send = _CURRENT_SEND.get()
+        if send is None:
+            return original(method, url, *args, **kwargs)
+        if send.sent:
+            msg = "A backfill chunk's request cannot be resent after a connection failure"
+            raise RuntimeError(msg)
+        if send.admission is not None and not send.admission.admit():
+            msg = "The request was not sent: its caller stopped"
+            raise SendNotAdmittedError(msg)
+        attach = getattr(send.admission, "attach", None)
+        if callable(attach):
+            # An admitted request can be abandoned from here on.
+            attach(send.abandon)
+        send.sent = True
+        admission = send.admission
+        if admission is not None:
+            # Handed off once urllib3 has written the body: the whole request
+            # is on the socket. A request that fails before that ends its
+            # caller's wait when submit_once returns.
+            kwargs = _body_after_handoff(kwargs, send)
+        return original(method, url, *args, **{**kwargs, "retries": False})
+
+    pool.urlopen = urlopen
+    # The connections tell the request when they write it, so that an
+    # abandon can stop them.
+    pool.pool_classes_by_scheme = {
+        "http": _SendHTTPConnectionPool,
+        "https": _SendHTTPSConnectionPool,
+    }
+
+
+class _SendConnectionMixin:
+    """A connection that registers with the current ``submit_once`` request
+    before it writes it, connected first (a plain HTTP connection otherwise
+    connects inside its first write), so an abandon finds its socket."""
+
+    def _new_conn(self) -> socket.socket:
+        """The socket, with the name resolved under the connect timeout too
+        (TS's timer covers its lookup): ``getaddrinfo`` cannot time out, so it
+        runs on a daemon thread, and the TCP connect gets what is left."""
+        conn: Any = self
+        new_conn: Callable[[], socket.socket] = super()._new_conn  # type: ignore[misc]
+        timeout = conn.timeout
+        if _CURRENT_SEND.get() is None or not isinstance(timeout, (int, float)):
+            return new_conn()
+        deadline = time.monotonic() + timeout
+        host = conn._dns_host
+        addresses = _resolve_within(host, conn.port, timeout)
+        last: BaseException | None = None
+        for address in addresses:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            conn._dns_host = address
+            conn.timeout = left
+            try:
+                return new_conn()
+            except NewConnectionError as error:
+                last = error
+            finally:
+                conn._dns_host = host
+                conn.timeout = timeout
+        if last is not None:
+            raise last
+        msg = f"Connection to {host} timed out. (connect timeout={timeout})"
+        raise ConnectTimeoutError(self, msg)
+
+    def request(self, method: str, url: str, *args: Any, **kwargs: Any) -> None:
+        send = _CURRENT_SEND.get()
+        if send is not None and send.admission is not None:
+            if getattr(self, "sock", None) is None:
+                self.connect()  # type: ignore[attr-defined]
+            send.writing(self)
+        super().request(method, url, *args, **kwargs)  # type: ignore[misc]
+
+
+def _resolve_within(host: str, port: int, timeout: float) -> list[str]:
+    """The addresses of ``host``, or a ``ConnectTimeoutError`` after
+    ``timeout`` seconds: the lookup runs on a daemon thread left behind."""
+    outcome: list[tuple[bool, object]] = []
+    done = threading.Event()
+
+    def resolve() -> None:
+        try:
+            infos = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+            outcome.append((True, [str(info[4][0]) for info in infos]))
+        except BaseException as error:
+            outcome.append((False, error))
+        done.set()
+
+    threading.Thread(target=resolve, name="chkit-send-resolve", daemon=True).start()
+    if not done.wait(timeout):
+        msg = f"Resolving {host} timed out. (connect timeout={timeout})"
+        raise ConnectTimeoutError(None, msg)
+    ok, value = outcome[0]
+    if not ok:
+        error = value if isinstance(value, BaseException) else RuntimeError(str(value))
+        raise NameResolutionError(host, None, error)  # type: ignore[arg-type]
+    return list(dict.fromkeys(value))  # type: ignore[call-overload]
+
+
+class _SendHTTPConnection(_SendConnectionMixin, HTTPConnection):
+    pass
+
+
+class _SendHTTPSConnection(_SendConnectionMixin, HTTPSConnection):
+    pass
+
+
+class _SendHTTPConnectionPool(HTTPConnectionPool):
+    ConnectionCls = _SendHTTPConnection
+
+
+class _SendHTTPSConnectionPool(HTTPSConnectionPool):
+    ConnectionCls = _SendHTTPSConnection
 
 
 class _SingleAttemptPool:

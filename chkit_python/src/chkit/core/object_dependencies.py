@@ -402,32 +402,46 @@ def _strongly_connected_components(edges: list[list[int]]) -> list[list[int]]:
     on_stack: set[int] = set()
     stack: list[int] = []
     components: list[list[int]] = []
+    # The depth-first search keeps its own stack of [node, next edge position],
+    # so a long chain (thousands of columns) can't exhaust Python's recursion limit.
+    frames: list[list[int]] = []
 
-    def visit(v: int) -> None:
+    def enter(v: int) -> None:
         nonlocal counter
         index[v] = counter
         low_link[v] = counter
         counter += 1
         stack.append(v)
         on_stack.add(v)
-        for w in edges[v]:
-            if w not in index:
-                visit(w)
-                low_link[v] = min(low_link[v], low_link[w])
-            elif w in on_stack:
-                low_link[v] = min(low_link[v], index[w])
-        if low_link[v] != index[v]:
-            return
-        component: list[int] = []
-        while stack:
-            w = stack.pop()
-            on_stack.discard(w)
-            component.append(w)
-            if w == v:
-                break
-        components.append(component)
+        frames.append([v, 0])
 
-    for v in range(len(edges)):
-        if v not in index:
-            visit(v)
+    for root in range(len(edges)):
+        if root in index:
+            continue
+        enter(root)
+        while frames:
+            frame = frames[-1]
+            v = frame[0]
+            if frame[1] < len(edges[v]):
+                w = edges[v][frame[1]]
+                frame[1] += 1
+                if w not in index:
+                    enter(w)
+                elif w in on_stack:
+                    low_link[v] = min(low_link[v], index[w])
+                continue
+            frames.pop()
+            if frames:
+                parent = frames[-1][0]
+                low_link[parent] = min(low_link[parent], low_link[v])
+            if low_link[v] != index[v]:
+                continue
+            component: list[int] = []
+            while stack:
+                w = stack.pop()
+                on_stack.discard(w)
+                component.append(w)
+                if w == v:
+                    break
+            components.append(component)
     return components

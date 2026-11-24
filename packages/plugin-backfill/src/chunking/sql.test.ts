@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import {
   buildChunkExecutionSql,
+  buildWhereClauseFromChunk,
   extractSourceTableRef,
   findTopLevelKeywords,
   injectSortKeyFilter,
@@ -9,6 +10,12 @@ import {
   splitTopLevel,
 } from './sql.js'
 import type { Chunk } from './types.js'
+
+// Opus delta review: every chunk INSERT runs without secondary queries, and
+// fully logged, whatever the profile says (#765). The delivery defaults (#821)
+// come first, the proof pins last.
+const DELIVERY = 'distributed_foreground_insert=1, materialized_views_ignore_errors=0'
+const PINNED_INSERT = "allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0, log_queries_probability=1"
 
 describe('findTopLevelKeywords', () => {
   test('finds keywords at the top level in ascending position order', () => {
@@ -248,7 +255,7 @@ describe('buildChunkExecutionSql asterisk settings', () => {
   test('copy mode pins SELECT * to insertable columns', () => {
     const sql = buildChunkExecutionSql({ planId: 'p', chunk, target: 'db.t', table: { sortKeys: [] } })
     expect(sql).toContain('SELECT *')
-    expect(sql.split('\n').at(-1)).toBe(`SETTINGS async_insert=0, ${pinned}`)
+    expect(sql.split('\n').at(-1)).toBe(`SETTINGS ${DELIVERY}, async_insert=0, ${pinned}, ${PINNED_INSERT}`)
   })
 
   test('mv_replay pins the settings once for every UNION ALL branch, with the dedup token', () => {
@@ -262,7 +269,7 @@ describe('buildChunkExecutionSql asterisk settings', () => {
     })
     expect(sql).toContain('UNION ALL')
     expect(sql.match(/SETTINGS/g)).toHaveLength(1)
-    expect(sql.split('\n').at(-1)).toBe(`SETTINGS async_insert=0, ${pinned}, insert_deduplication_token='tok'`)
+    expect(sql.split('\n').at(-1)).toBe(`SETTINGS ${DELIVERY}, async_insert=0, ${pinned}, insert_deduplication_token='tok', ${PINNED_INSERT}`)
   })
 })
 
@@ -345,11 +352,33 @@ describe('buildChunkExecutionSql cutover_copy', () => {
       'SELECT `id`, `ts`',
       'FROM db.events__cutover_1_snapshot',
       "WHERE _partition_id = 'all'",
-      "  AND id >= '100'",
-      "  AND id < '200'",
-      "  AND toDate(ts) >= '5'",
-      "  AND (`id`) NOT IN (SELECT `id` FROM db.events__cutover_1 WHERE id >= '100' AND id < '200')",
-      'SETTINGS async_insert=0, asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0, insert_deduplicate=0, select_sequential_consistency=1',
+      "  AND id >= CAST('100', 'UInt64')",
+      "  AND id < CAST('200', 'UInt64')",
+      "  AND toDate(ts) >= CAST('5', 'Date')",
+      "  AND (`id`) NOT IN (SELECT `id` FROM db.events__cutover_1 WHERE id >= CAST('100', 'UInt64') AND id < CAST('200', 'UInt64'))",
+      `SETTINGS ${DELIVERY}, async_insert=0, asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0, insert_deduplicate=0, select_sequential_consistency=1, ${PINNED_INSERT}`,
+    ])
+  })
+})
+
+describe('buildWhereClauseFromChunk numeric bounds', () => {
+  // chkit#826: a bare '3' equal to the partition id made ClickHouse derive a
+  // string comparison on _partition_id and match no row.
+  test('renders numeric bounds as constants of the sort key type', () => {
+    const where = buildWhereClauseFromChunk(
+      { partitionId: '3', ranges: [{ dimensionIndex: 0, from: '3', to: '133334' }, { dimensionIndex: 1, from: '-1.5' }] },
+      {
+        sortKeys: [
+          { name: 'id', type: 'UInt64', category: 'numeric', boundaryEncoding: 'literal' },
+          { name: 'amount', type: 'Decimal(18, 4)', category: 'numeric', boundaryEncoding: 'literal' },
+        ],
+      },
+    )
+    expect(where.split('\n')).toEqual([
+      "_partition_id = '3'",
+      "  AND id >= CAST('3', 'UInt64')",
+      "  AND id < CAST('133334', 'UInt64')",
+      "  AND amount >= CAST('-1.5', 'Decimal(18, 4)')",
     ])
   })
 })
