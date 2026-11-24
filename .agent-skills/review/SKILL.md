@@ -7,7 +7,14 @@ metadata:
 
 Read the linked issue and the complete PR diff against its base, including existing review comments. If the issue is unavailable, report that limitation rather than assuming its requirements.
 
-Load `design-principles` and inspect the descriptions of every repository skill in `.agent-skills/`. Read every skill that applies to the changed files or behavior, including supporting references needed for the review. Check the diff against each applicable skill and the issue's requirements; cite concrete violations rather than merely listing the skills loaded. Perform this review directly; per-skill subagents are not part of this workflow.
+Load these skills when they apply:
+
+- `design-principles`, always;
+- `code-architecture` for any code change, especially new modules or moved code;
+- `typescript-standards` for any TypeScript change;
+- `testing-bun` whenever tests were added or changed.
+
+Then read the descriptions of the other skills in `.agent-skills/`, and also load every one that applies to the changed files or behavior, with the references the review needs. Check the diff against each applicable skill and the issue's requirements; cite concrete violations rather than merely listing the skills loaded. Perform this review directly; per-skill subagents are not part of this workflow.
 
 Post actionable findings as PR comments with file and line references, the impact, and the violated requirement when relevant. Avoid repeating existing findings. If there are no findings, post a brief review result that states what was checked and any verification limitations.
 

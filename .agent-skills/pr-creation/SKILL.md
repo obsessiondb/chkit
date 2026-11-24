@@ -73,7 +73,7 @@ bun run registry:release -- --base origin/main <provider>
 bun run check:registry-releases -- --base origin/main
 ```
 
-Use the actual PR base if different. Commit the generated `registry/<provider>/releases/<version>.json` with its source and manifest; never hand-edit generated artifacts. See `CLAUDE.md#registry-integration-releases` and the registry authoring guide for the full workflow.
+Use the actual PR base if different. Commit the generated `registry/<provider>/releases/<version>.json` with its source and manifest; never hand-edit generated artifacts. See `AGENTS.md#registry-integration-releases` and the registry authoring guide for the full workflow.
 
 ### Package changesets
 

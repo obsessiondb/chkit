@@ -36,6 +36,8 @@ This is a monorepo managed with Bun workspaces and Turborepo.
 - Every package README links to the `chkit` CLI on npm as the entry point and to the documentation website.
 - Internal packages (`@chkit/clickhouse`, `@chkit/codegen`) are not meant to be installed directly by users.
 - Plugins extend the CLI and are registered in `clickhouse.config.ts` via the `plugins` array.
+- Agent skills live in `.agent-skills/`; `.claude/skills` (Claude Code) and `.agents/skills` (Codex) are symlinks to it.
+- Load the `pr-creation` skill before you commit, push or open a pull request.
 
 ## Examples
 
