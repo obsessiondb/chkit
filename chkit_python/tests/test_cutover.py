@@ -1416,10 +1416,11 @@ def test_cutover_chunk_skips_keys_the_shadow_holds() -> None:
         "SELECT `id`, `ts`",
         "FROM db.events__cutover_1_snapshot",
         "WHERE _partition_id = 'all'",
-        "  AND id >= '100'",
-        "  AND id < '200'",
-        "  AND toDate(ts) >= '5'",
-        "  AND (`id`) NOT IN (SELECT `id` FROM db.events__cutover_1 WHERE id >= '100' AND id < '200')",
+        "  AND id >= CAST('100', 'UInt64')",
+        "  AND id < CAST('200', 'UInt64')",
+        "  AND toDate(ts) >= CAST('5', 'Date')",
+        "  AND (`id`) NOT IN (SELECT `id` FROM db.events__cutover_1 "
+        "WHERE id >= CAST('100', 'UInt64') AND id < CAST('200', 'UInt64'))",
         "SETTINGS async_insert=0, asterisk_include_materialized_columns=0, "
         "asterisk_include_alias_columns=0, insert_deduplicate=0, select_sequential_consistency=1, "
         "allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, log_queries=1, "
