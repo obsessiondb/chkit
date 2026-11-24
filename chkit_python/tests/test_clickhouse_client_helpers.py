@@ -139,6 +139,7 @@ def test_execute_retries_unknown_database_without_the_database() -> None:
     client.execute("CREATE DATABASE IF NOT EXISTS x")
 
     assert fake.command.call_count == 2
+    assert all(call.kwargs["transport_settings"] == {"X-DDL": "1"} for call in fake.command.call_args_list)
     assert "use_database" not in fake.command.call_args_list[0].kwargs
     assert fake.command.call_args_list[1].kwargs["use_database"] is False
 
@@ -437,7 +438,8 @@ def test_native_control_uses_a_separate_bounded_session_free_request(httpx_mock:
     for name in cache_settings:
         assert request.url.params[name] == "0"
     client.query("SELECT 1", settings=cache_settings)
-    fake.query.assert_called_once_with("SELECT 1", settings=cache_settings)
+    fake.query.assert_called_once_with("SELECT 1", settings=cache_settings,
+                                       transport_settings={"X-DDL": "1"})
 
 
 def test_control_request_deadline_bounds_a_stuck_body() -> None:
@@ -1115,11 +1117,34 @@ def test_framed_read_accepts_genuine_zero_rows_without_precision_settings() -> N
     client, fake = _stub_client()
     fake.raw_query.return_value = b'{"meta":[],"data":[],"rows":0}'
     assert client.query("SELECT name FROM journal", {"default_format": "JSONStrings"}).rows == []
-    assert fake.raw_query.call_args.kwargs == {"settings": {}, "fmt": "JSONStrings"}
+    assert fake.raw_query.call_args.kwargs == {"settings": {}, "fmt": "JSONStrings", "transport_settings": {"X-DDL": "1"}}
 
 
 def test_readonly_framed_read_uses_builtin_jsonstrings_without_changing_settings() -> None:
     client, fake = _stub_client()
     fake.raw_query.return_value = b'{"meta":[{"name":"n","type":"UInt64"}],"data":[{"n":"18446744073709551615"}],"rows":1}'
     assert client.query("SELECT n FROM journal", {"default_format": "JSONStrings"}).rows == [{"n": "18446744073709551615"}]
-    assert fake.raw_query.call_args.kwargs == {"settings": {}, "fmt": "JSONStrings"}
+    assert fake.raw_query.call_args.kwargs == {"settings": {}, "fmt": "JSONStrings", "transport_settings": {"X-DDL": "1"}}
+
+
+@pytest.mark.parametrize("mode", ["execute", "tracked", "query", "strings", "json"])
+def test_synchronous_requests_pin_to_ddl_node_like_typescript(mode: str) -> None:
+    client, driver = _stub_client()
+    driver.query.return_value = SimpleNamespace(column_names=[], result_rows=[])
+    driver.raw_query.return_value = b'{"meta":[],"data":[],"rows":0}'
+    if mode == "execute":
+        client.execute("CREATE FUNCTION f AS x -> x")
+        call = driver.command.call_args
+    elif mode == "tracked":
+        client.execute_tracked("CREATE FUNCTION f AS x -> x", lambda: None, lambda: "tracked")
+        call = driver.command.call_args
+    elif mode == "query":
+        client.query("SELECT * FROM system.functions")
+        call = driver.query.call_args
+    elif mode == "strings":
+        client.query("SELECT * FROM system.functions", settings={"default_format": "JSONStrings"})
+        call = driver.raw_query.call_args
+    else:
+        client.query_json("SELECT * FROM system.functions")
+        call = driver.raw_query.call_args
+    assert call.kwargs["transport_settings"] == {"X-DDL": "1"}

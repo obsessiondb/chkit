@@ -14,7 +14,7 @@ def _definitions(*queries: str) -> dict[str, SQLUDF]:
 
 def test_scalar_substitution_preserves_precedence_arrays_maps_and_quotes() -> None:
     functions = _definitions("CREATE FUNCTION f AS (x, y) -> x - y")
-    assert expand_sql_udfs("SELECT f(a + b, c * d)", functions) == "SELECT ((a + b) - (c * d))"
+    assert expand_sql_udfs("SELECT f(a + b, c * d)", functions) == "SELECT (a + b) - (c * d)"
     tuple_function = _definitions("CREATE FUNCTION f AS (x, y) -> tuple(x, y, 'x', `x`)")
     assert expand_sql_udfs("SELECT f([1, 2], map('a,b', [3,4]))", tuple_function) == (
         "SELECT tuple([1, 2], map('a,b', [3,4]), 'x', [1, 2])"
@@ -50,3 +50,18 @@ def test_definitions_introducing_scopes_or_aliases_stay_unsupported() -> None:
         "CREATE FUNCTION f AS (x, x) -> x",
     ):
         assert parse_sql_udf(query) is None
+
+
+def test_arithmetic_expansion_wraps_operands_but_not_complete_projection() -> None:
+    functions = _definitions("CREATE FUNCTION f AS (x, y) -> x - y")
+    assert expand_sql_udfs("SELECT c, f(a, b) AS value FROM t", functions) == "SELECT c, a - b AS value FROM t"
+    assert expand_sql_udfs("SELECT toString(f(a, b)) FROM t", functions) == "SELECT toString(a - b) FROM t"
+    assert expand_sql_udfs("SELECT f(a, b) AS value FROM t", functions) == "SELECT a - b AS value FROM t"
+    assert expand_sql_udfs("SELECT f(a, b) * c FROM t", functions) == "SELECT (a - b) * c FROM t"
+    assert expand_sql_udfs("SELECT c - f(a, b) FROM t", functions) == "SELECT c - (a - b) FROM t"
+
+
+def test_stored_scalar_parentheses_preserve_tuple_expressions() -> None:
+    functions = _definitions("CREATE FUNCTION f AS x -> ((x + 1))", "CREATE FUNCTION g AS x -> (x, x)")
+    assert expand_sql_udfs("SELECT f(a) AS x", functions) == "SELECT a + 1 AS x"
+    assert expand_sql_udfs("SELECT g(a) AS x", functions) == "SELECT (a, a) AS x"

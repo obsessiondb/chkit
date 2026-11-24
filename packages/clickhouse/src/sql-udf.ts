@@ -2,6 +2,7 @@ import {
 	findMatchingParen,
 	identifierName,
 	isTrivia,
+	stripWrappingParens,
 	tokenizeSQL,
 } from '@chkit/core'
 
@@ -109,7 +110,17 @@ export function expandSQLUDFs(
 				.join('')
 			const replacement = expand(body, new Set([...active, name]), depth + 1)
 			if (replacement === undefined) return undefined
-			out += input.slice(cursor, token.start) + wrapReplacement(replacement)
+			const following = tokens.find((part) => part.start > end)
+			// Older server formatters retain redundant grouping around whole expressions.
+			const delimited =
+				['SELECT', '(', ',', '['].includes(
+					tokens[i - 1]?.text.toUpperCase() ?? '',
+				) &&
+				(following === undefined ||
+					['AS', 'FROM', ',', ')', ']'].includes(following.text.toUpperCase()))
+			out +=
+				input.slice(cursor, token.start) +
+				(delimited ? unwrapScalar(replacement) : wrapReplacement(replacement))
 			cursor = end + 1
 			while (tokens[i + 1] && (tokens[i + 1]?.start ?? end + 1) <= end) i += 1
 		}
@@ -168,4 +179,13 @@ function splitArguments(sql: string): string[] | undefined {
 	return stack.length === 0 && arguments_.every(Boolean)
 		? arguments_
 		: undefined
+}
+
+function unwrapScalar(body: string): string {
+	for (;;) {
+		const inner = stripWrappingParens(body)
+		if (inner === body || (splitArguments(inner)?.length ?? 0) !== 1)
+			return body
+		body = inner
+	}
 }

@@ -1,1 +1,1 @@
-`check` and `drift` recognize ClickHouse's stored UNION CTE and SQL UDF rewrites and exclude materialized-view backing tables from unexpected objects.
+`check` and `drift` recognize ClickHouse's stored UNION CTE and SQL UDF rewrites, including arithmetic on ObsessionDB, and exclude materialized-view backing tables from unexpected objects. Synchronous reads and writes now use the same ObsessionDB DDL-node routing as the TypeScript client.
