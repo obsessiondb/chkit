@@ -41,6 +41,7 @@ chkit ingest repair [flags]
 |------|------|---------|-------------|
 | `--from <timestamp>` | string | — | Backfill lower bound, e.g. `2026-01-01T00:00:00Z` or `2026-01-01T00:00:00+01:00`. Requires `--backfill` |
 | `--to <timestamp>` | string | — | Backfill upper bound, e.g. `2026-02-01T00:00:00Z` or `2026-02-01T00:00:00+01:00`. Requires `--backfill` |
+| `--retries <count>` | string | Plugin option | Non-negative decimal integer (digits only). Overrides `retry.retries` for this run; see the [retry policy](/plugins/ingest/#retry-policy) for defaults, valid values, and provider-directed waits |
 | `--max-duration <seconds>` | string | `3600` | Execution budget, at most `2147483` seconds (about 24.8 days). Overrides the plugin's `maxDurationSeconds` option |
 
 ### `repair` only
@@ -153,7 +154,7 @@ chkit ingest repair --tag stream:helpdesk.tickets --apply <fingerprint>
 |------|---------|
 | 0 | Success. For `run`, every selected stream succeeded; for `doctor`, every history is healthy; a repair preview completed or the reviewed replacement was materialized |
 | 1 | Error, including an unknown flag or missing flag value, an unhealthy `doctor` report, or a `run` with any stream that did not succeed |
-| 2 | Configuration error: an invalid pipeline definition, a definition module that fails to load, no exported pipeline, no matching stream, an invalid `--backfill`, `--from`, `--to`, or `--max-duration` value, `--from`/`--to` without `--backfill`, or missing direct connection |
+| 2 | Configuration error: an invalid pipeline definition, a definition module that fails to load, no exported pipeline, no matching stream, an invalid `--backfill`, `--from`, `--to`, `--max-duration`, or `--retries` value, `--from`/`--to` without `--backfill`, or missing direct connection |
 
 ## JSON output
 

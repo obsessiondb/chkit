@@ -94,9 +94,7 @@ describe('ingest status without a journal', () => {
       for (const read of reads) {
         expect(read.params.has('select_sequential_consistency')).toBe(sendsSettings)
         expect(read.params.has('use_query_cache')).toBe(sendsSettings)
-        expect(read.params.has('output_format_json_quote_64bit_integers')).toBe(sendsSettings)
-        // Unquoted, UInt64 values would arrive as imprecise JSON numbers.
-        expect(read.query.includes('REPLACE (toString(event_seq) AS event_seq, toString(payload_hash) AS payload_hash')).toBe(!sendsSettings)
+        expect(read.query).toMatch(/FORMAT JSONStrings\b/)
       }
     })
   }

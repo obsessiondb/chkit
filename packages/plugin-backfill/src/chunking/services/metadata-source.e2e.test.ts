@@ -27,7 +27,7 @@ afterAll(async () => {
   await executor.command(`DROP TABLE IF EXISTS ${fqn}`)
   await executor.command(`DROP TABLE IF EXISTS ${dateFqn}`)
   await executor.close()
-})
+}, 60_000)
 
 function plannerContext(from: string, to: string, tableName = table): PlannerContext {
   return {

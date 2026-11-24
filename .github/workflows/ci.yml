@@ -8,9 +8,13 @@ on:
   # "Release: prepare" opens its PR with GITHUB_TOKEN, which does not start
   # pull_request runs, so it dispatches CI on the release branch instead.
   workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
 
 jobs:
   verify:
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     runs-on: blacksmith-16vcpu-ubuntu-2404
     steps:
       - name: Checkout
@@ -20,6 +24,10 @@ jobs:
 
       - name: Setup Bun
         uses: ./.github/actions/setup
+
+      - name: Read release version
+        id: version
+        run: echo "version=$(bun -p 'require("./packages/cli/package.json").version')" >> "$GITHUB_OUTPUT"
 
       - name: Fallow analysis
         if: github.event_name == 'pull_request'
@@ -46,38 +54,16 @@ jobs:
         run: bun run verify
 
   obsessiondb:
-    runs-on: blacksmith-8vcpu-ubuntu-2404
     needs: verify
-    # Push to main, and a manual dispatch of this workflow so a branch can
-    # observe the managed target. Pull requests stay off: they cannot be
-    # trusted with the test database secrets.
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
-    # Fixture tables are shared on the managed test database. Let an active
-    # run finish before another run reseeds them.
-    concurrency:
-      group: obsessiondb-tests
-      cancel-in-progress: false
-    env:
-      CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
-      CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
-      CLICKHOUSE_DB: ${{ secrets.CLICKHOUSE_DB }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Check ObsessionDB test configuration
-        run: |
-          : "${CLICKHOUSE_HOST:?Set the CLICKHOUSE_HOST repository secret}"
-          : "${CLICKHOUSE_PASSWORD:?Set the CLICKHOUSE_PASSWORD repository secret}"
-
-      - name: Setup Bun
-        uses: ./.github/actions/setup
-
-      - name: Test against ObsessionDB
-        env:
-          TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
-          TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
-        run: bun run test:obsessiondb
+    if: >-
+      !cancelled() &&
+      (github.event_name == 'schedule' ||
+       (needs.verify.result == 'success' &&
+        ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+         (github.event_name == 'workflow_dispatch' &&
+          !(startsWith(github.ref, 'refs/heads/release/') && contains(needs.verify.outputs.version, '-'))))))
+    uses: ./.github/workflows/obsessiondb.yml
+    secrets: inherit
 
   deploy:
     runs-on: blacksmith-4vcpu-ubuntu-2404

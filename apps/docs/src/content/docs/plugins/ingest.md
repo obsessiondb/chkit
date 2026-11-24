@@ -182,9 +182,23 @@ A checkpoint records its strategy id and version. Changing either makes the next
 
 ## Retry policy
 
-Retries need no configuration. Requests use [`p-retry`](https://github.com/sindresorhus/p-retry): up to 5 retries with exponential backoff and jitter from 1 second, within 10 minutes. A provider's `Retry-After` pauses every request of the pipeline until then and does not count against the 5 retries. Retry waits release fetch and load capacity for other streams.
+Requests use [`p-retry`](https://github.com/sindresorhus/p-retry) with exponential backoff and jitter. A provider's `Retry-After` pauses every request of the pipeline until then; when it is at least `minTimeout`, it does not consume the configured retry count. Retry waits release fetch and load capacity for other streams.
 
 Only transient failures are retried: network error codes, timeouts, and retryable HTTP statuses. Only requests made with `context.fetch`, `context.attempt`, or a `paginate` page are retried. Any other failure fails the stream, whatever its type, and the next run resumes from the latest committed checkpoint. See [retry boundaries](/api-sync/operations/#retry-boundaries).
+
+Configure this execution-wide policy with `ingest({ retry: { retries: 2 } })`. It applies independently to every source attempt (`context.fetch`, `context.attempt`, and pagination), across all selected streams; it is not a shared pool of retries for the run. `retries` counts retries after the initial attempt. Setting it to `0` disables all source retries, including provider-directed retries. With retries enabled and count remaining, provider-directed waits that do not consume the count remain bounded by `maxRetryTime` and the execution duration.
+
+Supported `retry` fields (all optional):
+
+| Field | Default | Supported values |
+|---|---|---|
+| `retries` | `5` | Non-negative safe integer |
+| `minTimeout` | `1000` | Finite milliseconds from `0` to `2147483647` |
+| `maxTimeout` | `60000` | Finite milliseconds from `0` to `2147483647` |
+| `randomize` | `true` | Boolean |
+| `maxRetryTime` | `600000` | Finite non-negative milliseconds |
+
+Unknown retry fields, including classifier hooks, are rejected. Unspecified fields retain their defaults. Registration options override factory options at the top level (a registration `retry` object replaces the factory `retry` object). For one run, [`--retries`](/cli/ingest/#run-only) overrides only `retry.retries`, preserving other resolved retry settings. There are no stream or pipeline retry options.
 
 ## Commands
 
@@ -225,6 +239,7 @@ Overlapping processes record independent histories. Scheduler concurrency contro
 |---|---|---|
 | `journalTable` | `_chkit_ingestion_journal` | Append-only checkpoint journal in the configured database |
 | `maxDurationSeconds` | `3600` | Execution budget, at most `2147483` seconds (about 24.8 days). Exhausting it ends the run as incomplete and keeps committed progress |
+| `retry` | See [Retry policy](#retry-policy) | Execution-wide source retry settings |
 | `prefetchBatches` | `1` | Mapped batches buffered between fetching and loading |
 
 ## Related pages

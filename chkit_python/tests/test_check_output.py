@@ -422,3 +422,29 @@ def test_force_shared_engines_fails_a_distributed_table(project: Path) -> None:
             "findingCodes": ["obsessiondb_distributed_unsupported"],
         }
     }
+
+
+def test_data_copy_warnings_do_not_change_generate_or_check_exit_status(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    name = "20990101000000_copy.sql"
+    (project / "chkit" / "migrations" / name).write_text("INSERT INTO dst SELECT * FROM src;")
+    config = project / "clickhouse.config.py"
+    config.write_text(config.read_text().replace('"plugins": []', '"check": {"failOnPending": False}, "plugins": []'))
+    generated = CliRunner().invoke(app, ["generate", "--dryrun", "--json"])
+    checked = _check("--json", "--table", "events")
+    assert generated.exit_code == 0, generated.output
+    assert checked.exit_code == 0, checked.output
+    expected = json.loads(generated.stdout)["warnings"]
+    assert len(expected) == 1
+    assert name in expected[0]
+    assert json.loads(checked.stdout)["warnings"] == expected
+    assert json.loads(checked.stdout)["ok"] is True
+    text = _check()
+    assert text.exit_code == 0, text.output
+    assert "Data copies should usually run as resumable backfill jobs" in text.output
+    strict = _check("--strict", "--json")
+    assert strict.exit_code == 1
+    assert json.loads(strict.stdout)["failedChecks"] == ["pending_migrations"]
+    monkeypatch.setattr(_FakeJournalStore, "applied", _migration_files(project))
+    assert json.loads(_check("--strict", "--json").stdout)["warnings"] == []
