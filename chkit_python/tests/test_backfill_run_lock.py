@@ -166,8 +166,10 @@ def _python(script: str, *, stdin: int | None = None) -> subprocess.Popen[str]:
 def test_one_of_several_processes_racing_for_the_lock_gets_it(tmp_path: Path) -> None:
     runs_dir = _runs_dir(tmp_path)
     lock_path = run_lock_path(runs_dir, PLAN_ID)
+    release_path = tmp_path / "release"
     script = f"""
-import sys
+import time
+from pathlib import Path
 from chkit_plugin_backfill.errors import BackfillConfigError
 from chkit_plugin_backfill.run_lock import acquire_run_lock
 try:
@@ -176,11 +178,12 @@ except BackfillConfigError:
     print("busy", flush=True)
 else:
     print("acquired", flush=True)
-    sys.stdin.readline()
+    while not Path({str(release_path)!r}).exists():
+        time.sleep(0.01)
     lock.release()
 """
 
-    children = [_python(script, stdin=subprocess.PIPE) for _ in range(6)]
+    children = [_python(script) for _ in range(6)]
     outcomes = []
     try:
         for child in children:
@@ -190,9 +193,17 @@ else:
             outcomes.append(child.stdout.readline().strip())
         assert sorted(outcomes) == ["acquired", "busy", "busy", "busy", "busy", "busy"]
     finally:
+        release_path.touch()
+        results = []
         for child in children:
-            _, stderr = child.communicate(input="release\n", timeout=30)
-            assert child.returncode == 0, stderr
+            try:
+                _, stderr = child.communicate(timeout=30)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                _, stderr = child.communicate()
+            results.append((child.returncode, stderr))
+        for code, stderr in results:
+            assert code == 0, stderr
     assert list(runs_dir.iterdir()) == []
 
 
