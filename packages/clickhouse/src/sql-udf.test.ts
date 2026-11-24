@@ -16,7 +16,7 @@ function definitions(...queries: string[]): Map<string, SQLUDF> {
 test('scalar substitution preserves precedence, arrays, maps and quoted values', () => {
 	const functions = definitions('CREATE FUNCTION f AS (x, y) -> x - y')
 	expect(expandSQLUDFs('SELECT f(a + b, c * d)', functions)).toBe(
-		'SELECT ((a + b) - (c * d))',
+		'SELECT (a + b) - (c * d)',
 	)
 	const tuple = definitions(
 		"CREATE FUNCTION f AS (x, y) -> tuple(x, y, 'x', `x`)",
@@ -44,7 +44,9 @@ test('nested registered functions expand and recursive definitions fail closed',
 	const recursive = definitions('CREATE FUNCTION f AS (x) -> f(x)')
 	expect(expandSQLUDFs('SELECT f(a)', recursive)).toBeUndefined()
 	expect(expandSQLUDFs('SELECT f(a,b)', functions)).toBeUndefined()
-	expect(expandSQLUDFs(`SELECT ${'f('.repeat(70)}a${')'.repeat(70)}`, functions)).toBeUndefined()
+	expect(
+		expandSQLUDFs(`SELECT ${'f('.repeat(70)}a${')'.repeat(70)}`, functions),
+	).toBeUndefined()
 })
 
 test('definitions introducing scopes or aliases stay unsupported', () => {
@@ -55,4 +57,34 @@ test('definitions introducing scopes or aliases stay unsupported', () => {
 		'CREATE FUNCTION f AS (x, x) -> x',
 	])
 		expect(parseSQLUDF(query)).toBeUndefined()
+})
+
+test('arithmetic expansion wraps operands but not a complete projection', () => {
+	const functions = definitions('CREATE FUNCTION f AS (x, y) -> x - y')
+	expect(expandSQLUDFs('SELECT c, f(a, b) AS value FROM t', functions)).toBe(
+		'SELECT c, a - b AS value FROM t',
+	)
+	expect(expandSQLUDFs('SELECT toString(f(a, b)) FROM t', functions)).toBe(
+		'SELECT toString(a - b) FROM t',
+	)
+	expect(expandSQLUDFs('SELECT f(a, b) AS value FROM t', functions)).toBe(
+		'SELECT a - b AS value FROM t',
+	)
+	expect(expandSQLUDFs('SELECT f(a, b) * c FROM t', functions)).toBe(
+		'SELECT (a - b) * c FROM t',
+	)
+	expect(expandSQLUDFs('SELECT c - f(a, b) FROM t', functions)).toBe(
+		'SELECT c - (a - b) FROM t',
+	)
+})
+
+test('stored scalar parentheses unwrap without turning tuples into select lists', () => {
+	const functions = definitions(
+		'CREATE FUNCTION f AS x -> ((x + 1))',
+		'CREATE FUNCTION g AS x -> (x, x)',
+	)
+	expect(expandSQLUDFs('SELECT f(a) AS x', functions)).toBe('SELECT a + 1 AS x')
+	expect(expandSQLUDFs('SELECT g(a) AS x', functions)).toBe(
+		'SELECT (a, a) AS x',
+	)
 })

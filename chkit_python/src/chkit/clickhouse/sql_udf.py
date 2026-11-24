@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from chkit.core.sql_lexer import identifier_name, is_trivia, tokenize_sql
-from chkit.core.sql_scan import find_matching_paren
+from chkit.core.sql_scan import find_matching_paren, strip_wrapping_parens
 
 _MAX_DEPTH = 64
 _MAX_SUBSTITUTIONS = 1000
@@ -110,7 +110,16 @@ def expand_sql_udfs(sql: str, definitions: Mapping[str, SQLUDF]) -> str | None:
             replacement = expand("".join(body), active | {name}, depth + 1)
             if replacement is None:
                 return None
-            output.append(value[cursor : token.start] + _wrap_replacement(replacement))
+            following = next((part for part in tokens if part.start > end), None)
+            # Older server formatters retain redundant grouping around whole expressions.
+            delimited = (
+                i > 0 and tokens[i - 1].text.upper() in ("SELECT", "(", ",", "[")
+                and (following is None or following.text.upper() in ("AS", "FROM", ",", ")", "]"))
+            )
+            output.append(
+                value[cursor : token.start]
+                + (_unwrap_scalar(replacement) if delimited else _wrap_replacement(replacement))
+            )
             cursor = end + 1
             while i + 1 < len(tokens) and tokens[i + 1].start <= end:
                 i += 1
@@ -170,3 +179,12 @@ def _split_arguments(sql: str) -> list[str] | None:
             start = token.end
     arguments.append(sql[start:].strip())
     return arguments if not stack and all(arguments) else None
+
+
+def _unwrap_scalar(body: str) -> str:
+    while True:
+        inner = strip_wrapping_parens(body)
+        arguments = _split_arguments(inner)
+        if inner == body or arguments is None or len(arguments) != 1:
+            return body
+        body = inner

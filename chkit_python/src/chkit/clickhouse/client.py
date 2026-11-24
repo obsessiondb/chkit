@@ -272,12 +272,13 @@ class ClickHouseClient:
         settings = {**self._write_settings(), **(settings or {})}
         check()
         try:
-            self._client.command(statement, settings=settings)
+            self._client.command(statement, settings=settings, transport_settings={"X-DDL": "1"})
         except DatabaseError as error:
             if not is_unknown_database_error(error):
                 raise
             check()
-            self._client.command(statement, settings=settings, use_database=False)
+            self._client.command(statement, settings=settings, use_database=False,
+                                 transport_settings={"X-DDL": "1"})
 
     def execute_tracked(
         self,
@@ -315,6 +316,7 @@ class ClickHouseClient:
                     **(settings or {}), "query_id": query_id,
                 },
                 use_database=use_database,
+                transport_settings={"X-DDL": "1"},
             )
         finally:
             self._client.http = pool
@@ -380,11 +382,13 @@ class ClickHouseClient:
         if effective_settings and effective_settings.get("default_format") == "JSONStrings":
             effective_settings.pop("default_format")
             payload = json.loads(
-                self._client.raw_query(statement, settings=effective_settings, fmt="JSONStrings")
+                self._client.raw_query(statement, settings=effective_settings, fmt="JSONStrings",
+                                       transport_settings={"X-DDL": "1"})
             )
             return QueryResult(column_names=[column["name"] for column in payload["meta"]],
                                rows=payload["data"])
-        result = self._client.query(statement, settings=effective_settings)
+        result = self._client.query(statement, settings=effective_settings,
+                                    transport_settings={"X-DDL": "1"})
         column_names: list[str] = list(result.column_names)
         rows: list[dict[str, Any]] = [
             dict(zip(column_names, row, strict=True)) for row in result.result_rows
@@ -402,7 +406,8 @@ class ClickHouseClient:
         """
         query_id = str(uuid.uuid4())
         body = self._client.raw_query(
-            js_trim(statement).rstrip(";"), settings={"query_id": query_id}, fmt="JSON"
+            js_trim(statement).rstrip(";"), settings={"query_id": query_id}, fmt="JSON",
+            transport_settings={"X-DDL": "1"}
         )
         return ClickHouseJsonQueryResult.model_validate(
             {**parse_json_result(body), "query_id": query_id}
