@@ -1421,10 +1421,10 @@ def test_cutover_chunk_skips_keys_the_shadow_holds() -> None:
         "  AND toDate(ts) >= CAST('5', 'Date')",
         "  AND (`id`) NOT IN (SELECT `id` FROM db.events__cutover_1 "
         "WHERE id >= CAST('100', 'UInt64') AND id < CAST('200', 'UInt64'))",
-        "SETTINGS async_insert=0, asterisk_include_materialized_columns=0, "
+        "SETTINGS distributed_foreground_insert=1, materialized_views_ignore_errors=0, async_insert=0, asterisk_include_materialized_columns=0, "
         "asterisk_include_alias_columns=0, insert_deduplicate=0, select_sequential_consistency=1, "
         "allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, log_queries=1, "
-        "log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0",
+        "log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0, log_queries_probability=1",
     ]
 
 
