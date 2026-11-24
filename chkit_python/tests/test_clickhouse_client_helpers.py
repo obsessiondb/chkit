@@ -54,6 +54,7 @@ from chkit.clickhouse.client import (
 )
 from chkit.clickhouse.control import run_control_request
 from chkit.core.model import ChxResolvedClickHouseConfig
+from chkit_plugin_backfill.plugin import _ThreadLocalExecutor
 
 
 def _stub_client() -> tuple[ClickHouseClient, MagicMock]:
@@ -78,6 +79,7 @@ def test_insert_with_list_of_dicts_infers_columns() -> None:
     assert args[0] == "events"
     assert args[1] == [[1, "a"], [2, "b"]]
     assert kwargs["column_names"] == ["id", "name"]
+    assert "transport_settings" not in kwargs
 
 
 def test_insert_with_list_of_lists_requires_column_names() -> None:
@@ -392,11 +394,13 @@ def test_submit_once_opens_its_driver_with_the_clients_tls_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     opened: list[dict[str, object]] = []
+    drivers: list[MagicMock] = []
 
     def get_client(**kwargs: object) -> MagicMock:
         opened.append(kwargs)
         driver = MagicMock()
         driver.command.return_value = None
+        drivers.append(driver)
         return driver
 
     monkeypatch.setattr("chkit.clickhouse.client.clickhouse_connect.get_client", get_client)
@@ -409,6 +413,9 @@ def test_submit_once_opens_its_driver_with_the_clients_tls_settings(
 
     assert len(opened) == 2
     main, submit = opened
+    assert "headers" not in main
+    assert "headers" not in submit
+    assert "transport_settings" not in drivers[1].command.call_args.kwargs
     assert submit["secure"] is True
     assert {key: submit[key] for key in ("host", "port", "secure", "username", "password")} == {
         key: main[key] for key in ("host", "port", "secure", "username", "password")
@@ -431,6 +438,7 @@ def test_native_control_uses_a_separate_bounded_session_free_request(httpx_mock:
     for name in ("result_overflow_mode", "group_by_overflow_mode", "set_overflow_mode", "timeout_overflow_mode", "read_overflow_mode"):
         assert request.url.params[name] == "throw"
     assert "session_id" not in request.url.params
+    assert "X-DDL" not in request.headers
     assert request.content == b"KILL QUERY WHERE query_id = 'old-query' SYNC\nFORMAT JSONStrings"
     fake.query.assert_not_called()
     fake.command.assert_not_called()
@@ -500,6 +508,8 @@ def test_submit_runs_on_its_own_driver_without_a_session(
     main.command.assert_not_called()
     assert submit_driver.database == "analytics"
     assert submit_kwargs == {**main_kwargs, "autogenerate_session_id": False}
+    assert "headers" not in main_kwargs
+    assert "headers" not in submit_kwargs
     assert [call.args for call in submit_driver.command.call_args_list] == [
         ("INSERT INTO t SELECT 1",),
         ("INSERT INTO t SELECT 2",),
@@ -1142,9 +1152,40 @@ def test_synchronous_requests_pin_to_ddl_node_like_typescript(mode: str) -> None
         client.query("SELECT * FROM system.functions")
         call = driver.query.call_args
     elif mode == "strings":
-        client.query("SELECT * FROM system.functions", settings={"default_format": "JSONStrings"})
+        client.query("SELECT name FROM journal", settings={"default_format": "JSONStrings"})
         call = driver.raw_query.call_args
     else:
         client.query_json("SELECT * FROM system.functions")
         call = driver.raw_query.call_args
     assert call.kwargs["transport_settings"] == {"X-DDL": "1"}
+
+
+@pytest.mark.parametrize("sql", ["SELECT 1", "KILL QUERY WHERE query_id='old' ASYNC", "INSERT INTO journal SELECT 1"])
+def test_control_requests_remain_unpinned_like_typescript(sql: str, httpx_mock: HTTPXMock) -> None:
+    client, _driver = _stub_client()
+    httpx_mock.add_response(text='{"meta":[],"data":[],"rows":0}')
+    assert client.query_control(sql, 1000).rows == []
+    request = httpx_mock.get_request()
+    assert request is not None
+    assert "X-DDL" not in request.headers
+    assert "session_id" not in request.url.params
+
+
+def test_status_reads_use_pinned_framed_queries(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, driver = _stub_client()
+    driver.raw_query.return_value = b'{"meta":[],"data":[],"rows":0}'
+    monkeypatch.setattr("chkit.clickhouse.client.resolve_replica_fanout", lambda *_args: None)
+    assert client.query_status("own-query", running_only=True).status == "unknown"
+    assert driver.raw_query.call_args.kwargs["transport_settings"] == {"X-DDL": "1"}
+
+
+def test_plugin_row_reads_use_pinned_client_queries(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, driver = _stub_client()
+    driver.query.return_value = SimpleNamespace(column_names=["name"], result_rows=[["entry"]])
+    monkeypatch.setattr(ClickHouseClient, "connect", lambda _config: client)
+    executor = _ThreadLocalExecutor(ChxResolvedClickHouseConfig(
+        url="http://localhost:8123", username="default", password="", database="default", secure=False
+    ))
+    assert executor.query_rows("SELECT name FROM journal") == [{"name": "entry"}]
+    assert driver.query.call_args.kwargs["transport_settings"] == {"X-DDL": "1"}
+    executor.close()
