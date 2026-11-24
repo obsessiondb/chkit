@@ -24,7 +24,10 @@ const chunk: Chunk = {
   analysis: { lineage: [] },
 }
 const ASTERISK = 'asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0'
-const PROOF_PINS = "allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0, log_queries_probability=1"
+const WRITTEN = "async_insert=0, asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0, insert_deduplication_token per chunk, allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0, log_queries_probability=1"
+const CUTOVER_WRITTEN = WRITTEN.replace('asterisk_include_alias_columns=0, ', 'asterisk_include_alias_columns=0, insert_deduplicate=0, select_sequential_consistency=1, ')
+const refusal = (named: string, written = WRITTEN) =>
+  `insertSettings sets ${named}, which chkit sets itself on every backfill chunk INSERT (${written}): remove it from insertSettings.`
 const FOREGROUND_GUARANTEE = "a chunk can be recorded done before its rows reach a Distributed table's shards"
 const VIEWS_GUARANTEE = "a materialized view's failed write is dropped and the chunk is still recorded done"
 
@@ -51,19 +54,6 @@ describe('insertSettings rendering', () => {
     )
   })
 
-  test('a pinned setting set to its pinned value is dropped', () => {
-    expect(settingsLine({
-      enable_parallel_replicas: 0,
-      allow_experimental_parallel_reading_from_replicas: false,
-      log_queries: true,
-      log_queries_min_type: 'query_start',
-      distributed_foreground_insert: 1,
-      insert_distributed_sync: true,
-      materialized_views_ignore_errors: '0',
-      max_insert_threads: 2,
-    })).toBe(`SETTINGS max_insert_threads=2, async_insert=0, ${ASTERISK}, ${PINNED_INSERT_SETTINGS_SQL}`)
-  })
-
   test('a value cannot close its quote', () => {
     expect(settingsLine({ log_comment: "x\\', parallel_distributed_insert_select=2, log_comment='y" })).toBe(
       `SETTINGS log_comment='x\\\\\\', parallel_distributed_insert_select=2, log_comment=\\'y', async_insert=0, ${ASTERISK}, ${PINNED_INSERT_SETTINGS_SQL}`,
@@ -80,28 +70,33 @@ describe('insertSettings rendering', () => {
   )
 })
 
-describe('insertSettings proof pins', () => {
+// Codex review r4: a setting chkit writes itself cannot be named in
+// insertSettings, whatever the value: chkit's own is written last and wins.
+describe('insertSettings compulsory settings', () => {
   test.each([
-    [{ log_queries: false }, 'log_queries=false'],
-    [{ parallel_distributed_insert_select: 2 }, 'parallel_distributed_insert_select=2'],
-    [{ log_queries_min_type: 'QUERY_FINISH' }, "log_queries_min_type='QUERY_FINISH'"],
-    [{ log_queries_min_query_duration_ms: 1000 }, 'log_queries_min_query_duration_ms=1000'],
-    [{ allow_experimental_parallel_reading_from_replicas: 1 }, 'allow_experimental_parallel_reading_from_replicas=1'],
-    [{ enable_parallel_replicas: 1 }, 'enable_parallel_replicas=1 (an alias of allow_experimental_parallel_reading_from_replicas)'],
-  ] satisfies Array<[InsertSettings, string]>)('another value is refused: %p', (settings, named) => {
-    expect(() => settingsLine(settings)).toThrow(
-      `insertSettings sets ${named}, which every backfill chunk INSERT pins (${PROOF_PINS}): with another value, its failure cannot be proven from system.query_log, and a replay could write its rows twice. Remove them from insertSettings.`,
-    )
+    [{ log_queries: false }, 'log_queries'],
+    [{ log_queries: true }, 'log_queries'],
+    [{ parallel_distributed_insert_select: '00' }, 'parallel_distributed_insert_select'],
+    [{ log_queries_min_type: 'QUERY_FINISH' }, 'log_queries_min_type'],
+    [{ log_queries_min_query_duration_ms: 0 }, 'log_queries_min_query_duration_ms'],
+    [{ log_queries_probability: '1e0' }, 'log_queries_probability'],
+    [{ allow_experimental_parallel_reading_from_replicas: 0 }, 'allow_experimental_parallel_reading_from_replicas'],
+    [{ enable_parallel_replicas: 0 }, 'enable_parallel_replicas (an alias of allow_experimental_parallel_reading_from_replicas)'],
+    [{ async_insert: 0 }, 'async_insert'],
+    [{ asterisk_include_alias_columns: true }, 'asterisk_include_alias_columns'],
+    [{ insert_deduplication_token: 'shared' }, 'insert_deduplication_token'],
+  ] satisfies Array<[InsertSettings, string]>)('a setting chkit writes itself is refused whatever its value: %p', (settings, named) => {
+    expect(() => settingsLine(settings, 'tok')).toThrow(refusal(named))
   })
 
-  test('an alias the server lists is checked and dropped too', () => {
+  test('an alias the server lists is refused too', () => {
     const aliases = { log_queries_alias: 'log_queries' }
-    expect(() => assertInsertSettingsKeepPinned({ log_queries_alias: 0 }, aliases)).toThrow(
-      'insertSettings sets log_queries_alias=0 (an alias of log_queries)',
-    )
-    const kept = { log_queries_alias: 1, max_insert_threads: 4 }
+    for (const value of [0, 1]) {
+      expect(() => assertInsertSettingsKeepPinned({ log_queries_alias: value }, aliases)).toThrow(refusal('log_queries_alias (an alias of log_queries)'))
+    }
+    const kept = { max_insert_threads: 4 }
     assertInsertSettingsKeepPinned(kept, aliases)
-    expect(effectiveInsertSettings(kept, aliases)).toEqual({ max_insert_threads: 4 })
+    expect(effectiveInsertSettings(kept, aliases)).toEqual(kept)
   })
 })
 
@@ -129,14 +124,27 @@ describe('insertSettings delivery pins', () => {
     )
   })
 
+  // Codex review r4: a delivery pin's value is always the user's, used as it
+  // is; only chkit's default in its plain forms gives no warning.
   test('the default or a delivery pin at its value does not warn', () => {
     expect(deliveryOverrideWarning(undefined)).toBeUndefined()
-    expect(deliveryOverrideWarning({
-      distributed_foreground_insert: 1,
-      insert_distributed_sync: true,
-      materialized_views_ignore_errors: '0',
-      max_insert_threads: 2,
-    })).toBeUndefined()
+    for (const settings of [
+      { distributed_foreground_insert: 1, materialized_views_ignore_errors: '0' },
+      { insert_distributed_sync: true, materialized_views_ignore_errors: false },
+      { distributed_foreground_insert: 'TRUE', materialized_views_ignore_errors: 'False' },
+      { distributed_foreground_insert: '1', max_insert_threads: 2 },
+    ] satisfies InsertSettings[]) {
+      expect(deliveryOverrideWarning(settings)).toBeUndefined()
+    }
+  })
+
+  test('a delivery pin in another form is used as it is and warns', () => {
+    expect(settingsLine({ distributed_foreground_insert: '1.0' })).toBe(
+      `SETTINGS distributed_foreground_insert='1.0', async_insert=0, ${ASTERISK}, ${foregroundOff}`,
+    )
+    expect(deliveryOverrideWarning({ distributed_foreground_insert: '1.0' })).toBe(
+      `Warning: insertSettings overrides what every backfill chunk INSERT sets by default: distributed_foreground_insert='1.0' (${FOREGROUND_GUARANTEE}).`,
+    )
   })
 
   test('a server alias of a delivery pin is kept under the pinned name', () => {
@@ -153,9 +161,9 @@ describe('insertSettings delivery pins', () => {
     expect(sql).toContain('distributed_foreground_insert=0')
   })
 
-  test('a delivery pin set twice to different values is refused', () => {
-    expect(() => assertInsertSettingsKeepPinned({ distributed_foreground_insert: 0, insert_distributed_sync: 1 })).toThrow(
-      'insertSettings sets distributed_foreground_insert more than once, with different values (distributed_foreground_insert=0, insert_distributed_sync=1). Keep one of them.',
+  test('a delivery pin set twice is refused', () => {
+    expect(() => assertInsertSettingsKeepPinned({ distributed_foreground_insert: 1, insert_distributed_sync: 1 })).toThrow(
+      'insertSettings sets distributed_foreground_insert more than once (distributed_foreground_insert, insert_distributed_sync). Keep one of them.',
     )
   })
 
@@ -180,7 +188,6 @@ describe('insertSettings delivery pins', () => {
 // pins, cannot be changed either: the per-chunk dedup token, synchronous
 // inserts, SELECT * expansion, and a cutover's dedup and consistent reads.
 describe('insertSettings fixed settings', () => {
-  const FIXED = 'async_insert=0, asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0'
   const cutoverSql = (insertSettings: InsertSettings) => buildChunkExecutionSql({
     planId: 'p',
     chunk,
@@ -193,39 +200,16 @@ describe('insertSettings fixed settings', () => {
   })
 
   test.each([
-    [{ insert_deduplication_token: 'shared' }, "insert_deduplication_token='shared'"],
-    [{ async_insert: 1 }, 'async_insert=1'],
-    [{ asterisk_include_alias_columns: true }, 'asterisk_include_alias_columns=true'],
-  ] satisfies Array<[InsertSettings, string]>)('a setting chkit writes itself is refused: %p', (settings, named) => {
-    expect(() => settingsLine(settings, 'tok')).toThrow(
-      `insertSettings sets ${named}, which chkit sets itself on every backfill chunk INSERT (${FIXED}, insert_deduplication_token per chunk): another value could drop, duplicate or delay a chunk's rows. Remove them from insertSettings.`,
-    )
-  })
-
-  test.each([
-    [{ select_sequential_consistency: 0 }, 'select_sequential_consistency=0'],
-    [{ insert_deduplicate: 1 }, 'insert_deduplicate=1'],
+    [{ select_sequential_consistency: 1 }, 'select_sequential_consistency'],
+    [{ insert_deduplicate: 0 }, 'insert_deduplicate'],
   ] satisfies Array<[InsertSettings, string]>)('a setting a cutover copy writes itself is refused: %p', (settings, named) => {
-    expect(() => cutoverSql(settings)).toThrow(
-      `insertSettings sets ${named}, which chkit sets itself on every backfill chunk INSERT (${FIXED}, insert_deduplicate=0, select_sequential_consistency=1, insert_deduplication_token per chunk): another value could drop, duplicate or delay a chunk's rows. Remove them from insertSettings.`,
-    )
+    expect(() => cutoverSql(settings)).toThrow(refusal(named, CUTOVER_WRITTEN))
   })
 
-  test('one with its value is dropped', () => {
-    // insert_deduplicate is the user's own outside a cutover copy.
-    expect(settingsLine({ async_insert: 0, insert_deduplicate: 1, max_insert_threads: 2 })).toBe(
+  test('insert_deduplicate is the user\'s own outside a cutover copy', () => {
+    expect(settingsLine({ insert_deduplicate: 1, max_insert_threads: 2 })).toBe(
       `SETTINGS insert_deduplicate=1, max_insert_threads=2, async_insert=0, ${ASTERISK}, ${PINNED_INSERT_SETTINGS_SQL}`,
     )
-    expect(cutoverSql({ select_sequential_consistency: true, insert_deduplicate: 0 }).split('\n').at(-1)).toBe(
-      `SETTINGS async_insert=0, ${ASTERISK}, insert_deduplicate=0, select_sequential_consistency=1, ${PINNED_INSERT_SETTINGS_SQL}`,
-    )
-  })
-
-  // Codex review: log_queries_probability = 0 would keep a chunk out of
-  // system.query_log, so it is a proof pin too.
-  test('log_queries_probability is a proof pin', () => {
-    expect(PINNED_INSERT_SETTINGS_SQL).toContain('log_queries_probability=1')
-    expect(() => settingsLine({ log_queries_probability: 0 })).toThrow('insertSettings sets log_queries_probability=0, which every')
   })
 })
 
@@ -262,39 +246,6 @@ describe('insertSettings order', () => {
     )
   })
 
-})
-
-// Codex review r3: a value equals chkit's only in the syntax ClickHouse reads
-// for that setting: plain ASCII digits (or true/false) for the Bool and UInt
-// settings, plain ASCII decimals for the Float log_queries_probability.
-describe('insertSettings value syntax', () => {
-  test.each([
-    { log_queries_probability: '1.00' },
-    { log_queries_probability: 1 },
-    { log_queries: '1' },
-    { log_queries: true },
-    { async_insert: 0 },
-    { async_insert: false },
-    { parallel_distributed_insert_select: '0' },
-  ] satisfies InsertSettings[])('a value in the setting\'s own syntax equals chkit\'s: %p', (settings) => {
-    expect(settingsLine(settings)).toBe(`SETTINGS async_insert=0, ${ASTERISK}, ${PINNED_INSERT_SETTINGS_SQL}`)
-  })
-
-  test.each([
-    [{ parallel_distributed_insert_select: '0e0' }, "parallel_distributed_insert_select='0e0'"],
-    [{ log_queries: '1.0000000000000001' }, "log_queries='1.0000000000000001'"],
-    [{ log_queries: '\u0661' }, "log_queries='\u0661'"],
-    [{ log_queries: '+1' }, "log_queries='+1'"],
-    [{ log_queries_probability: '1e0' }, "log_queries_probability='1e0'"],
-    [{ log_queries_probability: '+1.0' }, "log_queries_probability='+1.0'"],
-  ] satisfies Array<[InsertSettings, string]>)('a value outside the setting\'s own syntax is another value: %p', (settings, named) => {
-    expect(() => settingsLine(settings)).toThrow(`insertSettings sets ${named}, which`)
-  })
-
-  test('a fixed setting outside its syntax is refused, and a delivery one kept', () => {
-    expect(() => settingsLine({ async_insert: '+0' })).toThrow("insertSettings sets async_insert='+0', which")
-    expect(effectiveInsertSettings({ distributed_foreground_insert: '1.0' })).toEqual({ distributed_foreground_insert: '1.0' })
-  })
 })
 
 describe('insertSettings options', () => {

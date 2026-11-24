@@ -163,54 +163,13 @@ function renderInsertSettingValue(value: string | number | boolean): string {
 }
 
 /**
- * How ClickHouse reads the compulsory settings that are not Bool or UInt: a
- * Float, and an enum compared by name.
- */
-const SETTING_KINDS: Record<string, 'float' | 'text'> = {
-  log_queries_probability: 'float',
-  log_queries_min_type: 'text',
-}
-
-// A plain ASCII decimal, as a Float setting reads it ("1", "1.0"); no sign or exponent.
-const ASCII_DECIMAL = /^[0-9]+(\.[0-9]+)?$/
-
-/**
- * A value of the setting `name` as compared with chkit's, in the syntax
- * ClickHouse reads for it: unquoted and lowercased; for a Bool or UInt
- * setting `true`/`false` are 1/0; for the Float one a plain decimal drops its
- * trailing fraction zeros (`1.00` is `1`). Any other text stays as it is, so
- * it differs from chkit's.
- */
-function normalText(name: string, text: string): string {
-  const bare = text.replace(/^'+|'+$/g, '').toLowerCase()
-  const kind = SETTING_KINDS[name] ?? 'int'
-  if (kind === 'int') return bare === 'true' ? '1' : bare === 'false' ? '0' : bare
-  if (kind === 'float' && ASCII_DECIMAL.test(bare) && bare.includes('.')) return bare.replace(/0+$/, '').replace(/\.$/, '')
-  return bare
-}
-
-function sameValue(name: string, value: string | number | boolean, pinned: string): boolean {
-  return normalText(name, renderInsertSettingValue(value)) === normalText(name, pinned)
-}
-
-/**
- * Whether `value` of the compulsory setting `name` is what chkit writes. The
- * dedup token is per chunk, so no value is.
- */
-function keptValue(name: string, value: string | number | boolean, cutover: boolean): boolean {
-  const written = isPinnedSetting(name) ? PINNED_INSERT_SETTINGS[name] : fixedSettings(cutover)[name]
-  return written !== undefined && sameValue(name, value, written)
-}
-
-/**
- * Refuse `insertSettings` that set a setting chkit writes itself, or an alias
- * of one, to another value: a proof pin (`PINNED_INSERT_SETTINGS` but not
- * `DELIVERY_PINS`), which keeps the chunk INSERT off secondary queries and
- * logged, or a fixed one (`FIXED_INSERT_SETTINGS`, a cutover copy's
- * `CUTOVER_INSERT_SETTINGS`, the dedup token). One with chkit's value is
- * dropped (`effectiveInsertSettings`). A delivery pin may be overridden, but
- * not set twice (itself and an alias) to different values. `aliases` adds the
- * server's own (`system.settings.alias_for`) to `PINNED_SETTING_ALIASES`.
+ * Refuse `insertSettings` that name a setting chkit writes itself, or an
+ * alias of one, whatever the value: the proof pins, the fixed settings, a
+ * cutover copy's, and the dedup token. chkit's own are written last and would
+ * win anyway; naming one is a mistake. Only the delivery pins
+ * (`DELIVERY_PINS`) may be set, and each only once, not also through an
+ * alias. `aliases` adds the server's own (`system.settings.alias_for`) to
+ * `PINNED_SETTING_ALIASES`.
  */
 export function assertInsertSettingsKeepPinned(
   insertSettings: InsertSettings | undefined,
@@ -218,71 +177,71 @@ export function assertInsertSettingsKeepPinned(
   options: { cutover?: boolean } = {},
 ): void {
   const cutover = options.cutover ?? false
-  const entries = Object.entries(insertSettings ?? {})
-  const invalid = entries.map(([key]) => key).filter((key) => !SETTING_NAME.test(key))
+  const keys = Object.keys(insertSettings ?? {})
+  const invalid = keys.filter((key) => !SETTING_NAME.test(key))
   if (invalid.length > 0) {
     throw new BackfillConfigError(
       `insertSettings has a key that is not a setting name: ${invalid.map((key) => `'${key}'`).join(', ')}. A setting name is letters, digits and underscores, not starting with a digit.`,
     )
   }
-  const compulsory = entries.flatMap(([key, value]) => {
+  const named: string[] = []
+  const delivery = new Map<string, string[]>()
+  for (const key of keys) {
     const name = compulsoryName(key, aliases, cutover)
-    return name === undefined ? [] : [{ key, value, name }]
-  })
-  const conflicts = compulsory
-    .filter(({ value, name }) => !isDeliveryPin(name) && !keptValue(name, value, cutover))
-    .map(({ key, value, name }) => {
-      const rendered = `${key}=${renderInsertSettingValue(value)}`
-      return { pinned: isPinnedSetting(name), named: name === key ? rendered : `${rendered} (an alias of ${name})` }
-    })
-  const proofConflicts = conflicts.filter((conflict) => conflict.pinned).map((conflict) => conflict.named)
-  if (proofConflicts.length > 0) {
+    if (name === undefined) continue
+    if (isDeliveryPin(name)) delivery.set(name, [...(delivery.get(name) ?? []), key])
+    else named.push(name === key ? key : `${key} (an alias of ${name})`)
+  }
+  if (named.length > 0) {
+    const written = [
+      ...Object.entries(fixedSettings(cutover)).map(([name, value]) => `${name}=${value}`),
+      `${TOKEN_SETTING} per chunk`,
+      PROOF_PINS_SQL,
+    ].join(', ')
     throw new BackfillConfigError(
-      `insertSettings sets ${proofConflicts.join(', ')}, which every backfill chunk INSERT pins (${PROOF_PINS_SQL}): with another value, its failure cannot be proven from system.query_log, and a replay could write its rows twice. Remove them from insertSettings.`,
+      `insertSettings sets ${named.join(', ')}, which chkit sets itself on every backfill chunk INSERT (${written}): remove it from insertSettings.`,
     )
   }
-  const fixedConflicts = conflicts.filter((conflict) => !conflict.pinned).map((conflict) => conflict.named)
-  if (fixedConflicts.length > 0) {
-    const fixed = Object.entries(fixedSettings(cutover)).map(([name, value]) => `${name}=${value}`).join(', ')
-    throw new BackfillConfigError(
-      `insertSettings sets ${fixedConflicts.join(', ')}, which chkit sets itself on every backfill chunk INSERT (${fixed}, ${TOKEN_SETTING} per chunk): another value could drop, duplicate or delay a chunk's rows. Remove them from insertSettings.`,
-    )
-  }
-  for (const name of new Set(compulsory.map((entry) => entry.name))) {
-    const same = compulsory.filter((entry) => entry.name === name)
-    if (new Set(same.map(({ value }) => normalText(name, renderInsertSettingValue(value)))).size > 1) {
-      throw new BackfillConfigError(
-        `insertSettings sets ${name} more than once, with different values (${same.map(({ key, value }) => `${key}=${renderInsertSettingValue(value)}`).join(', ')}). Keep one of them.`,
-      )
+  for (const [name, names] of delivery) {
+    if (names.length > 1) {
+      throw new BackfillConfigError(`insertSettings sets ${name} more than once (${names.join(', ')}). Keep one of them.`)
     }
   }
 }
 
 /**
- * `insertSettings` without the settings chkit writes itself and their
- * aliases, except an override of a delivery pin, kept under the pinned name:
- * such a setting appears once in the INSERT's SETTINGS, in its place.
+ * `insertSettings` with a delivery pin named through an alias under its own
+ * name, so it appears once in the INSERT's SETTINGS.
  */
 export function effectiveInsertSettings(
   insertSettings: InsertSettings | undefined,
   aliases?: Record<string, string>,
-  options: { cutover?: boolean } = {},
 ): InsertSettings {
   const effective: InsertSettings = {}
   for (const [key, value] of Object.entries(insertSettings ?? {})) {
-    const name = compulsoryName(key, aliases, options.cutover ?? false)
-    if (name === undefined) effective[key] = value
-    else if (isPinnedSetting(name) && isDeliveryPin(name) && !sameValue(name, value, PINNED_INSERT_SETTINGS[name])) effective[name] = value
+    const name = aliases?.[key] ?? PINNED_SETTING_ALIASES[key] ?? key
+    effective[isDeliveryPin(name) ? name : key] = value
   }
   return effective
 }
 
+/** chkit's default of each delivery pin, as the user may also write it. */
+const DELIVERY_DEFAULTS: Record<string, string[]> = {
+  distributed_foreground_insert: ['1', 'true'],
+  materialized_views_ignore_errors: ['0', 'false'],
+}
+
+function isDeliveryDefault(name: string, value: string | number | boolean): boolean {
+  const text = typeof value === 'string' ? value.toLowerCase() : renderInsertSettingValue(value)
+  return DELIVERY_DEFAULTS[name]?.includes(text) ?? false
+}
+
 /**
  * The settings of a chunk INSERT, in one list: the user's own first, delivery
- * overrides included, then everything chkit requires, so that a later
- * setting wins over whatever the user's set (a settings profile included):
- * the fixed settings, a cutover's, the dedup token, and the pins, without the
- * delivery ones the user overrides.
+ * pins included, then everything chkit requires, so that a later setting wins
+ * over whatever the user's set (a settings profile included): the fixed
+ * settings, a cutover's, the dedup token, and the pins, without the delivery
+ * ones the user sets.
  */
 export function chunkInsertSettingsSql(
   insertSettings: InsertSettings | undefined,
@@ -290,7 +249,7 @@ export function chunkInsertSettingsSql(
 ): string {
   const cutover = options.cutover ?? false
   assertInsertSettingsKeepPinned(insertSettings, undefined, { cutover })
-  const effective = effectiveInsertSettings(insertSettings, undefined, { cutover })
+  const effective = effectiveInsertSettings(insertSettings)
   const parts = Object.entries(effective).map(([key, value]) => `${key}=${renderInsertSettingValue(value)}`)
   parts.push(...Object.entries(fixedSettings(cutover)).map(([name, value]) => `${name}=${value}`))
   if (options.token) parts.push(`${TOKEN_SETTING}='${options.token}'`)
@@ -303,13 +262,13 @@ export function chunkInsertSettingsSql(
 }
 
 /**
- * The one warning line a run or submit prints when `insertSettings` overrides
- * a delivery pin, or undefined.
+ * The one warning line a run or submit prints when `insertSettings` sets a
+ * delivery pin to anything but chkit's default, or undefined.
  */
 export function deliveryOverrideWarning(insertSettings: InsertSettings | undefined): string | undefined {
   const overridden = Object.entries(effectiveInsertSettings(insertSettings)).flatMap(([name, value]) => {
     const guarantee = isPinnedSetting(name) ? DELIVERY_PINS[name] : undefined
-    return guarantee === undefined ? [] : [`${name}=${renderInsertSettingValue(value)} (${guarantee})`]
+    return guarantee === undefined || isDeliveryDefault(name, value) ? [] : [`${name}=${renderInsertSettingValue(value)} (${guarantee})`]
   })
   if (overridden.length === 0) return undefined
   return `Warning: insertSettings overrides what every backfill chunk INSERT sets by default: ${overridden.join('; ')}.`

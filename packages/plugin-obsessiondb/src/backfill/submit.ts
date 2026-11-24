@@ -258,7 +258,7 @@ async function checkedInsertSettings(context: SubmitContext, plan: BackfillPlanS
 		executor.query<T>(sql, settings as ClickHouseSettings | undefined)
 	const aliases = await readPinnedSettingAliases(query)
 	assertInsertSettingsKeepPinned(raw, aliases, { cutover })
-	const insertSettings = effectiveInsertSettings(raw, aliases, { cutover })
+	const insertSettings = effectiveInsertSettings(raw, aliases)
 	const warning = deliveryOverrideWarning(insertSettings)
 	if (warning) process.stderr.write(`${warning}\n`)
 	await assertPinnedInsertSettingsAccepted({

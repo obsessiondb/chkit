@@ -9,7 +9,6 @@ live server; it hard-fails when ClickHouse is unreachable.
 
 from __future__ import annotations
 
-import re
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -143,75 +142,64 @@ def test_insert_settings_without_a_token() -> None:
     )
 
 
-# Opus delta review: insertSettings that set a pinned setting, or an alias of
-# one, to another value are refused; with the pinned value they are dropped,
-# so the setting appears once, pinned.
-def test_insert_settings_with_the_pinned_value_are_dropped() -> None:
-    sql = build_chunk_execution_sql(
-        plan_id="p",
-        chunk=_chunk(),
-        target="app.events",
-        table=TABLE,
-        insert_settings={
-            "enable_parallel_replicas": 0,
-            "allow_experimental_parallel_reading_from_replicas": False,
-            "log_queries": True,
-            "log_queries_min_type": "query_start",
-            "distributed_foreground_insert": 1,
-            "insert_distributed_sync": True,
-            "materialized_views_ignore_errors": "0",
-            "max_insert_threads": 2,
-        },
-    )
+_WRITTEN = (
+    "async_insert=0, asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0, "
+    "insert_deduplication_token per chunk, allow_experimental_parallel_reading_from_replicas=0, "
+    "parallel_distributed_insert_select=0, log_queries=1, log_queries_min_type='QUERY_START', "
+    "log_queries_min_query_duration_ms=0, log_queries_probability=1"
+)
+_CUTOVER_WRITTEN = _WRITTEN.replace(
+    "asterisk_include_alias_columns=0, ",
+    "asterisk_include_alias_columns=0, insert_deduplicate=0, select_sequential_consistency=1, ",
+)
 
-    assert _settings_line(sql) == (
-        f"SETTINGS max_insert_threads=2, async_insert=0, {PINNED}, {_PINNED_INSERT}"
+
+def _refusal(named: str, written: str = _WRITTEN) -> str:
+    return (
+        f"insertSettings sets {named}, which chkit sets itself on every backfill chunk "
+        f"INSERT ({written}): remove it from insertSettings."
     )
 
 
+# Codex review r4: a setting chkit writes itself cannot be named in
+# insertSettings, whatever the value: chkit's own is written last and wins.
 @pytest.mark.parametrize(
     ("settings", "named"),
     [
-        ({"log_queries": False}, "log_queries=false"),
-        ({"parallel_distributed_insert_select": 2}, "parallel_distributed_insert_select=2"),
-        ({"log_queries_min_type": "QUERY_FINISH"}, "log_queries_min_type='QUERY_FINISH'"),
-        ({"log_queries_min_query_duration_ms": 1000}, "log_queries_min_query_duration_ms=1000"),
+        ({"log_queries": False}, "log_queries"),
+        ({"log_queries": True}, "log_queries"),
+        ({"parallel_distributed_insert_select": "00"}, "parallel_distributed_insert_select"),
+        ({"log_queries_min_type": "QUERY_FINISH"}, "log_queries_min_type"),
+        ({"log_queries_min_query_duration_ms": 0}, "log_queries_min_query_duration_ms"),
+        ({"log_queries_probability": "1e0"}, "log_queries_probability"),
         (
-            {"allow_experimental_parallel_reading_from_replicas": 1},
-            "allow_experimental_parallel_reading_from_replicas=1",
+            {"allow_experimental_parallel_reading_from_replicas": 0},
+            "allow_experimental_parallel_reading_from_replicas",
         ),
         (
-            {"enable_parallel_replicas": 1},
-            "enable_parallel_replicas=1 (an alias of "
+            {"enable_parallel_replicas": 0},
+            "enable_parallel_replicas (an alias of "
             "allow_experimental_parallel_reading_from_replicas)",
         ),
+        ({"async_insert": 0}, "async_insert"),
+        ({"asterisk_include_alias_columns": True}, "asterisk_include_alias_columns"),
+        ({"insert_deduplication_token": "shared"}, "insert_deduplication_token"),
     ],
 )
-def test_insert_settings_that_change_a_pinned_setting_are_refused(
+def test_a_setting_chkit_writes_itself_is_refused_whatever_its_value(
     settings: dict[str, str | int | bool], named: str
 ) -> None:
     with pytest.raises(BackfillConfigError) as raised:
         build_chunk_execution_sql(
             plan_id="p", chunk=_chunk(), target="app.events", table=TABLE,
-            insert_settings=settings,
+            idempotency_token="tok", insert_settings=settings,
         )
 
-    assert str(raised.value) == (
-        f"insertSettings sets {named}, which every backfill chunk INSERT pins "
-        f"({_PROOF_PINS}): with another value, its failure cannot be proven from "
-        "system.query_log, and a replay could write its rows twice. "
-        "Remove them from insertSettings."
-    )
+    assert str(raised.value) == _refusal(named)
 
 
 # #821: the delivery pins are defaults; an override replaces the pin in place,
 # under the pinned name, and turns a guarantee off, which a run warns about.
-_PROOF_PINS = (
-    "allow_experimental_parallel_reading_from_replicas=0, "
-    "parallel_distributed_insert_select=0, log_queries=1, "
-    "log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0, "
-    "log_queries_probability=1"
-)
 _DELIVERY_WARNING = {
     "distributed_foreground_insert": (
         "distributed_foreground_insert=0 (a chunk can be recorded done before its rows "
@@ -283,12 +271,34 @@ def test_an_override_of_a_delivery_pin_replaces_it_and_warns(
     )
 
 
+# Codex review r4: a delivery pin's value is always the user's, used as it
+# is; only chkit's default in its plain forms gives no warning.
 def test_the_default_or_a_delivery_pin_at_its_value_does_not_warn() -> None:
     assert delivery_override_warning(None) is None
-    assert delivery_override_warning(
-        {"distributed_foreground_insert": 1, "insert_distributed_sync": True,
-         "materialized_views_ignore_errors": "0", "max_insert_threads": 2}
-    ) is None
+    for settings in (
+        {"distributed_foreground_insert": 1, "materialized_views_ignore_errors": "0"},
+        {"insert_distributed_sync": True, "materialized_views_ignore_errors": False},
+        {"distributed_foreground_insert": "TRUE", "materialized_views_ignore_errors": "False"},
+        {"distributed_foreground_insert": "1", "max_insert_threads": 2},
+    ):
+        assert delivery_override_warning(settings) is None
+
+
+def test_a_delivery_pin_in_another_form_is_used_as_it_is_and_warns() -> None:
+    sql = build_chunk_execution_sql(
+        plan_id="p", chunk=_chunk(), target="app.events", table=TABLE,
+        insert_settings={"distributed_foreground_insert": "1.0"},
+    )
+
+    assert _settings_line(sql) == (
+        f"SETTINGS distributed_foreground_insert='1.0', async_insert=0, {PINNED}, "
+        + _pins_without("distributed_foreground_insert")
+    )
+    assert delivery_override_warning({"distributed_foreground_insert": "1.0"}) == (
+        "Warning: insertSettings overrides what every backfill chunk INSERT sets by "
+        "default: distributed_foreground_insert='1.0' (a chunk can be recorded done before "
+        "its rows reach a Distributed table's shards)."
+    )
 
 
 def test_a_server_alias_of_a_delivery_pin_is_kept_under_the_pinned_name() -> None:
@@ -308,16 +318,15 @@ def test_a_server_alias_of_a_delivery_pin_is_kept_under_the_pinned_name() -> Non
     assert "distributed_foreground_insert=0" in sql
 
 
-def test_a_delivery_pin_set_twice_to_different_values_is_refused() -> None:
+def test_a_delivery_pin_set_twice_is_refused() -> None:
     with pytest.raises(BackfillConfigError) as raised:
         assert_insert_settings_keep_pinned(
-            {"distributed_foreground_insert": 0, "insert_distributed_sync": 1}
+            {"distributed_foreground_insert": 1, "insert_distributed_sync": 1}
         )
 
     assert str(raised.value) == (
-        "insertSettings sets distributed_foreground_insert more than once, with different "
-        "values (distributed_foreground_insert=0, insert_distributed_sync=1). "
-        "Keep one of them."
+        "insertSettings sets distributed_foreground_insert more than once "
+        "(distributed_foreground_insert, insert_distributed_sync). Keep one of them."
     )
 
 
@@ -353,17 +362,15 @@ def test_the_preflight_checks_the_overridden_delivery_settings() -> None:
     ]
 
 
-def test_an_alias_the_server_lists_is_checked_and_dropped_too() -> None:
+def test_an_alias_the_server_lists_is_refused_too() -> None:
     aliases = {"log_queries_alias": "log_queries"}
-    with pytest.raises(BackfillConfigError) as raised:
-        assert_insert_settings_keep_pinned({"log_queries_alias": 0}, aliases)
-    assert "insertSettings sets log_queries_alias=0 (an alias of log_queries)" in str(
-        raised.value
-    )
-
-    kept = {"log_queries_alias": 1, "max_insert_threads": 4}
+    for value in (0, 1):
+        with pytest.raises(BackfillConfigError) as raised:
+            assert_insert_settings_keep_pinned({"log_queries_alias": value}, aliases)
+        assert str(raised.value) == _refusal("log_queries_alias (an alias of log_queries)")
+    kept = {"max_insert_threads": 4}
     assert_insert_settings_keep_pinned(kept, aliases)
-    assert effective_insert_settings(kept, aliases) == {"max_insert_threads": 4}
+    assert effective_insert_settings(kept, aliases) == kept
 
 
 def test_the_server_aliases_come_from_system_settings_alias_for() -> None:
@@ -620,101 +627,41 @@ def test_handle_submit_refuses_a_server_alias_of_a_proof_pin(
         {
             "ok": False,
             "command": "backfill submit",
-            "error": (
-                "insertSettings sets log_alias=0 (an alias of log_queries), which every "
-                f"backfill chunk INSERT pins ({_PROOF_PINS}): with another value, its failure "
-                "cannot be proven from system.query_log, and a replay could write its rows "
-                "twice. Remove them from insertSettings."
-            ),
+            "error": _refusal("log_alias (an alias of log_queries)"),
         }
     ]
 
 
-# Codex review: settings chkit writes itself on a chunk INSERT, besides the
-# pins, cannot be changed either: the per-chunk dedup token, synchronous
-# inserts, SELECT * expansion, and a cutover's dedup and consistent reads.
-_FIXED = "async_insert=0, asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0"
-
-
 @pytest.mark.parametrize(
-    ("settings", "named"),
+    "settings",
     [
-        ({"insert_deduplication_token": "shared"}, "insert_deduplication_token='shared'"),
-        ({"async_insert": 1}, "async_insert=1"),
-        ({"asterisk_include_alias_columns": True}, "asterisk_include_alias_columns=true"),
-    ],
-)
-def test_a_setting_chkit_writes_itself_is_refused(
-    settings: dict[str, str | int | bool], named: str
-) -> None:
-    with pytest.raises(BackfillConfigError) as raised:
-        build_chunk_execution_sql(
-            plan_id="p", chunk=_chunk(), target="app.events", table=TABLE,
-            idempotency_token="tok", insert_settings=settings,
-        )
-
-    assert str(raised.value) == (
-        f"insertSettings sets {named}, which chkit sets itself on every backfill chunk "
-        f"INSERT ({_FIXED}, insert_deduplication_token per chunk): another value could "
-        "drop, duplicate or delay a chunk's rows. Remove them from insertSettings."
-    )
-
-
-@pytest.mark.parametrize(
-    ("settings", "named"),
-    [
-        ({"select_sequential_consistency": 0}, "select_sequential_consistency=0"),
-        ({"insert_deduplicate": 1}, "insert_deduplicate=1"),
+        {"select_sequential_consistency": 1},
+        {"insert_deduplicate": 0},
     ],
 )
 def test_a_setting_a_cutover_copy_writes_itself_is_refused(
-    settings: dict[str, str | int | bool], named: str
+    settings: dict[str, str | int | bool],
 ) -> None:
+    [named] = settings
     with pytest.raises(BackfillConfigError) as raised:
         build_chunk_execution_sql(
             plan_id="p", chunk=_chunk(), target="app.events_shadow", source_target="app.events",
             table=TABLE, target_columns=["id"], cutover_key=["id"], insert_settings=settings,
         )
 
-    assert str(raised.value) == (
-        f"insertSettings sets {named}, which chkit sets itself on every backfill chunk "
-        f"INSERT ({_FIXED}, insert_deduplicate=0, select_sequential_consistency=1, "
-        "insert_deduplication_token per chunk): another value could drop, duplicate or "
-        "delay a chunk's rows. Remove them from insertSettings."
-    )
+    assert str(raised.value) == _refusal(named, _CUTOVER_WRITTEN)
 
 
-def test_a_setting_chkit_writes_itself_with_its_value_is_dropped() -> None:
-    copy = build_chunk_execution_sql(
+def test_insert_deduplicate_is_the_users_own_outside_a_cutover_copy() -> None:
+    sql = build_chunk_execution_sql(
         plan_id="p", chunk=_chunk(), target="app.events", table=TABLE,
-        insert_settings={"async_insert": 0, "insert_deduplicate": 1, "max_insert_threads": 2},
-    )
-    cutover = build_chunk_execution_sql(
-        plan_id="p", chunk=_chunk(), target="app.events_shadow", source_target="app.events",
-        table=TABLE, target_columns=["id"], cutover_key=["id"],
-        insert_settings={"select_sequential_consistency": True, "insert_deduplicate": 0},
+        insert_settings={"insert_deduplicate": 1, "max_insert_threads": 2},
     )
 
-    # insert_deduplicate is the user's own outside a cutover copy.
-    assert _settings_line(copy) == (
+    assert _settings_line(sql) == (
         f"SETTINGS insert_deduplicate=1, max_insert_threads=2, async_insert=0, {PINNED}, "
         f"{_PINNED_INSERT}"
     )
-    assert _settings_line(cutover) == (
-        f"SETTINGS async_insert=0, {PINNED}, insert_deduplicate=0, "
-        f"select_sequential_consistency=1, {_PINNED_INSERT}"
-    )
-
-
-# Codex review: log_queries_probability = 0 would keep a chunk out of
-# system.query_log, so it is a proof pin too.
-def test_log_queries_probability_is_a_proof_pin() -> None:
-    assert "log_queries_probability=1" in _PINNED_INSERT
-    with pytest.raises(BackfillConfigError, match="log_queries_probability=0, which every"):
-        build_chunk_execution_sql(
-            plan_id="p", chunk=_chunk(), target="app.events", table=TABLE,
-            insert_settings={"log_queries_probability": 0},
-        )
 
 
 # Codex review r2: the user's settings come first in the SETTINGS clause and
@@ -778,63 +725,6 @@ def test_the_preflight_tries_every_setting_of_the_chunk_insert() -> None:
         f"SELECT 1 SETTINGS max_insert_threads=2, async_insert=0, {PINNED}, "
         f"insert_deduplicate=0, select_sequential_consistency=1, {_PINNED_INSERT}",
     ]
-
-
-# Codex review r3: a value equals chkit's only in the syntax ClickHouse reads
-# for that setting: plain ASCII digits (or true/false) for the Bool and UInt
-# settings, plain ASCII decimals for the Float log_queries_probability.
-@pytest.mark.parametrize(
-    "settings",
-    [
-        {"log_queries_probability": "1.00"},
-        {"log_queries_probability": 1},
-        {"log_queries": "1"},
-        {"log_queries": True},
-        {"async_insert": 0},
-        {"async_insert": False},
-        {"parallel_distributed_insert_select": "0"},
-    ],
-)
-def test_a_value_in_the_settings_own_syntax_equals_chkits(
-    settings: dict[str, str | int | bool],
-) -> None:
-    sql = build_chunk_execution_sql(
-        plan_id="p", chunk=_chunk(), target="app.events", table=TABLE, insert_settings=settings
-    )
-
-    assert _settings_line(sql) == f"SETTINGS async_insert=0, {PINNED}, {_PINNED_INSERT}"
-
-
-@pytest.mark.parametrize(
-    ("settings", "named"),
-    [
-        ({"parallel_distributed_insert_select": "0e0"}, "parallel_distributed_insert_select='0e0'"),
-        ({"log_queries": "1.0000000000000001"}, "log_queries='1.0000000000000001'"),
-        ({"log_queries": "\u0661"}, "log_queries='\u0661'"),
-        ({"log_queries": "+1"}, "log_queries='+1'"),
-        ({"log_queries_probability": "1e0"}, "log_queries_probability='1e0'"),
-        ({"log_queries_probability": "+1.0"}, "log_queries_probability='+1.0'"),
-    ],
-)
-def test_a_value_outside_the_settings_own_syntax_is_another_value(
-    settings: dict[str, str | int | bool], named: str
-) -> None:
-    with pytest.raises(BackfillConfigError, match=f"^insertSettings sets {re.escape(named)}, which"):
-        build_chunk_execution_sql(
-            plan_id="p", chunk=_chunk(), target="app.events", table=TABLE,
-            insert_settings=settings,
-        )
-
-
-def test_a_fixed_setting_outside_its_syntax_is_refused_and_a_delivery_one_kept() -> None:
-    with pytest.raises(BackfillConfigError, match=r"^insertSettings sets async_insert='\+0', which"):
-        build_chunk_execution_sql(
-            plan_id="p", chunk=_chunk(), target="app.events", table=TABLE,
-            insert_settings={"async_insert": "+0"},
-        )
-    assert effective_insert_settings({"distributed_foreground_insert": "1.0"}) == {
-        "distributed_foreground_insert": "1.0"
-    }
 
 
 # Codex review r3: a plan whose chunks carry a dedup token preflights one too,
@@ -902,11 +792,9 @@ def test_insert_with_insert_settings_runs_on_clickhouse() -> None:
             source_target=source,
             table=table,
             idempotency_token=f"{prefix}-token",
-            # enable_parallel_replicas=0: ObsessionDB enables parallel replicas by
-            # default, and the `_partition_id` filter can then miss freshly
-            # inserted parts. It matches the INSERT's pin, so it is dropped.
+            # The INSERT pins parallel replicas off itself, so the filter on
+            # `_partition_id` sees every part ObsessionDB has.
             insert_settings={
-                "enable_parallel_replicas": 0,
                 "max_insert_threads": 2,
                 "min_insert_block_size_rows": 100,
                 "log_comment": "chkit's backfill",

@@ -361,7 +361,7 @@ describe('handleSubmit insertSettings', () => {
 		expect(printed).toEqual([{
 			ok: false,
 			command: 'backfill submit',
-			error: "insertSettings sets log_alias=0 (an alias of log_queries), which every backfill chunk INSERT pins (allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0, log_queries_probability=1): with another value, its failure cannot be proven from system.query_log, and a replay could write its rows twice. Remove them from insertSettings.",
+			error: "insertSettings sets log_alias (an alias of log_queries), which chkit sets itself on every backfill chunk INSERT (async_insert=0, asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0, insert_deduplication_token per chunk, allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0, log_queries_probability=1): remove it from insertSettings.",
 		}])
 	})
 

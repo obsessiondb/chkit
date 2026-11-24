@@ -332,7 +332,7 @@ def _checked_insert_settings(
 
     aliases = read_pinned_setting_aliases(query)
     assert_insert_settings_keep_pinned(insert_settings, aliases, cutover=cutover)
-    effective = effective_insert_settings(insert_settings, aliases, cutover=cutover)
+    effective = effective_insert_settings(insert_settings, aliases)
     warning = delivery_override_warning(effective)
     if warning is not None:
         sys.stderr.write(f"{warning}\n")

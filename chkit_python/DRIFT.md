@@ -1772,7 +1772,7 @@ stabilizations (#238/#241/#245/#247/#264), the uncommitted backfill
   `build_chunk_execution_sql` renders `INSERT INTO t (cols) SELECT cols FROM (<view
   query>)` per view. `_run_backfill` calls `assert_replay_columns_still_insertable`.
 - `insert_settings` (TS `insertSettings` since #822, same rules) render before everything
-  chkit sets on the INSERT, which wins; one that changes `asterisk_include_*` is refused.
+  chkit sets on the INSERT, which wins; naming `asterisk_include_*` is refused.
 - The schema-declared target's columns no longer feed `target_columns`, so
   `_BackfillStrategy` dropped that field (TS: `BackfillStrategy.targetColumns`).
 - The ReplicatedMergeTree case is a second test in

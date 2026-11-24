@@ -168,7 +168,7 @@ async function runBackfillLocked(
       () => new BackfillInterruptedError(`Backfill plan ${plan.planId}: interrupted.`),
     )
     assertInsertSettingsKeepPinned(input.insertSettings, aliases, { cutover })
-    const insertSettings = effectiveInsertSettings(input.insertSettings, aliases, { cutover })
+    const insertSettings = effectiveInsertSettings(input.insertSettings, aliases)
     const warning = deliveryOverrideWarning(insertSettings)
     if (warning) process.stderr.write(`${warning}\n`)
     await untilAborted(

@@ -169,47 +169,6 @@ def _compulsory_name(
     return name if name in names else None
 
 
-# How ClickHouse reads the compulsory settings that are not Bool or UInt (TS
-# ``SETTING_KINDS``): a Float, and an enum compared by name.
-_SETTING_KINDS: dict[str, str] = {
-    "log_queries_probability": "float",
-    "log_queries_min_type": "text",
-}
-
-# A plain ASCII decimal, as a Float setting reads it ("1", "1.0"); no sign or exponent.
-_ASCII_DECIMAL = re.compile(r"[0-9]+(\.[0-9]+)?")
-
-
-def _normal_text(name: str, text: str) -> str:
-    """A value of the setting ``name`` as compared with chkit's (TS
-    ``normalText``), in the syntax ClickHouse reads for it: unquoted and
-    lowercased; for a Bool or UInt setting ``true``/``false`` are 1/0; for the
-    Float one a plain decimal drops its trailing fraction zeros (``1.00`` is
-    ``1``). Any other text stays as it is, so it differs from chkit's."""
-    bare = text.strip("'").lower()
-    kind = _SETTING_KINDS.get(name, "int")
-    if kind == "int":
-        return {"true": "1", "false": "0"}.get(bare, bare)
-    if kind == "float" and _ASCII_DECIMAL.fullmatch(bare) and "." in bare:
-        return bare.rstrip("0").rstrip(".")
-    return bare
-
-
-def _normal_value(name: str, value: str | int | float | bool) -> str:
-    return _normal_text(name, _render_insert_setting_value(value))
-
-
-def _same_value(name: str, value: str | int | float | bool, pinned: str) -> bool:
-    return _normal_value(name, value) == _normal_text(name, pinned)
-
-
-def _kept_value(name: str, value: str | int | float | bool, *, cutover: bool) -> bool:
-    """Whether ``value`` of the compulsory setting ``name`` is what chkit
-    writes. The dedup token is per chunk, so no value is."""
-    written = {**PINNED_INSERT_SETTINGS, **_fixed_settings(cutover=cutover)}.get(name)
-    return written is not None and _same_value(name, value, written)
-
-
 def compulsory_setting_names() -> list[str]:
     """Every setting chkit writes on a chunk INSERT in any mode, for reading
     the server's aliases of them (``read_pinned_setting_aliases``)."""
@@ -227,15 +186,13 @@ def assert_insert_settings_keep_pinned(
     *,
     cutover: bool = False,
 ) -> None:
-    """Refuse ``insertSettings`` that set a setting chkit writes itself, or an
-    alias of one, to another value: a proof pin (``PINNED_INSERT_SETTINGS`` but
-    not ``DELIVERY_PINS``), which keeps the chunk INSERT off secondary queries
-    and logged, or a fixed one (``_FIXED_INSERT_SETTINGS``, a cutover copy's
-    ``_CUTOVER_INSERT_SETTINGS``, the dedup token). One with chkit's value is
-    dropped (``effective_insert_settings``). A delivery pin may be overridden,
-    but not set twice (itself and an alias) to different values. ``aliases``
-    adds the server's own (``system.settings.alias_for``) to
-    ``PINNED_SETTING_ALIASES``."""
+    """Refuse ``insertSettings`` that name a setting chkit writes itself, or
+    an alias of one, whatever the value (TS ``assertInsertSettingsKeepPinned``):
+    the proof pins, the fixed settings, a cutover copy's, and the dedup token.
+    chkit's own are written last and would win anyway; naming one is a
+    mistake. Only the delivery pins (``DELIVERY_PINS``) may be set, and each
+    only once, not also through an alias. ``aliases`` adds the server's own
+    (``system.settings.alias_for``) to ``PINNED_SETTING_ALIASES``."""
     invalid = [key for key in insert_settings or {} if not _SETTING_NAME.fullmatch(key)]
     if invalid:
         names = ", ".join(f"'{key}'" for key in invalid)
@@ -244,45 +201,33 @@ def assert_insert_settings_keep_pinned(
             "is letters, digits and underscores, not starting with a digit."
         )
         raise BackfillConfigError(msg)
-    proof_conflicts: list[str] = []
-    fixed_conflicts: list[str] = []
-    seen: dict[str, list[tuple[str, str | int | float | bool]]] = {}
-    for key, value in (insert_settings or {}).items():
+    named: list[str] = []
+    delivery: dict[str, list[str]] = {}
+    for key in insert_settings or {}:
         name = _compulsory_name(key, aliases, cutover=cutover)
         if name is None:
             continue
-        seen.setdefault(name, []).append((key, value))
-        if name in DELIVERY_PINS or _kept_value(name, value, cutover=cutover):
-            continue
-        rendered = f"{key}={_render_insert_setting_value(value)}"
-        named = rendered if name == key else f"{rendered} (an alias of {name})"
-        (proof_conflicts if name in PINNED_INSERT_SETTINGS else fixed_conflicts).append(named)
-    if proof_conflicts:
-        msg = (
-            f"insertSettings sets {', '.join(proof_conflicts)}, which every backfill chunk "
-            f"INSERT pins ({_PROOF_PINS_SQL}): with another value, its failure cannot be "
-            "proven from system.query_log, and a replay could write its rows twice. "
-            "Remove them from insertSettings."
-        )
-        raise BackfillConfigError(msg)
-    if fixed_conflicts:
-        fixed = ", ".join(
-            f"{name}={value}" for name, value in _fixed_settings(cutover=cutover).items()
+        if name in DELIVERY_PINS:
+            delivery.setdefault(name, []).append(key)
+        else:
+            named.append(key if name == key else f"{key} (an alias of {name})")
+    if named:
+        written = ", ".join(
+            [
+                *(f"{name}={value}" for name, value in _fixed_settings(cutover=cutover).items()),
+                f"{_TOKEN_SETTING} per chunk",
+                _PROOF_PINS_SQL,
+            ]
         )
         msg = (
-            f"insertSettings sets {', '.join(fixed_conflicts)}, which chkit sets itself on "
-            f"every backfill chunk INSERT ({fixed}, {_TOKEN_SETTING} per chunk): another "
-            "value could drop, duplicate or delay a chunk's rows. Remove them from "
-            "insertSettings."
+            f"insertSettings sets {', '.join(named)}, which chkit sets itself on every "
+            f"backfill chunk INSERT ({written}): remove it from insertSettings."
         )
         raise BackfillConfigError(msg)
-    for name, entries in seen.items():
-        if len({_normal_value(name, value) for _key, value in entries}) > 1:
-            both = ", ".join(
-                f"{key}={_render_insert_setting_value(value)}" for key, value in entries
-            )
+    for name, keys in delivery.items():
+        if len(keys) > 1:
             msg = (
-                f"insertSettings sets {name} more than once, with different values ({both}). "
+                f"insertSettings sets {name} more than once ({', '.join(keys)}). "
                 "Keep one of them."
             )
             raise BackfillConfigError(msg)
@@ -291,22 +236,26 @@ def assert_insert_settings_keep_pinned(
 def effective_insert_settings(
     insert_settings: Mapping[str, str | int | float | bool] | None,
     aliases: Mapping[str, str] | None = None,
-    *,
-    cutover: bool = False,
 ) -> dict[str, str | int | float | bool]:
-    """``insert_settings`` without the settings chkit writes itself and their
-    aliases, except an override of a delivery pin, kept under the pinned
-    name: such a setting appears once in the INSERT's SETTINGS, in its place."""
+    """``insert_settings`` with a delivery pin named through an alias under
+    its own name, so it appears once in the INSERT's SETTINGS."""
     effective: dict[str, str | int | float | bool] = {}
     for key, value in (insert_settings or {}).items():
-        name = _compulsory_name(key, aliases, cutover=cutover)
-        if name is None:
-            effective[key] = value
-        elif name in DELIVERY_PINS and not _same_value(
-            name, value, PINNED_INSERT_SETTINGS[name]
-        ):
-            effective[name] = value
+        name = {**PINNED_SETTING_ALIASES, **(aliases or {})}.get(key, key)
+        effective[name if name in DELIVERY_PINS else key] = value
     return effective
+
+
+# chkit's default of each delivery pin, as the user may also write it.
+_DELIVERY_DEFAULTS: dict[str, tuple[str, ...]] = {
+    "distributed_foreground_insert": ("1", "true"),
+    "materialized_views_ignore_errors": ("0", "false"),
+}
+
+
+def _is_delivery_default(name: str, value: str | int | float | bool) -> bool:
+    text = value.lower() if isinstance(value, str) else _render_insert_setting_value(value)
+    return text in _DELIVERY_DEFAULTS[name]
 
 
 def chunk_insert_settings_sql(
@@ -316,12 +265,12 @@ def chunk_insert_settings_sql(
     cutover: bool = False,
 ) -> str:
     """The settings of a chunk INSERT (TS ``chunkInsertSettingsSql``), in one
-    list: the user's own first, delivery overrides included, then everything
-    chkit requires, so that a later setting wins over whatever the user's set
-    (a settings profile included): the fixed settings, a cutover's, the dedup
-    token, and the pins, without the delivery ones the user overrides."""
+    list: the user's own first, delivery pins included, then everything chkit
+    requires, so that a later setting wins over whatever the user's set (a
+    settings profile included): the fixed settings, a cutover's, the dedup
+    token, and the pins, without the delivery ones the user sets."""
     assert_insert_settings_keep_pinned(insert_settings, cutover=cutover)
-    effective = effective_insert_settings(insert_settings, cutover=cutover)
+    effective = effective_insert_settings(insert_settings)
     parts = [f"{key}={_render_insert_setting_value(value)}" for key, value in effective.items()]
     parts.extend(f"{name}={value}" for name, value in _fixed_settings(cutover=cutover).items())
     if token:
@@ -338,11 +287,11 @@ def delivery_override_warning(
     insert_settings: Mapping[str, str | int | float | bool] | None,
 ) -> str | None:
     """The one warning line a run or submit prints when ``insert_settings``
-    overrides a delivery pin, or None."""
+    sets a delivery pin to anything but chkit's default, or None."""
     overridden = [
         f"{name}={_render_insert_setting_value(value)} ({DELIVERY_PINS[name]})"
         for name, value in effective_insert_settings(insert_settings).items()
-        if name in DELIVERY_PINS
+        if name in DELIVERY_PINS and not _is_delivery_default(name, value)
     ]
     if not overridden:
         return None

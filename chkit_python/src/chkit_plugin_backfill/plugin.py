@@ -358,7 +358,7 @@ def _run_backfill_locked(  # noqa: PLR0912, PLR0915 — mirrors TS runBackfill
             lambda: read_pinned_setting_aliases(db.query_rows), stop, plan.plan_id
         )
         assert_insert_settings_keep_pinned(insert_settings, aliases, cutover=cutover)
-        insert_settings = effective_insert_settings(insert_settings, aliases, cutover=cutover)
+        insert_settings = effective_insert_settings(insert_settings, aliases)
         warning = delivery_override_warning(insert_settings)
         if warning is not None:
             sys.stderr.write(f"{warning}\n")
