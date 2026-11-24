@@ -278,12 +278,13 @@ def test_an_override_of_a_delivery_pin_replaces_it_and_warns(
 # is; only chkit's default in its plain forms gives no warning.
 def test_the_default_or_a_delivery_pin_at_its_value_does_not_warn() -> None:
     assert delivery_override_warning(None) is None
-    for settings in (
+    cases: tuple[dict[str, str | int | float | bool], ...] = (
         {"distributed_foreground_insert": 1, "materialized_views_ignore_errors": "0"},
         {"insert_distributed_sync": True, "materialized_views_ignore_errors": False},
         {"distributed_foreground_insert": "TRUE", "materialized_views_ignore_errors": "False"},
         {"distributed_foreground_insert": "1", "max_insert_threads": 2},
-    ):
+    )
+    for settings in cases:
         assert delivery_override_warning(settings) is None
 
 
