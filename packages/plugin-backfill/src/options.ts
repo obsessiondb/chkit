@@ -72,6 +72,9 @@ function normalizePlanId(raw: string): string {
 
 // ───── Plugin config schema (what backfill({...}) accepts) ─────
 
+// Extra ClickHouse settings for every chunk INSERT (e.g. max_insert_threads).
+const InsertSettingsSchema = z.record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
+
 export const PluginConfigSchema = z.object({
   maxChunkBytes: z.number().positive().optional(),
   maxRetriesPerChunk: z.number().int().positive().optional(),
@@ -87,6 +90,7 @@ export const PluginConfigSchema = z.object({
   maxWindowHours: z.number().positive().optional(),
   minChunkMinutes: z.number().positive().optional(),
   stateDir: z.string().min(1).optional(),
+  insertSettings: InsertSettingsSchema.optional(),
 })
 
 export type PluginConfig = z.input<typeof PluginConfigSchema>
@@ -132,6 +136,7 @@ export const RunSchema = z.object({
   concurrency: z.number().int().positive().default(3),
   pollIntervalMs: z.number().nonnegative().default(5000),
   stateDir: z.string().min(1).optional(),
+  insertSettings: InsertSettingsSchema.optional(),
 })
 export type RunOptions = z.infer<typeof RunSchema>
 

@@ -2,7 +2,7 @@ import { type createClickHouseExecutor, createStatelessClickHouseExecutor } from
 import { createPluginRunner, withFactoryDefaults } from '@chkit/core'
 
 import { BackfillInterruptedError, CHECKPOINT_VERSION, executeBackfill, untilAborted } from './async-backfill.js'
-import { buildChunkExecutionSql } from './chunking/sql.js'
+import { assertInsertSettingsKeepPinned, buildChunkExecutionSql, deliveryOverrideWarning, effectiveInsertSettings, type InsertSettings } from './chunking/sql.js'
 import { generateIdempotencyToken } from './chunking/utils/ids.js'
 import { BackfillConfigError } from './errors.js'
 import {
@@ -30,7 +30,7 @@ import {
   type StatusOptions,
 } from './options.js'
 import { planPayload, statusPayload, cancelPayload, doctorPayload } from './payload.js'
-import { assertBackfillTargetSafe, assertPinnedInsertSettingsAccepted, assertReplayColumnsStillInsertable, buildBackfillPlan, unprovableTargetFailures } from './planner.js'
+import { assertBackfillTargetSafe, assertPinnedInsertSettingsAccepted, assertReplayColumnsStillInsertable, buildBackfillPlan, readPinnedSettingAliases, unprovableTargetFailures } from './planner.js'
 import { evaluateBackfillCheck } from './check.js'
 import { cancelBackfillRun, getBackfillDoctorReport, getBackfillStatus } from './queries.js'
 import {
@@ -74,6 +74,7 @@ async function runBackfill(input: {
   clickhouse: NonNullable<Parameters<typeof createClickHouseExecutor>[0]>
   print: (value: unknown) => void
   jsonMode: boolean
+  insertSettings?: InsertSettings
 }): Promise<number> {
   const { plan, stateDir } = await readPlan({
     planId: input.planId,
@@ -98,6 +99,9 @@ async function runBackfillLocked(
   paths: ReturnType<typeof backfillPaths>,
   signal: AbortSignal,
 ): Promise<number> {
+  // insertSettings that would undo the INSERT's proof pins are refused before
+  // anything is read or submitted.
+  assertInsertSettingsKeepPinned(input.insertSettings)
   // Check for existing run state
   const existingRun = await readRun(paths.runPath)
 
@@ -156,8 +160,17 @@ async function runBackfillLocked(
       signal,
       () => new BackfillInterruptedError(`Backfill plan ${plan.planId}: interrupted.`),
     )
+    const aliases = await untilAborted(
+      readPinnedSettingAliases((sql, settings) => db.query(sql, settings)),
+      signal,
+      () => new BackfillInterruptedError(`Backfill plan ${plan.planId}: interrupted.`),
+    )
+    assertInsertSettingsKeepPinned(input.insertSettings, aliases)
+    const insertSettings = effectiveInsertSettings(input.insertSettings, aliases)
+    const warning = deliveryOverrideWarning(insertSettings)
+    if (warning) process.stderr.write(`${warning}\n`)
     await untilAborted(
-      assertPinnedInsertSettingsAccepted({ planId: plan.planId, query: (sql, settings) => db.query(sql, settings) }),
+      assertPinnedInsertSettingsAccepted({ planId: plan.planId, query: (sql, settings) => db.query(sql, settings), insertSettings }),
       signal,
       () => new BackfillInterruptedError(`Backfill plan ${plan.planId}: interrupted.`),
     )
@@ -205,6 +218,7 @@ async function runBackfillLocked(
           mvReplayQueries: plan.execution.mvReplayQueries,
           targetColumns: plan.execution.targetColumns,
           cutoverKey: plan.execution.cutoverKey,
+          insertSettings,
           idempotencyToken: plan.execution.requireIdempotencyToken
             ? generateIdempotencyToken(plan.planId, planChunk.id)
             : '',
@@ -405,6 +419,7 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
               concurrency: opts.concurrency,
               pollIntervalMs: opts.pollIntervalMs,
               stateDir: opts.stateDir,
+              insertSettings: opts.insertSettings,
               configPath: context.configPath,
               config: context.config,
               clickhouse: context.config.clickhouse,
@@ -439,6 +454,7 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
               concurrency: opts.concurrency,
               pollIntervalMs: opts.pollIntervalMs,
               stateDir: opts.stateDir,
+              insertSettings: opts.insertSettings,
               resume: { replayFailed: opts.replayFailed, acceptUnknown: opts.acceptUnknown },
               configPath: context.configPath,
               config: context.config,

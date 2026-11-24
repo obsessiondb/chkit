@@ -25,12 +25,17 @@ from chkit_plugin_backfill.chunking.sql import (
 from chkit_plugin_backfill.chunking.sql import (
     assert_insert_settings_keep_pinned,
     build_chunk_execution_sql,
-    unpinned_insert_settings,
+    delivery_override_warning,
+    effective_insert_settings,
 )
 from chkit_plugin_backfill.chunking.types import Chunk, TableProfile
 from chkit_plugin_backfill.errors import BackfillConfigError
 from chkit_plugin_backfill.options import PluginConfig
-from chkit_plugin_backfill.planner import BuildBackfillPlanOutput, read_pinned_setting_aliases
+from chkit_plugin_backfill.planner import (
+    BuildBackfillPlanOutput,
+    assert_pinned_insert_settings_accepted,
+    read_pinned_setting_aliases,
+)
 from chkit_plugin_backfill.plugin import backfill
 from chkit_plugin_obsessiondb import backfill_submit as backfill_submit_module
 from chkit_plugin_obsessiondb.backfill_submit import (
@@ -151,6 +156,9 @@ def test_insert_settings_with_the_pinned_value_are_dropped() -> None:
             "allow_experimental_parallel_reading_from_replicas": False,
             "log_queries": True,
             "log_queries_min_type": "query_start",
+            "distributed_foreground_insert": 1,
+            "insert_distributed_sync": True,
+            "materialized_views_ignore_errors": "0",
             "max_insert_threads": 2,
         },
     )
@@ -176,13 +184,6 @@ def test_insert_settings_with_the_pinned_value_are_dropped() -> None:
             "enable_parallel_replicas=1 (an alias of "
             "allow_experimental_parallel_reading_from_replicas)",
         ),
-        # #821: a chunk into a Distributed table is done only once delivered.
-        ({"distributed_foreground_insert": 0}, "distributed_foreground_insert=0"),
-        (
-            {"insert_distributed_sync": False},
-            "insert_distributed_sync=false (an alias of distributed_foreground_insert)",
-        ),
-        ({"materialized_views_ignore_errors": 1}, "materialized_views_ignore_errors=1"),
     ],
 )
 def test_insert_settings_that_change_a_pinned_setting_are_refused(
@@ -196,10 +197,159 @@ def test_insert_settings_that_change_a_pinned_setting_are_refused(
 
     assert str(raised.value) == (
         f"insertSettings sets {named}, which every backfill chunk INSERT pins "
-        f"({_PINNED_INSERT}): with another value, its failure cannot be proven from "
-        "system.query_log, and a replay could write its rows twice, or it is done before "
-        "its rows reach a Distributed table's shards. Remove them from insertSettings."
+        f"({_PROOF_PINS}): with another value, its failure cannot be proven from "
+        "system.query_log, and a replay could write its rows twice. "
+        "Remove them from insertSettings."
     )
+
+
+# #821: the delivery pins are defaults; an override replaces the pin in place,
+# under the pinned name, and turns a guarantee off, which a run warns about.
+_PROOF_PINS = (
+    "allow_experimental_parallel_reading_from_replicas=0, "
+    "parallel_distributed_insert_select=0, log_queries=1, "
+    "log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0"
+)
+_DELIVERY_WARNING = {
+    "distributed_foreground_insert": (
+        "distributed_foreground_insert=0 (a chunk can be recorded done before its rows "
+        "reach a Distributed table's shards)"
+    ),
+    "materialized_views_ignore_errors": (
+        "materialized_views_ignore_errors=1 (a materialized view's failed write is "
+        "dropped and the chunk is still recorded done)"
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("settings", "pinned", "warned"),
+    [
+        (
+            {"distributed_foreground_insert": 0},
+            _PINNED_INSERT.replace(
+                "distributed_foreground_insert=1", "distributed_foreground_insert=0"
+            ),
+            ["distributed_foreground_insert"],
+        ),
+        (
+            {"insert_distributed_sync": False},
+            _PINNED_INSERT.replace(
+                "distributed_foreground_insert=1", "distributed_foreground_insert=false"
+            ),
+            ["distributed_foreground_insert"],
+        ),
+        (
+            {"materialized_views_ignore_errors": 1},
+            _PINNED_INSERT.replace(
+                "materialized_views_ignore_errors=0", "materialized_views_ignore_errors=1"
+            ),
+            ["materialized_views_ignore_errors"],
+        ),
+        (
+            {"distributed_foreground_insert": 0, "materialized_views_ignore_errors": 1},
+            _PINNED_INSERT.replace(
+                "distributed_foreground_insert=1", "distributed_foreground_insert=0"
+            ).replace("materialized_views_ignore_errors=0", "materialized_views_ignore_errors=1"),
+            ["distributed_foreground_insert", "materialized_views_ignore_errors"],
+        ),
+    ],
+)
+def test_an_override_of_a_delivery_pin_replaces_it_and_warns(
+    settings: dict[str, str | int | bool], pinned: str, warned: list[str]
+) -> None:
+    sql = build_chunk_execution_sql(
+        plan_id="p", chunk=_chunk(), target="app.events", table=TABLE,
+        insert_settings={**settings, "max_insert_threads": 2},
+    )
+
+    assert _settings_line(sql) == (
+        f"SETTINGS async_insert=0, {PINNED}, max_insert_threads=2, {pinned}"
+    )
+    rendered = [
+        _DELIVERY_WARNING[name].replace("=0", "=false")
+        if "insert_distributed_sync" in settings
+        else _DELIVERY_WARNING[name]
+        for name in warned
+    ]
+    assert delivery_override_warning(settings) == (
+        "Warning: insertSettings overrides what every backfill chunk INSERT sets by "
+        f"default: {'; '.join(rendered)}."
+    )
+
+
+def test_the_default_or_a_delivery_pin_at_its_value_does_not_warn() -> None:
+    assert delivery_override_warning(None) is None
+    assert delivery_override_warning(
+        {"distributed_foreground_insert": 1, "insert_distributed_sync": True,
+         "materialized_views_ignore_errors": "0", "max_insert_threads": 2}
+    ) is None
+
+
+def test_a_server_alias_of_a_delivery_pin_is_kept_under_the_pinned_name() -> None:
+    aliases = {"foreground_alias": "distributed_foreground_insert"}
+    settings = {"foreground_alias": 0, "max_insert_threads": 2}
+
+    assert_insert_settings_keep_pinned(settings, aliases)
+    effective = effective_insert_settings(settings, aliases)
+    sql = build_chunk_execution_sql(
+        plan_id="p", chunk=_chunk(), target="app.events", table=TABLE,
+        insert_settings=effective,
+    )
+
+    assert effective == {"distributed_foreground_insert": 0, "max_insert_threads": 2}
+    assert "foreground_alias" not in sql
+    assert sql.count("distributed_foreground_insert=") == 1
+    assert "distributed_foreground_insert=0" in sql
+
+
+def test_a_delivery_pin_set_twice_to_different_values_is_refused() -> None:
+    with pytest.raises(BackfillConfigError) as raised:
+        assert_insert_settings_keep_pinned(
+            {"distributed_foreground_insert": 0, "insert_distributed_sync": 1}
+        )
+
+    assert str(raised.value) == (
+        "insertSettings sets distributed_foreground_insert more than once, with different "
+        "values (distributed_foreground_insert=0, insert_distributed_sync=1). "
+        "Keep one of them."
+    )
+
+
+def test_the_cutover_copy_carries_the_override_too() -> None:
+    sql = build_chunk_execution_sql(
+        plan_id="p", chunk=_chunk(), target="app.events_shadow", source_target="app.events",
+        table=TABLE, target_columns=["id"], cutover_key=["id"],
+        insert_settings={"distributed_foreground_insert": 0},
+    )
+
+    assert _settings_line(sql) == (
+        f"SETTINGS async_insert=0, {PINNED}, insert_deduplicate=0, "
+        "select_sequential_consistency=1, "
+        + _PINNED_INSERT.replace(
+            "distributed_foreground_insert=1", "distributed_foreground_insert=0"
+        )
+    )
+
+
+def test_the_preflight_checks_the_overridden_delivery_settings() -> None:
+    reads: list[str] = []
+
+    def query(sql: str, _settings: object = None) -> list[dict[str, object]]:
+        reads.append(sql)
+        return []
+
+    assert_pinned_insert_settings_accepted(
+        plan_id="p1", query=query,
+        insert_settings=effective_insert_settings({"insert_distributed_sync": 0}),
+    )
+
+    assert reads == [
+        "SELECT 1 SETTINGS "
+        + _PINNED_INSERT.replace(
+            "distributed_foreground_insert=1", "distributed_foreground_insert=0"
+        )
+    ]
 
 
 def test_an_alias_the_server_lists_is_checked_and_dropped_too() -> None:
@@ -212,7 +362,7 @@ def test_an_alias_the_server_lists_is_checked_and_dropped_too() -> None:
 
     kept = {"log_queries_alias": 1, "max_insert_threads": 4}
     assert_insert_settings_keep_pinned(kept, aliases)
-    assert unpinned_insert_settings(kept, aliases) == {"max_insert_threads": 4}
+    assert effective_insert_settings(kept, aliases) == {"max_insert_threads": 4}
 
 
 def test_the_server_aliases_come_from_system_settings_alias_for() -> None:
@@ -330,6 +480,57 @@ def test_handle_submit_uses_the_backfill_plugin_insert_settings(
     [call] = submitted
     assert all(
         task.sql.endswith(f", max_insert_threads=6, {_PINNED_INSERT}") for task in call["tasks"]
+    )
+
+
+def test_handle_submit_carries_a_delivery_override_and_warns_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    submitted: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        backfill_submit_module, "create_remote_executor", lambda _creds, *, service_slug: None
+    )
+    monkeypatch.setattr(
+        backfill_submit_module,
+        "build_backfill_plan",
+        lambda **_kwargs: BuildBackfillPlanOutput(
+            plan=make_plan(), plan_path="/state/plans/abcdef0123456789.json"
+        ),
+    )
+
+    def fake_jobs_submit(_creds: Credentials, **kwargs: Any) -> str:
+        submitted.append(kwargs)
+        return "job-1"
+
+    monkeypatch.setattr(backfill_submit_module, "jobs_submit", fake_jobs_submit)
+    config = SimpleNamespace(
+        meta_dir="meta",
+        plugins=[backfill({"insertSettings": {"materialized_views_ignore_errors": 1}})],
+    )
+
+    code = handle_submit(
+        SubmitContext(
+            flags={"--target": "app.events"},
+            config_path=str(tmp_path / "cfg.py"),
+            json_mode=True,
+            config=config,
+            print=lambda _value: None,
+            credentials=Credentials(access_token="tok", base_url="https://api.test"),
+            service_slug="svc-1",
+        )
+    )
+
+    assert code == 0
+    [call] = submitted
+    overridden = _PINNED_INSERT.replace(
+        "materialized_views_ignore_errors=0", "materialized_views_ignore_errors=1"
+    )
+    assert all(task.sql.endswith(f", {overridden}") for task in call["tasks"])
+    assert capsys.readouterr().err == (
+        "Warning: insertSettings overrides what every backfill chunk INSERT sets by "
+        f"default: {_DELIVERY_WARNING['materialized_views_ignore_errors']}.\n"
     )
 
 

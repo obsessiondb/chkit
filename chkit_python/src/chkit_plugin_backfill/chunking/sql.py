@@ -86,9 +86,10 @@ def _js_trim(value: str) -> str:
 #: before they are delivered. A materialized view's write that fails fails the
 #: INSERT: with materialized_views_ignore_errors = 1 a shard that cannot be
 #: reached would drop the view's rows and the chunk would still be done. These
-#: two are pinned for delivery, not for proof: writing to a remote shard runs a
-#: secondary query there, so the failure of such a chunk is never proven, as
-#: for any Distributed target (``unprovable_target_failures``).
+#: two are pinned for delivery, not for proof (``DELIVERY_PINS``): writing to a
+#: remote shard runs a secondary query there, so the failure of such a chunk is
+#: never proven, as for any Distributed target (``unprovable_target_failures``).
+#: They are defaults that ``insertSettings`` can override.
 PINNED_INSERT_SETTINGS: dict[str, str] = {
     "allow_experimental_parallel_reading_from_replicas": "0",
     "parallel_distributed_insert_select": "0",
@@ -101,6 +102,25 @@ PINNED_INSERT_SETTINGS: dict[str, str] = {
 
 PINNED_INSERT_SETTINGS_SQL = ", ".join(
     f"{name}={value}" for name, value in PINNED_INSERT_SETTINGS.items()
+)
+
+#: The pinned settings ``insertSettings`` may override, each with the guarantee
+#: an override turns off (TS ``DELIVERY_PINS``). The others are proof pins:
+#: with another value a failure could not be proven, and a replay could write
+#: a chunk's rows twice.
+DELIVERY_PINS: dict[str, str] = {
+    "distributed_foreground_insert": (
+        "a chunk can be recorded done before its rows reach a Distributed table's shards"
+    ),
+    "materialized_views_ignore_errors": (
+        "a materialized view's failed write is dropped and the chunk is still recorded done"
+    ),
+}
+
+_PROOF_PINS_SQL = ", ".join(
+    f"{name}={value}"
+    for name, value in PINNED_INSERT_SETTINGS.items()
+    if name not in DELIVERY_PINS
 )
 
 
@@ -126,61 +146,128 @@ def _pinned_name(key: str, aliases: Mapping[str, str] | None) -> str | None:
     return name if name in PINNED_INSERT_SETTINGS else None
 
 
-def _same_value(value: str | int | float | bool, pinned: str) -> bool:
-    def normal(text: str) -> str:
-        bare = text.strip("'").lower()
-        return {"true": "1", "false": "0"}.get(bare, bare)
+def _normal_value(value: str | int | float | bool) -> str:
+    bare = _render_insert_setting_value(value).strip("'").lower()
+    return {"true": "1", "false": "0"}.get(bare, bare)
 
-    return normal(_render_insert_setting_value(value)) == normal(pinned)
+
+def _same_value(value: str | int | float | bool, pinned: str) -> bool:
+    bare = pinned.strip("'").lower()
+    return _normal_value(value) == {"true": "1", "false": "0"}.get(bare, bare)
 
 
 def assert_insert_settings_keep_pinned(
     insert_settings: Mapping[str, str | int | float | bool] | None,
     aliases: Mapping[str, str] | None = None,
 ) -> None:
-    """Refuse ``insertSettings`` that set a pinned setting
-    (``PINNED_INSERT_SETTINGS``), or an alias of one, to another value: the
-    chunk INSERT must not run as secondary queries, and must be logged. One
-    with the pinned value is dropped (``unpinned_insert_settings``).
-    ``aliases`` adds the server's own (``system.settings.alias_for``) to
-    ``PINNED_SETTING_ALIASES``."""
+    """Refuse ``insertSettings`` that set a proof pin (``PINNED_INSERT_SETTINGS``
+    but not ``DELIVERY_PINS``), or an alias of one, to another value: the chunk
+    INSERT must not run as secondary queries, and must be logged. One with the
+    pinned value is dropped (``effective_insert_settings``). A delivery pin
+    may be overridden, but not set twice (itself and an alias) to different
+    values. ``aliases`` adds the server's own (``system.settings.alias_for``)
+    to ``PINNED_SETTING_ALIASES``."""
     invalid = [key for key in insert_settings or {} if not _SETTING_NAME.fullmatch(key)]
     if invalid:
-        names = ", ".join(repr(key) for key in invalid)
+        names = ", ".join(f"'{key}'" for key in invalid)
         msg = (
             f"insertSettings has a key that is not a setting name: {names}. A setting name "
             "is letters, digits and underscores, not starting with a digit."
         )
         raise BackfillConfigError(msg)
     conflicts = []
+    seen: dict[str, list[tuple[str, str | int | float | bool]]] = {}
     for key, value in (insert_settings or {}).items():
         name = _pinned_name(key, aliases)
-        if name is None or _same_value(value, PINNED_INSERT_SETTINGS[name]):
+        if name is None:
+            continue
+        seen.setdefault(name, []).append((key, value))
+        if name in DELIVERY_PINS or _same_value(value, PINNED_INSERT_SETTINGS[name]):
             continue
         rendered = f"{key}={_render_insert_setting_value(value)}"
         conflicts.append(rendered if name == key else f"{rendered} (an alias of {name})")
     if conflicts:
         msg = (
             f"insertSettings sets {', '.join(conflicts)}, which every backfill chunk INSERT "
-            f"pins ({PINNED_INSERT_SETTINGS_SQL}): with another value, its failure cannot be "
-            "proven from system.query_log, and a replay could write its rows twice, or it "
-            "is done before its rows reach a Distributed table's shards. Remove them from "
-            "insertSettings."
+            f"pins ({_PROOF_PINS_SQL}): with another value, its failure cannot be "
+            "proven from system.query_log, and a replay could write its rows twice. "
+            "Remove them from insertSettings."
         )
         raise BackfillConfigError(msg)
+    for name, entries in seen.items():
+        if len({_normal_value(value) for _key, value in entries}) > 1:
+            both = ", ".join(
+                f"{key}={_render_insert_setting_value(value)}" for key, value in entries
+            )
+            msg = (
+                f"insertSettings sets {name} more than once, with different values ({both}). "
+                "Keep one of them."
+            )
+            raise BackfillConfigError(msg)
 
 
-def unpinned_insert_settings(
+def effective_insert_settings(
     insert_settings: Mapping[str, str | int | float | bool] | None,
     aliases: Mapping[str, str] | None = None,
 ) -> dict[str, str | int | float | bool]:
-    """``insert_settings`` without the pinned settings and their aliases: a
-    pinned one appears once in the INSERT's SETTINGS, with its pinned value."""
-    return {
-        key: value
-        for key, value in (insert_settings or {}).items()
-        if _pinned_name(key, aliases) is None
-    }
+    """``insert_settings`` without the pinned settings and their aliases, except
+    an override of a delivery pin, kept under the pinned name: a pinned
+    setting appears once in the INSERT's SETTINGS, in its place."""
+    effective: dict[str, str | int | float | bool] = {}
+    for key, value in (insert_settings or {}).items():
+        name = _pinned_name(key, aliases)
+        if name is None:
+            effective[key] = value
+        elif name in DELIVERY_PINS and not _same_value(value, PINNED_INSERT_SETTINGS[name]):
+            effective[name] = value
+    return effective
+
+
+def pinned_insert_settings_sql(
+    insert_settings: Mapping[str, str | int | float | bool] | None = None,
+) -> str:
+    """``PINNED_INSERT_SETTINGS_SQL`` with the delivery pins that
+    ``insert_settings`` (``effective_insert_settings``) overrides."""
+    overrides = insert_settings or {}
+    return ", ".join(
+        f"{name}={_render_insert_setting_value(overrides[name])}"
+        if name in DELIVERY_PINS and name in overrides
+        else f"{name}={value}"
+        for name, value in PINNED_INSERT_SETTINGS.items()
+    )
+
+
+def delivery_override_warning(
+    insert_settings: Mapping[str, str | int | float | bool] | None,
+) -> str | None:
+    """The one warning line a run or submit prints when ``insert_settings``
+    overrides a delivery pin, or None."""
+    overridden = [
+        f"{name}={_render_insert_setting_value(value)} ({DELIVERY_PINS[name]})"
+        for name, value in effective_insert_settings(insert_settings).items()
+        if name in DELIVERY_PINS
+    ]
+    if not overridden:
+        return None
+    return (
+        "Warning: insertSettings overrides what every backfill chunk INSERT sets by "
+        f"default: {'; '.join(overridden)}."
+    )
+
+
+def _render_settings_parts(
+    insert_settings: Mapping[str, str | int | float | bool] | None,
+) -> tuple[list[str], str]:
+    """The user's own settings, rendered, and the pinned settings with their
+    overrides, for one SETTINGS clause."""
+    assert_insert_settings_keep_pinned(insert_settings)
+    effective = effective_insert_settings(insert_settings)
+    own = [
+        f"{key}={_render_insert_setting_value(value)}"
+        for key, value in effective.items()
+        if key not in DELIVERY_PINS
+    ]
+    return own, pinned_insert_settings_sql(effective)
 
 
 def build_chunk_execution_sql(
@@ -285,10 +372,9 @@ def _build_cutover_chunk_sql(
         "insert_deduplicate=0",
         "select_sequential_consistency=1",
     ]
-    assert_insert_settings_keep_pinned(insert_settings)
-    for setting, value in unpinned_insert_settings(insert_settings).items():
-        parts.append(f"{setting}={_render_insert_setting_value(value)}")
-    parts.append(PINNED_INSERT_SETTINGS_SQL)
+    own, pinned = _render_settings_parts(insert_settings)
+    parts.extend(own)
+    parts.append(pinned)
     lines = [
         header,
         f"INSERT INTO {target} ({columns})",
@@ -757,10 +843,9 @@ def _build_settings_clause(
     # Per-chunk insert settings from the plugin config (e.g. max_insert_threads,
     # min_insert_block_size_rows). Rendered into the single SETTINGS clause because
     # ClickHouse rejects a second SETTINGS clause on INSERT ... SELECT.
-    assert_insert_settings_keep_pinned(insert_settings)
-    for key, value in unpinned_insert_settings(insert_settings).items():
-        parts.append(f"{key}={_render_insert_setting_value(value)}")
-    parts.append(PINNED_INSERT_SETTINGS_SQL)
+    own, pinned = _render_settings_parts(insert_settings)
+    parts.extend(own)
+    parts.append(pinned)
     return f"SETTINGS {', '.join(parts)}"
 
 

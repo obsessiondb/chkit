@@ -290,6 +290,61 @@ describe('handleSubmit', () => {
 	})
 })
 
+describe('handleSubmit insertSettings', () => {
+	const originalFetch = globalThis.fetch
+
+	afterEach(() => {
+		globalThis.fetch = originalFetch
+		mock.restore()
+	})
+
+	// #821: an override of a delivery pin reaches the managed job, with one warning.
+	test('carries the backfill plugin insertSettings and warns once about a delivery override', async () => {
+		const dir = await mkdtemp(join(tmpdir(), 'chkit-submit-'))
+		const plan = makePlan()
+		spyOn(backfillSdk, 'buildBackfillPlan').mockResolvedValue({
+			plan,
+			planPath: join(dir, 'chkit/meta/backfill/plans', `${plan.planId}.json`),
+		})
+		const stderr = spyOn(process.stderr, 'write').mockImplementation(() => true)
+		const bodies: string[] = []
+		globalThis.fetch = mock(async (input: unknown, init?: RequestInit) => {
+			bodies.push(input instanceof Request ? await input.text() : String(init?.body))
+			return new Response(JSON.stringify({ json: { jobId: 'job-123' } }), {
+				status: 200,
+				headers: { 'content-type': 'application/json' },
+			})
+		}) as unknown as typeof fetch
+
+		const result = await handleSubmit({
+			flags: { '--target': 'app.events' },
+			configPath: join(dir, 'clickhouse.config.ts'),
+			jsonMode: true,
+			config: {
+				metaDir: './chkit/meta',
+				schema: [],
+				plugins: [backfill({ insertSettings: { max_insert_threads: 6, materialized_views_ignore_errors: 1 } })],
+			},
+			print: () => {},
+			credentials: { access_token: 'test-tok', base_url: 'https://api.example.com' },
+			serviceSlug: 'svc',
+		})
+
+		expect(result).toEqual({ handled: true, exitCode: 0 })
+		expect(bodies).toHaveLength(1)
+		const tasks: Array<{ sql: string }> = JSON.parse(bodies[0] ?? '').json.tasks
+		expect(tasks).toHaveLength(2)
+		for (const task of tasks) {
+			expect(task.sql).toContain('max_insert_threads=6, ')
+			expect(task.sql).toContain('materialized_views_ignore_errors=1, ')
+			expect(task.sql).not.toContain('materialized_views_ignore_errors=0')
+		}
+		expect(stderr.mock.calls.map(([line]) => String(line))).toEqual([
+			"Warning: insertSettings overrides what every backfill chunk INSERT sets by default: materialized_views_ignore_errors=1 (a materialized view's failed write is dropped and the chunk is still recorded done).\n",
+		])
+	})
+})
+
 describe('parseResubmitInput', () => {
 	test('accepts a plan id with job settings', () => {
 		expect(

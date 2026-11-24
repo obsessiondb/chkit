@@ -4,7 +4,9 @@ import {
 	type BackfillPlanState,
 	buildBackfillPlan,
 	buildChunkExecutionSql,
+	deliveryOverrideWarning,
 	generateIdempotencyToken,
+	type InsertSettings,
 	parseByteSize,
 	PlanSchema,
 	recordBackfillSubmission,
@@ -32,7 +34,7 @@ interface SubmitTask {
  * renders the exact same `INSERT … SELECT` the local executor would run, so the
  * algorithm is identical — only the execution venue differs.
  */
-export function buildSubmitTasks(plan: BackfillPlanState): SubmitTask[] {
+export function buildSubmitTasks(plan: BackfillPlanState, insertSettings?: InsertSettings): SubmitTask[] {
 	return plan.chunkPlan.chunks.map((chunk) => ({
 		id: chunk.id,
 		sql: buildChunkExecutionSql({
@@ -44,6 +46,7 @@ export function buildSubmitTasks(plan: BackfillPlanState): SubmitTask[] {
 			mvReplayQueries: plan.execution.mvReplayQueries,
 			targetColumns: plan.execution.targetColumns,
 			cutoverKey: plan.execution.cutoverKey,
+			insertSettings,
 			idempotencyToken: plan.execution.requireIdempotencyToken
 				? generateIdempotencyToken(plan.planId, chunk.id)
 				: '',
@@ -165,7 +168,11 @@ export async function handleSubmit(
 				? await prepareResubmit(context, jobs)
 				: await prepareNewPlan(context)
 
-		const tasks = buildSubmitTasks(plan)
+		// Same INSERT settings the local executor applies (backfill({ insertSettings })).
+		const insertSettings = backfillInsertSettings(context.config.plugins)
+		const tasks = buildSubmitTasks(plan, insertSettings)
+		const warning = deliveryOverrideWarning(insertSettings)
+		if (warning) process.stderr.write(`${warning}\n`)
 		const { jobId } = await jobs.submit({
 			serviceSlug: context.serviceSlug,
 			type: 'backfill',
@@ -227,6 +234,25 @@ export async function handleSubmit(
 		}
 		return { handled: true, exitCode: 1 }
 	}
+}
+
+/** The backfill plugin's `insertSettings`, or undefined when it has none. */
+function backfillInsertSettings(plugins: unknown): InsertSettings | undefined {
+	const { insertSettings } = resolveBackfillPluginOptions(plugins)
+	if (insertSettings === undefined) return undefined
+	if (!isInsertSettings(insertSettings)) {
+		throw new Error('Invalid backfill insertSettings. Expected an object of string, number or boolean values.')
+	}
+	return insertSettings
+}
+
+function isInsertSettings(value: unknown): value is InsertSettings {
+	return (
+		typeof value === 'object' &&
+		value !== null &&
+		!Array.isArray(value) &&
+		Object.values(value).every((item) => ['string', 'number', 'boolean'].includes(typeof item))
+	)
 }
 
 interface PreparedSubmission {

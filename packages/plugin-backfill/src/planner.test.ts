@@ -8,7 +8,7 @@ import { resolveConfig } from '@chkit/core'
 import { buildChunkExecutionSql, rewriteSelectColumns } from './chunking/sql.js'
 import { generateIdempotencyToken } from './chunking/utils/ids.js'
 import { PlanSchema } from './options.js'
-import { assertBackfillTargetSafe, assertPinnedInsertSettingsAccepted, assertReplayColumnsStillInsertable, buildBackfillPlan, unprovableTargetFailures } from './planner.js'
+import { assertBackfillTargetSafe, assertPinnedInsertSettingsAccepted, assertReplayColumnsStillInsertable, buildBackfillPlan, readPinnedSettingAliases, unprovableTargetFailures } from './planner.js'
 import { backfillPaths, computeBackfillStateDir, readPlan } from './state.js'
 
 function createMockQuery(opts: {
@@ -783,5 +783,36 @@ describe('assertPinnedInsertSettingsAccepted', () => {
     await expect(assertPinnedInsertSettingsAccepted({ planId: 'p1', query })).rejects.toThrow(
       `Backfill plan p1: the server refused the settings every chunk INSERT runs with (${PINNED}): Cannot modify 'log_queries' setting in readonly mode. Nothing was submitted. Use a user allowed to set them (not readonly = 1, and no settings constraint on them).`,
     )
+  })
+
+  // #821: a user whose server forbids a delivery pin overrides it, and the
+  // preflight checks the settings the chunks will run with.
+  test('checks the overridden delivery settings', async () => {
+    const reads: string[] = []
+    await assertPinnedInsertSettingsAccepted({
+      planId: 'p1',
+      query: async <T>(sql: string) => { reads.push(sql); return [] as T[] },
+      insertSettings: { distributed_foreground_insert: 0 },
+    })
+    expect(reads).toEqual([`SELECT 1 SETTINGS ${PINNED.replace('distributed_foreground_insert=1', 'distributed_foreground_insert=0')}`])
+  })
+})
+
+describe('readPinnedSettingAliases', () => {
+  test('reads the aliases from system.settings.alias_for', async () => {
+    const reads: string[] = []
+    const aliases = await readPinnedSettingAliases(async <T>(sql: string) => {
+      reads.push(sql)
+      return [{ name: 'enable_parallel_replicas', alias_for: 'allow_experimental_parallel_reading_from_replicas' }] as T[]
+    })
+    expect(aliases).toEqual({ enable_parallel_replicas: 'allow_experimental_parallel_reading_from_replicas' })
+    expect(reads).toEqual([
+      "SELECT name, alias_for FROM system.settings WHERE alias_for IN ('allow_experimental_parallel_reading_from_replicas', 'parallel_distributed_insert_select', 'distributed_foreground_insert', 'materialized_views_ignore_errors', 'log_queries', 'log_queries_min_type', 'log_queries_min_query_duration_ms')",
+    ])
+  })
+
+  test('a server without alias_for gives none', async () => {
+    const aliases = await readPinnedSettingAliases(async <T>(): Promise<T[]> => { throw new Error("Missing columns: 'alias_for'") })
+    expect(aliases).toEqual({})
   })
 })

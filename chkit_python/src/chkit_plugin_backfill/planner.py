@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
@@ -16,7 +17,7 @@ from chkit_plugin_backfill.chunking.boundary_codec import (
     encode_chunk_plan_for_persistence,
 )
 from chkit_plugin_backfill.chunking.planner import generate_chunk_plan
-from chkit_plugin_backfill.chunking.sql import PINNED_INSERT_SETTINGS, PINNED_INSERT_SETTINGS_SQL
+from chkit_plugin_backfill.chunking.sql import PINNED_INSERT_SETTINGS, pinned_insert_settings_sql
 from chkit_plugin_backfill.chunking.types import (
     GenerateChunkPlanInput,
     PlannerQuery,
@@ -109,16 +110,23 @@ def _detect_backfill_strategy(
         return _BackfillStrategy(mvs=[])
 
 
-def assert_pinned_insert_settings_accepted(*, plan_id: str, query: PlannerQuery) -> None:
+def assert_pinned_insert_settings_accepted(
+    *,
+    plan_id: str,
+    query: PlannerQuery,
+    insert_settings: Mapping[str, str | int | float | bool] | None = None,
+) -> None:
     """Fail before anything is submitted when the server would refuse the
-    settings every chunk INSERT runs with (``PINNED_INSERT_SETTINGS``): a user
-    with ``readonly = 1``, or a settings constraint on one of them."""
+    settings every chunk INSERT runs with (``PINNED_INSERT_SETTINGS``, with the
+    delivery pins ``insert_settings`` overrides): a user with ``readonly = 1``,
+    or a settings constraint on one of them."""
+    pinned = pinned_insert_settings_sql(insert_settings)
     try:
-        query(f"SELECT 1 SETTINGS {PINNED_INSERT_SETTINGS_SQL}", None)
+        query(f"SELECT 1 SETTINGS {pinned}", None)
     except Exception as error:
         msg = (
             f"Backfill plan {plan_id}: the server refused the settings every chunk INSERT "
-            f"runs with ({PINNED_INSERT_SETTINGS_SQL}): {error}. Nothing was submitted. Use a "
+            f"runs with ({pinned}): {error}. Nothing was submitted. Use a "
             "user allowed to set them (not readonly = 1, and no settings constraint on them)."
         )
         raise BackfillConfigError(msg) from error

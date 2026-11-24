@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import re
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -20,6 +21,7 @@ from chkit_plugin_backfill.sdk import (
     BackfillPlanState,
     build_backfill_plan,
     build_chunk_execution_sql,
+    delivery_override_warning,
     generate_idempotency_token,
     record_backfill_submission,
 )
@@ -222,6 +224,9 @@ def handle_submit(context: SubmitContext) -> int:
 
         # Same INSERT settings the local executor applies (backfill({insertSettings})).
         tasks = build_submit_tasks(plan, plugin_options.insert_settings)
+        warning = delivery_override_warning(plugin_options.insert_settings)
+        if warning is not None:
+            sys.stderr.write(f"{warning}\n")
         job_id = jobs_submit(
             context.credentials,
             service_slug=context.service_slug,

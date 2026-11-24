@@ -23,7 +23,9 @@ export {
 export {
   buildChunkExecutionSql,
   buildWhereClauseFromChunk,
+  deliveryOverrideWarning,
   injectSortKeyFilter,
+  type InsertSettings,
   PINNED_INSERT_SETTINGS,
   rewriteSelectColumns,
 } from './chunking/sql.js'

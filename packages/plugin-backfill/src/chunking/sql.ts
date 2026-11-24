@@ -7,6 +7,7 @@ import type {
   SortKey,
   TableProfile,
 } from './types.js'
+import { BackfillConfigError } from '../errors.js'
 
 /**
  * Top-level clause keywords, in the order they may legally follow a
@@ -50,7 +51,8 @@ const ASTERISK_SETTINGS = 'asterisk_include_materialized_columns=0, asterisk_inc
  * reached would drop the view's rows and the chunk would still be done. These
  * two are pinned for delivery, not for proof: writing to a remote shard runs a
  * secondary query there, so the failure of such a chunk is never proven, as
- * for any Distributed target (`unprovableTargetFailures`).
+ * for any Distributed target (`unprovableTargetFailures`). They are defaults
+ * that `insertSettings` can override (`DELIVERY_PINS`).
  */
 export const PINNED_INSERT_SETTINGS = {
   allow_experimental_parallel_reading_from_replicas: '0',
@@ -66,6 +68,176 @@ export const PINNED_INSERT_SETTINGS_SQL = Object.entries(PINNED_INSERT_SETTINGS)
   .map(([name, value]) => `${name}=${value}`)
   .join(', ')
 
+/** Per-chunk INSERT settings from `backfill({ insertSettings })`. */
+export type InsertSettings = Record<string, string | number | boolean>
+
+type PinnedSetting = keyof typeof PINNED_INSERT_SETTINGS
+
+/**
+ * The pinned settings `insertSettings` may override, each with the guarantee
+ * an override turns off. The others are proof pins: with another value a
+ * failure could not be proven, and a replay could write a chunk's rows twice.
+ */
+export const DELIVERY_PINS: Partial<Record<PinnedSetting, string>> = {
+  distributed_foreground_insert: "a chunk can be recorded done before its rows reach a Distributed table's shards",
+  materialized_views_ignore_errors: "a materialized view's failed write is dropped and the chunk is still recorded done",
+}
+
+const PROOF_PINS_SQL = Object.entries(PINNED_INSERT_SETTINGS)
+  .filter(([name]) => !(name in DELIVERY_PINS))
+  .map(([name, value]) => `${name}=${value}`)
+  .join(', ')
+
+/**
+ * Other names of the pinned settings (`system.settings.alias_for`), for a
+ * server that does not list them: `enable_parallel_replicas` is an alias of
+ * `allow_experimental_parallel_reading_from_replicas` from 24.10 on, and
+ * `insert_distributed_sync` one of `distributed_foreground_insert`.
+ */
+export const PINNED_SETTING_ALIASES: Record<string, string> = {
+  enable_parallel_replicas: 'allow_experimental_parallel_reading_from_replicas',
+  insert_distributed_sync: 'distributed_foreground_insert',
+}
+
+// A setting name; any other key could smuggle text into the SETTINGS clause.
+const SETTING_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+function isPinnedSetting(name: string): name is PinnedSetting {
+  return Object.hasOwn(PINNED_INSERT_SETTINGS, name)
+}
+
+function isDeliveryPin(name: string): boolean {
+  return Object.hasOwn(DELIVERY_PINS, name)
+}
+
+/** The pinned setting `key` names, itself or through an alias. */
+function pinnedName(key: string, aliases: Record<string, string> = {}): PinnedSetting | undefined {
+  if (isPinnedSetting(key)) return key
+  const name = aliases[key] ?? PINNED_SETTING_ALIASES[key]
+  return name !== undefined && isPinnedSetting(name) ? name : undefined
+}
+
+/**
+ * A value as the SETTINGS clause reads it: strings single-quoted (`\` escaped
+ * as `\\` and `'` as `\'`, so a value cannot close its quote), booleans as
+ * `true`/`false`, numbers via `String(number)`.
+ */
+function renderInsertSettingValue(value: string | number | boolean): string {
+  if (typeof value === 'string') return `'${value.replaceAll('\\', '\\\\').replaceAll("'", "\\'")}'`
+  return String(value)
+}
+
+function normalText(text: string): string {
+  const bare = text.replace(/^'+|'+$/g, '').toLowerCase()
+  return bare === 'true' ? '1' : bare === 'false' ? '0' : bare
+}
+
+function sameValue(value: string | number | boolean, pinned: string): boolean {
+  return normalText(renderInsertSettingValue(value)) === normalText(pinned)
+}
+
+/**
+ * Refuse `insertSettings` that set a proof pin (`PINNED_INSERT_SETTINGS` but
+ * not `DELIVERY_PINS`), or an alias of one, to another value: the chunk
+ * INSERT must not run as secondary queries, and must be logged. One with the
+ * pinned value is dropped (`effectiveInsertSettings`). A delivery pin may be
+ * overridden, but not set twice (itself and an alias) to different values.
+ * `aliases` adds the server's own (`system.settings.alias_for`) to
+ * `PINNED_SETTING_ALIASES`.
+ */
+export function assertInsertSettingsKeepPinned(
+  insertSettings: InsertSettings | undefined,
+  aliases?: Record<string, string>,
+): void {
+  const entries = Object.entries(insertSettings ?? {})
+  const invalid = entries.map(([key]) => key).filter((key) => !SETTING_NAME.test(key))
+  if (invalid.length > 0) {
+    throw new BackfillConfigError(
+      `insertSettings has a key that is not a setting name: ${invalid.map((key) => `'${key}'`).join(', ')}. A setting name is letters, digits and underscores, not starting with a digit.`,
+    )
+  }
+  const pinned = entries.flatMap(([key, value]) => {
+    const name = pinnedName(key, aliases)
+    return name === undefined ? [] : [{ key, value, name }]
+  })
+  const conflicts = pinned
+    .filter(({ value, name }) => !isDeliveryPin(name) && !sameValue(value, PINNED_INSERT_SETTINGS[name]))
+    .map(({ key, value, name }) => {
+      const rendered = `${key}=${renderInsertSettingValue(value)}`
+      return name === key ? rendered : `${rendered} (an alias of ${name})`
+    })
+  if (conflicts.length > 0) {
+    throw new BackfillConfigError(
+      `insertSettings sets ${conflicts.join(', ')}, which every backfill chunk INSERT pins (${PROOF_PINS_SQL}): with another value, its failure cannot be proven from system.query_log, and a replay could write its rows twice. Remove them from insertSettings.`,
+    )
+  }
+  for (const name of new Set(pinned.map((entry) => entry.name))) {
+    const same = pinned.filter((entry) => entry.name === name)
+    if (new Set(same.map(({ value }) => normalText(renderInsertSettingValue(value)))).size > 1) {
+      throw new BackfillConfigError(
+        `insertSettings sets ${name} more than once, with different values (${same.map(({ key, value }) => `${key}=${renderInsertSettingValue(value)}`).join(', ')}). Keep one of them.`,
+      )
+    }
+  }
+}
+
+/**
+ * `insertSettings` without the pinned settings and their aliases, except an
+ * override of a delivery pin, kept under the pinned name: a pinned setting
+ * appears once in the INSERT's SETTINGS, in its place.
+ */
+export function effectiveInsertSettings(
+  insertSettings: InsertSettings | undefined,
+  aliases?: Record<string, string>,
+): InsertSettings {
+  const effective: InsertSettings = {}
+  for (const [key, value] of Object.entries(insertSettings ?? {})) {
+    const name = pinnedName(key, aliases)
+    if (name === undefined) effective[key] = value
+    else if (isDeliveryPin(name) && !sameValue(value, PINNED_INSERT_SETTINGS[name])) effective[name] = value
+  }
+  return effective
+}
+
+/**
+ * `PINNED_INSERT_SETTINGS_SQL` with the delivery pins that `insertSettings`
+ * (`effectiveInsertSettings`) overrides.
+ */
+export function pinnedInsertSettingsSql(insertSettings: InsertSettings = {}): string {
+  return Object.entries(PINNED_INSERT_SETTINGS)
+    .map(([name, value]) => {
+      const override = isDeliveryPin(name) ? insertSettings[name] : undefined
+      return `${name}=${override === undefined ? value : renderInsertSettingValue(override)}`
+    })
+    .join(', ')
+}
+
+/**
+ * The one warning line a run or submit prints when `insertSettings` overrides
+ * a delivery pin, or undefined.
+ */
+export function deliveryOverrideWarning(insertSettings: InsertSettings | undefined): string | undefined {
+  const overridden = Object.entries(effectiveInsertSettings(insertSettings)).flatMap(([name, value]) => {
+    const guarantee = isPinnedSetting(name) ? DELIVERY_PINS[name] : undefined
+    return guarantee === undefined ? [] : [`${name}=${renderInsertSettingValue(value)} (${guarantee})`]
+  })
+  if (overridden.length === 0) return undefined
+  return `Warning: insertSettings overrides what every backfill chunk INSERT sets by default: ${overridden.join('; ')}.`
+}
+
+/**
+ * The user's own settings and the pinned ones, with their overrides, for the
+ * single SETTINGS clause (ClickHouse rejects a second one on INSERT ... SELECT).
+ */
+function renderInsertSettings(insertSettings: InsertSettings | undefined): string {
+  assertInsertSettingsKeepPinned(insertSettings)
+  const effective = effectiveInsertSettings(insertSettings)
+  const own = Object.entries(effective)
+    .filter(([key]) => !isDeliveryPin(key))
+    .map(([key, value]) => `${key}=${renderInsertSettingValue(value)}`)
+  return [...own, pinnedInsertSettingsSql(effective)].join(', ')
+}
+
 // ── Chunk execution SQL ──────────────────────────────────────────────────────
 
 export function buildChunkExecutionSql(input: {
@@ -79,10 +251,12 @@ export function buildChunkExecutionSql(input: {
   idempotencyToken?: string
   /** cutover_copy: skip rows whose key the target already holds. */
   cutoverKey?: string[]
+  /** Extra settings for the INSERT (`backfill({ insertSettings })`). */
+  insertSettings?: InsertSettings
 }): string {
   const sourceTarget = input.sourceTarget ?? input.target
   const header = `/* chkit backfill plan=${input.planId} chunk=${input.chunk.id} token=${input.idempotencyToken ?? ''} */`
-  const settings = buildSettingsClause(input.idempotencyToken ?? '')
+  const settings = buildSettingsClause(input.idempotencyToken ?? '', input.insertSettings)
   const chunkConditions = buildChunkConditions(input.chunk, input.table.sortKeys)
 
   if (input.cutoverKey?.length && input.targetColumns?.length) {
@@ -140,6 +314,7 @@ function buildCutoverChunkSql(input: {
   cutoverKey: string[]
   header: string
   chunkConditions: string[]
+  insertSettings?: InsertSettings
 }): string {
   const columns = input.targetColumns.map(quoteIdentifier).join(', ')
   const key = input.cutoverKey.map(quoteIdentifier).join(', ')
@@ -157,7 +332,7 @@ function buildCutoverChunkSql(input: {
     `WHERE _partition_id = ${quoteSqlString(input.chunk.partitionId)}`,
     ...input.chunkConditions.map((condition) => `  AND ${condition}`),
     `  AND (${key}) NOT IN (SELECT ${key} FROM ${input.target}${shadowConditions.length > 0 ? ` WHERE ${shadowConditions.join(' AND ')}` : ''})`,
-    `SETTINGS async_insert=0, ${ASTERISK_SETTINGS}, insert_deduplicate=0, select_sequential_consistency=1, ${PINNED_INSERT_SETTINGS_SQL}`,
+    `SETTINGS async_insert=0, ${ASTERISK_SETTINGS}, insert_deduplicate=0, select_sequential_consistency=1, ${renderInsertSettings(input.insertSettings)}`,
   ]
   return lines.join('\n')
 }
@@ -558,11 +733,11 @@ function buildRangeBoundConditions(range: ChunkRange, sortKey: SortKey): string[
   return conditions
 }
 
-function buildSettingsClause(token: string): string {
+function buildSettingsClause(token: string, insertSettings: InsertSettings | undefined): string {
   if (token) {
-    return `SETTINGS async_insert=0, ${ASTERISK_SETTINGS}, insert_deduplication_token='${token}', ${PINNED_INSERT_SETTINGS_SQL}`
+    return `SETTINGS async_insert=0, ${ASTERISK_SETTINGS}, insert_deduplication_token='${token}', ${renderInsertSettings(insertSettings)}`
   }
-  return `SETTINGS async_insert=0, ${ASTERISK_SETTINGS}, ${PINNED_INSERT_SETTINGS_SQL}`
+  return `SETTINGS async_insert=0, ${ASTERISK_SETTINGS}, ${renderInsertSettings(insertSettings)}`
 }
 
 function buildChunkConditions(chunk: Pick<Chunk, 'ranges'>, sortKeys: SortKey[]): string[] {
