@@ -52,7 +52,7 @@ describe('independent run histories with live ClickHouse', () => {
     const stale: ClickHouseExecutor = {
       ...executor,
       query<T>(sql: string, settings?: Parameters<ClickHouseExecutor['query']>[1]): Promise<T[]> {
-        if (sql.startsWith(`SELECT * FROM ${qualified}`)) {
+        if (sql.includes(`FROM ${qualified} WHERE target_id`)) {
           staleReads += 1
           return executor.query<T>(sql.replace(/ ORDER BY /, ` AND run_id = '${first.runId}' ORDER BY `), settings)
         }

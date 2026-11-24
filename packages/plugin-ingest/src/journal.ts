@@ -4,17 +4,17 @@ import { isUnknownDatabaseError, waitForTable, type ClickHouseExecutor, type Cli
 import { onClusterClause } from '@chkit/core'
 
 import { validateJournalHistory } from './journal-history.js'
-import { digest, toJournalRow, type JournalRow } from './journal-records.js'
+import { digest, fromJournalStrings, JOURNAL_STRINGS_COLUMNS, toJournalRow, type JournalStringsRow } from './journal-records.js'
 import type { Journal } from './types.js'
 
-export { canonicalJson, digest, emptyCheckpoint, toJournalRow, type JournalRow } from './journal-records.js'
+export { canonicalJson, digest, emptyCheckpoint, fromJournalStrings, JOURNAL_STRINGS_COLUMNS, toJournalRow, type JournalRow, type JournalStringsRow } from './journal-records.js'
 
 export const DEFAULT_JOURNAL_TABLE = '_chkit_ingestion_journal'
 const TABLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/
-const READ_SETTINGS: ClickHouseSettings = { select_sequential_consistency: '1', use_query_cache: 0, output_format_json_quote_64bit_integers: 1 }
-// Without output_format_json_quote_64bit_integers, ClickHouse sends UInt64 as
-// JSON numbers, which lose precision, so the query casts them itself.
-const UINT64_AS_STRINGS = `* REPLACE (${['event_seq', 'payload_hash', 'expected_checkpoint_version', 'checkpoint_version'].map((column) => `toString(${column}) AS ${column}`).join(', ')})`
+// The JSONStrings envelope makes a blank or truncated response fail instead of
+// reading as no rows (OBS-16), and keeps UInt64 values exact.
+const FRAMED: ClickHouseSettings = { default_format: 'JSONStrings' }
+const READ_SETTINGS: ClickHouseSettings = { ...FRAMED, select_sequential_consistency: '1', use_query_cache: 0 }
 // As the migration journal: one Keeper path without {shard}, so every replica of
 // every shard shares one journal, and a replica name that is unique cluster-wide.
 const REPLICATED_ENGINE = "ReplicatedMergeTree('/clickhouse/tables/{uuid}/chkit_ingestion_journal', '{shard}_{replica}')"
@@ -61,12 +61,12 @@ export function createClickHouseJournal(options: ClickHouseJournalOptions): Jour
       // does not write, can run as one (#414). It reads without the settings:
       // its checkpoint may lag a write to a replicated journal.
       const changeable = await options.executor.canChangeSettings?.() ?? true
-      const rows = await options.executor.query<JournalRow>(
-        `SELECT ${changeable ? '*' : UINT64_AS_STRINGS} FROM ${qualified} WHERE target_id = ${sqlString(options.targetId)} AND namespace_id = ${sqlString(namespaceId)} ORDER BY run_id, event_seq, event_id, payload_hash`,
-        changeable ? READ_SETTINGS : undefined)
+      const rows = await options.executor.query<JournalStringsRow>(
+        `SELECT ${JOURNAL_STRINGS_COLUMNS} FROM ${qualified} WHERE target_id = ${sqlString(options.targetId)} AND namespace_id = ${sqlString(namespaceId)} ORDER BY run_id, event_seq, event_id, payload_hash`,
+        changeable ? READ_SETTINGS : FRAMED)
       // A stale snapshot can cause replay, but its runs cannot overwrite the
       // identities or checkpoint lineage of another run.
-      return validateJournalHistory(rows, namespaceId).checkpoint
+      return validateJournalHistory(rows.map(fromJournalStrings), namespaceId).checkpoint
     },
   }
 }
@@ -119,11 +119,11 @@ async function inspectReplicas(executor: ClickHouseExecutor, database: string, t
   const everyReplica = (source: string) => `clusterAllReplicas(${sqlString(cluster)}, ${source})`
   const replicaId = "hostName() || ':' || toString(tcpPort()) AS replica"
   const [ids, tables, replicated] = await Promise.all([
-    executor.query<{ replica: string }>(`SELECT DISTINCT ${replicaId} FROM ${everyReplica('system.one')}`),
+    executor.query<{ replica: string }>(`SELECT DISTINCT ${replicaId} FROM ${everyReplica('system.one')}`, FRAMED),
     executor.query<{ replica: string; engine: string }>(
-      `SELECT ${replicaId}, engine FROM ${everyReplica('system.tables')} WHERE database = ${sqlString(database)} AND name = ${sqlString(table)}`),
+      `SELECT ${replicaId}, engine FROM ${everyReplica('system.tables')} WHERE database = ${sqlString(database)} AND name = ${sqlString(table)}`, FRAMED),
     executor.query<{ replica: string; keeper_path: string }>(
-      `SELECT ${replicaId}, zookeeper_path AS keeper_path FROM ${everyReplica('system.replicas')} WHERE database = ${sqlString(database)} AND table = ${sqlString(table)}`),
+      `SELECT ${replicaId}, zookeeper_path AS keeper_path FROM ${everyReplica('system.replicas')} WHERE database = ${sqlString(database)} AND table = ${sqlString(table)}`, FRAMED),
   ])
   return ids.map(({ replica }) => ({
     replica,
