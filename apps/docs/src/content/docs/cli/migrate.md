@@ -170,6 +170,8 @@ The assertion succeeds when the query completes and is recorded in the journal. 
 
 ### Journal
 
+Journal and query-status reads require framed result responses. A missing or truncated HTTP response stops the command instead of treating migrations or running queries as absent; genuine zero-row results still succeed.
+
 Each migration has one row in the `_chkit_migrations` journal table in ClickHouse:
 
 - `name` — the migration filename

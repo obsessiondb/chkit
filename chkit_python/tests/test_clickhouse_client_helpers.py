@@ -416,20 +416,21 @@ def test_submit_once_opens_its_driver_with_the_clients_tls_settings(
 
 def test_native_control_uses_a_separate_bounded_session_free_request(httpx_mock: HTTPXMock) -> None:
     client, fake = _stub_client()
-    httpx_mock.add_response(text='{"query_id":"old-query","kill_status":"finished"}\n')
+    httpx_mock.add_response(text='{"meta":[],"data":[{"query_id":"old-query","kill_status":"finished"}],"rows":1}')
     result = client.query_control("KILL QUERY WHERE query_id = 'old-query' SYNC", 5000, query_id="receipt-control", settings={"log_queries": 1, "query_id": "ignored", "result_overflow_mode": "break", "max_result_rows": 1, "use_query_cache": 1, "enable_reads_from_query_cache": 1, "enable_writes_to_query_cache": 1})
     assert result.rows == [{"query_id": "old-query", "kill_status": "finished"}]
     request = httpx_mock.get_request()
     assert request is not None
     assert request.url.params["database"] == "default"
-    assert request.url.params["default_format"] == "JSONEachRow"
+    assert "default_format" not in request.url.params
+    assert request.content.decode().endswith("FORMAT JSONStrings")
     assert request.url.params["query_id"] == "receipt-control"
     assert request.url.params["log_queries"] == "1"
     assert request.url.params["max_result_rows"] == "1"
     for name in ("result_overflow_mode", "group_by_overflow_mode", "set_overflow_mode", "timeout_overflow_mode", "read_overflow_mode"):
         assert request.url.params[name] == "throw"
     assert "session_id" not in request.url.params
-    assert request.content == b"KILL QUERY WHERE query_id = 'old-query' SYNC"
+    assert request.content == b"KILL QUERY WHERE query_id = 'old-query' SYNC\nFORMAT JSONStrings"
     fake.query.assert_not_called()
     fake.command.assert_not_called()
     cache_settings = {"use_query_cache": 1, "enable_reads_from_query_cache": 1, "enable_writes_to_query_cache": 1}
@@ -766,7 +767,7 @@ def test_native_control_accepts_zero_exception_header(
     httpx_mock: HTTPXMock, code: str | None,
 ) -> None:
     client, _fake = _stub_client()
-    httpx_mock.add_response(text='{"n":0}\n', headers={"X-ClickHouse-Exception-Code": code} if code else {})
+    httpx_mock.add_response(text='{"meta":[],"data":[{"n":0}],"rows":1}', headers={"X-ClickHouse-Exception-Code": code} if code else {})
     assert client.query_control("SELECT 0 AS n", 1000).rows == [{"n": 0}]
 
 
@@ -1100,3 +1101,25 @@ def test_a_send_whose_name_lookup_stalls_ends_at_the_connect_timeout(
     assert elapsed < 2
     assert "Resolving stalled.chkit.invalid timed out" in str(raised.value)
     assert admission.handed_off_count == 0
+
+
+@pytest.mark.parametrize("body", [b"", b" \n", b'{"meta":[],"data":['])
+def test_official_json_parser_rejects_missing_journal_response(body: bytes) -> None:
+    client, fake = _stub_client()
+    fake.raw_query.return_value = body
+    with pytest.raises(ValueError, match=r"Expecting"):
+        client.query("SELECT name FROM journal", {"default_format": "JSONStrings"})
+
+
+def test_framed_read_accepts_genuine_zero_rows_without_precision_settings() -> None:
+    client, fake = _stub_client()
+    fake.raw_query.return_value = b'{"meta":[],"data":[],"rows":0}'
+    assert client.query("SELECT name FROM journal", {"default_format": "JSONStrings"}).rows == []
+    assert fake.raw_query.call_args.kwargs == {"settings": {}, "fmt": "JSONStrings"}
+
+
+def test_readonly_framed_read_uses_builtin_jsonstrings_without_changing_settings() -> None:
+    client, fake = _stub_client()
+    fake.raw_query.return_value = b'{"meta":[{"name":"n","type":"UInt64"}],"data":[{"n":"18446744073709551615"}],"rows":1}'
+    assert client.query("SELECT n FROM journal", {"default_format": "JSONStrings"}).rows == [{"n": "18446744073709551615"}]
+    assert fake.raw_query.call_args.kwargs == {"settings": {}, "fmt": "JSONStrings"}

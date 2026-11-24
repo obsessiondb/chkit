@@ -268,7 +268,7 @@ class _ScriptedClient:
         self.events: list[str] = []
         self._submit_raises = submit_raises
 
-    def query(self, statement: str) -> QueryResult:
+    def query(self, statement: str, settings: object = None) -> QueryResult:
         self.events.append(f"query: {statement}")
         return QueryResult(
             column_names=["now_ms", "database"],
