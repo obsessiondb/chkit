@@ -553,15 +553,7 @@ def run_retry_scenario(
                 ["migrate", "--apply", "--allow-destructive", "--json", *(["--retry", file] if retry else [])]
             )
 
-        def retry_runs_other_sql(step: int) -> bool:
-            lines = blocks[step + 1].split("\n")
-            return any(line.startswith("-- before-retry:") for line in lines) or " mode=async" in lines[0]
-
-        if failures == "layout guards":
-            exchange = types.index("exchange_tables")
-            steps = [exchange, exchange + 1, drop_old]
-        else:
-            steps = [step for step in range(len(types)) if retry_runs_other_sql(step) or step - 1 in replayed]
+        steps = _retry_steps(blocks, types, drop_old, replayed, failures)
         for attempt, step in enumerate(steps):
             path.write_text(_inject_failure(blocks, step), encoding="utf-8")
             failed = migrate(retry=attempt > 0)
@@ -621,6 +613,24 @@ def run_retry_scenario(
         if writers is not None:
             writers.stop()
         drop_cutover_project(target, project)
+
+
+def _retry_steps(
+    blocks: list[str],
+    types: list[str],
+    drop_old: int,
+    replayed: dict[int, str],
+    failures: RetryFailures,
+) -> list[int]:
+    if failures == "layout guards":
+        exchange = types.index("exchange_tables")
+        return [exchange, exchange + 1, drop_old]
+
+    def retry_runs_other_sql(step: int) -> bool:
+        lines = blocks[step + 1].split("\n")
+        return any(line.startswith("-- before-retry:") for line in lines) or " mode=async" in lines[0]
+
+    return [step for step in range(len(types)) if retry_runs_other_sql(step) or step - 1 in replayed]
 
 
 def _inject_failure(blocks: list[str], step: int) -> str:

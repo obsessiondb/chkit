@@ -17,12 +17,6 @@ import {
   waitForTable,
 } from './e2e-testkit.js'
 
-export function expectInOrder(sql: string, statements: string[]): void {
-  const positions = statements.map((statement) => sql.indexOf(statement))
-  expect(statements.filter((_, index) => positions[index] === -1)).toEqual([])
-  expect(positions).toEqual([...positions].sort((a, b) => a - b))
-}
-
 /**
  * Generates and migrates a change of one table's columns, then checks the
  * migration order and the columns ClickHouse ends with. `before` and `after`
@@ -113,4 +107,10 @@ export async function migrateColumnChange(input: {
     await executor.close()
     await rm(dir, { recursive: true, force: true })
   }
+}
+
+export function expectInOrder(sql: string, statements: string[]): void {
+  const positions = statements.map((statement) => sql.indexOf(statement))
+  expect(statements.filter((_, index) => positions[index] === -1)).toEqual([])
+  expect(positions).toEqual([...positions].sort((a, b) => a - b))
 }

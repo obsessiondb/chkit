@@ -1,4 +1,4 @@
-import { appendFile, rm, } from 'node:fs/promises'
+import { appendFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { describe, expect, test } from 'bun:test'

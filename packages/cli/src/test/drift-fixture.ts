@@ -4,10 +4,6 @@ import { join } from 'node:path'
 
 import { CORE_ENTRY, getLiveEnv } from './e2e-testkit.js'
 
-export function renderBaseSchema(database: string, usersTableName: string): string {
-  return `import { schema, table } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: '${database}',\n  name: '${usersTableName}',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nexport default schema(users)\n`
-}
-
 export interface E2EFixture {
   dir: string
   configPath: string
@@ -37,3 +33,6 @@ export async function createFixture(input: {
   return { dir, configPath, schemaPath }
 }
 
+export function renderBaseSchema(database: string, usersTableName: string): string {
+  return `import { schema, table } from '${CORE_ENTRY}'\n\nconst users = table({\n  database: '${database}',\n  name: '${usersTableName}',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'email', type: 'String' },\n  ],\n  engine: 'MergeTree()',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n})\n\nexport default schema(users)\n`
+}
