@@ -160,7 +160,12 @@ When running in Replicas, include the originating workspace link in the PR descr
 
 ## 7. Watch for Review Feedback
 
-After opening the PR, watch for review comments and address actionable feedback, pushing fixes and responding on the PR. Use the available PR monitoring workflow; if monitoring cannot continue after the session ends, report that limitation. Do not perform an independent review as part of PR creation; that belongs to `review`.
+After opening the PR, answer its review comments: push fixes for actionable ones and reply on the PR. Don't rely on `gh event listen`; event subscriptions may be off for the account.
+
+- In a Replicas workspace, review comments on the PR are delivered to the authoring workspace automatically.
+- Elsewhere, check them with `gh pr view <number> --comments` before calling the work done.
+
+Don't review the PR yourself as part of creating it; that is the `review` skill's job.
 
 ## Common Mistakes to Avoid
 
