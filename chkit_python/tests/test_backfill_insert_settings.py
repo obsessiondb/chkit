@@ -120,10 +120,10 @@ def test_insert_settings_are_appended_to_the_single_settings_clause_in_order() -
 
     assert sql.count("SETTINGS") == 1
     assert _settings_line(sql) == (
-        f"SETTINGS async_insert=0, {PINNED}, insert_deduplication_token='tok', "
-        "max_insert_threads=4, min_insert_block_size_rows=1000000, "
+        "SETTINGS max_insert_threads=4, min_insert_block_size_rows=1000000, "
         "log_comment='it\\'s chkit', insert_deduplicate=true, "
-        f"max_partitions_per_insert_block=0, ratio=0.5, whole_float=2, {_PINNED_INSERT}"
+        "max_partitions_per_insert_block=0, ratio=0.5, whole_float=2, "
+        f"async_insert=0, {PINNED}, insert_deduplication_token='tok', {_PINNED_INSERT}"
     )
 
 
@@ -137,7 +137,7 @@ def test_insert_settings_without_a_token() -> None:
     )
 
     assert _settings_line(sql) == (
-        f"SETTINGS async_insert=0, {PINNED}, max_insert_threads=2, insert_deduplicate=false, "
+        f"SETTINGS max_insert_threads=2, insert_deduplicate=false, async_insert=0, {PINNED}, "
         f"{_PINNED_INSERT}"
     )
 
@@ -164,7 +164,7 @@ def test_insert_settings_with_the_pinned_value_are_dropped() -> None:
     )
 
     assert _settings_line(sql) == (
-        f"SETTINGS async_insert=0, {PINNED}, max_insert_threads=2, {_PINNED_INSERT}"
+        f"SETTINGS max_insert_threads=2, async_insert=0, {PINNED}, {_PINNED_INSERT}"
     )
 
 
@@ -223,41 +223,44 @@ _DELIVERY_WARNING = {
 }
 
 
+def _pins_without(*names: str) -> str:
+    """The pins chkit writes after an override of the delivery pins ``names``."""
+    return ", ".join(
+        part for part in _PINNED_INSERT.split(", ") if part.split("=")[0] not in names
+    )
+
+
 @pytest.mark.parametrize(
-    ("settings", "pinned", "warned"),
+    ("settings", "own", "pins", "warned"),
     [
         (
             {"distributed_foreground_insert": 0},
-            _PINNED_INSERT.replace(
-                "distributed_foreground_insert=1", "distributed_foreground_insert=0"
-            ),
+            "distributed_foreground_insert=0",
+            _pins_without("distributed_foreground_insert"),
             ["distributed_foreground_insert"],
         ),
         (
             {"insert_distributed_sync": False},
-            _PINNED_INSERT.replace(
-                "distributed_foreground_insert=1", "distributed_foreground_insert=false"
-            ),
+            "distributed_foreground_insert=false",
+            _pins_without("distributed_foreground_insert"),
             ["distributed_foreground_insert"],
         ),
         (
             {"materialized_views_ignore_errors": 1},
-            _PINNED_INSERT.replace(
-                "materialized_views_ignore_errors=0", "materialized_views_ignore_errors=1"
-            ),
+            "materialized_views_ignore_errors=1",
+            _pins_without("materialized_views_ignore_errors"),
             ["materialized_views_ignore_errors"],
         ),
         (
             {"distributed_foreground_insert": 0, "materialized_views_ignore_errors": 1},
-            _PINNED_INSERT.replace(
-                "distributed_foreground_insert=1", "distributed_foreground_insert=0"
-            ).replace("materialized_views_ignore_errors=0", "materialized_views_ignore_errors=1"),
+            "distributed_foreground_insert=0, materialized_views_ignore_errors=1",
+            _pins_without("distributed_foreground_insert", "materialized_views_ignore_errors"),
             ["distributed_foreground_insert", "materialized_views_ignore_errors"],
         ),
     ],
 )
 def test_an_override_of_a_delivery_pin_replaces_it_and_warns(
-    settings: dict[str, str | int | bool], pinned: str, warned: list[str]
+    settings: dict[str, str | int | bool], own: str, pins: str, warned: list[str]
 ) -> None:
     sql = build_chunk_execution_sql(
         plan_id="p", chunk=_chunk(), target="app.events", table=TABLE,
@@ -265,7 +268,7 @@ def test_an_override_of_a_delivery_pin_replaces_it_and_warns(
     )
 
     assert _settings_line(sql) == (
-        f"SETTINGS async_insert=0, {PINNED}, max_insert_threads=2, {pinned}"
+        f"SETTINGS {own}, max_insert_threads=2, async_insert=0, {PINNED}, {pins}"
     )
     rendered = [
         _DELIVERY_WARNING[name].replace("=0", "=false")
@@ -325,11 +328,9 @@ def test_the_cutover_copy_carries_the_override_too() -> None:
     )
 
     assert _settings_line(sql) == (
-        f"SETTINGS async_insert=0, {PINNED}, insert_deduplicate=0, "
-        "select_sequential_consistency=1, "
-        + _PINNED_INSERT.replace(
-            "distributed_foreground_insert=1", "distributed_foreground_insert=0"
-        )
+        f"SETTINGS distributed_foreground_insert=0, async_insert=0, {PINNED}, "
+        "insert_deduplicate=0, select_sequential_consistency=1, "
+        + _pins_without("distributed_foreground_insert")
     )
 
 
@@ -346,10 +347,8 @@ def test_the_preflight_checks_the_overridden_delivery_settings() -> None:
     )
 
     assert reads == [
-        "SELECT 1 SETTINGS "
-        + _PINNED_INSERT.replace(
-            "distributed_foreground_insert=1", "distributed_foreground_insert=0"
-        )
+        f"SELECT 1 SETTINGS distributed_foreground_insert=0, async_insert=0, {PINNED}, "
+        + _pins_without("distributed_foreground_insert")
     ]
 
 
@@ -408,7 +407,7 @@ def test_insert_settings_apply_to_the_mv_replay_union_insert() -> None:
 
     assert sql.count("SETTINGS") == 1
     assert "UNION ALL" in sql
-    assert sql.endswith(f"SETTINGS async_insert=0, {PINNED}, max_insert_threads=8, {_PINNED_INSERT}")
+    assert sql.endswith(f"SETTINGS max_insert_threads=8, async_insert=0, {PINNED}, {_PINNED_INSERT}")
 
 
 # ---------- plugin options ----------
@@ -444,7 +443,8 @@ def test_build_submit_tasks_renders_the_insert_settings() -> None:
 
     for task in tasks:
         assert task.sql.count("SETTINGS") == 1
-        assert task.sql.endswith(f", max_insert_threads=4, {_PINNED_INSERT}")
+        assert "SETTINGS max_insert_threads=4, async_insert=0, " in task.sql
+        assert task.sql.endswith(f", {_PINNED_INSERT}")
 
 
 def test_handle_submit_uses_the_backfill_plugin_insert_settings(
@@ -490,7 +490,9 @@ def test_handle_submit_uses_the_backfill_plugin_insert_settings(
     assert code == 0
     [call] = submitted
     assert all(
-        task.sql.endswith(f", max_insert_threads=6, {_PINNED_INSERT}") for task in call["tasks"]
+        "SETTINGS max_insert_threads=6, async_insert=0, " in task.sql
+        and task.sql.endswith(f", {_PINNED_INSERT}")
+        for task in call["tasks"]
     )
 
 
@@ -562,10 +564,12 @@ def test_handle_submit_carries_a_delivery_override_and_warns_once(
 
     assert code == 0
     [call] = submitted
-    overridden = _PINNED_INSERT.replace(
-        "materialized_views_ignore_errors=0", "materialized_views_ignore_errors=1"
+    pins = _pins_without("materialized_views_ignore_errors")
+    assert all(
+        "SETTINGS materialized_views_ignore_errors=1, async_insert=0, " in task.sql
+        and task.sql.endswith(f", {pins}")
+        for task in call["tasks"]
     )
-    assert all(task.sql.endswith(f", {overridden}") for task in call["tasks"])
     assert capsys.readouterr().err == (
         "Warning: insertSettings overrides what every backfill chunk INSERT sets by "
         f"default: {_DELIVERY_WARNING['materialized_views_ignore_errors']}.\n"
@@ -587,13 +591,15 @@ def test_handle_submit_honours_a_server_alias_of_a_delivery_pin_and_preflights_i
 
     assert code == 0
     [call] = submitted
-    overridden = _PINNED_INSERT.replace(
-        "distributed_foreground_insert=1", "distributed_foreground_insert=0"
-    )
+    pins = _pins_without("distributed_foreground_insert")
     for task in call["tasks"]:
         assert "foreground_alias" not in task.sql
-        assert task.sql.endswith(f", {overridden}")
-    assert f"SELECT 1 SETTINGS {overridden}" in remote.reads
+        assert "SETTINGS distributed_foreground_insert=0, async_insert=0, " in task.sql
+        assert task.sql.endswith(f", {pins}")
+    assert (
+        f"SELECT 1 SETTINGS distributed_foreground_insert=0, async_insert=0, {PINNED}, {pins}"
+        in remote.reads
+    )
     assert capsys.readouterr().err == (
         "Warning: insertSettings overrides what every backfill chunk INSERT sets by "
         f"default: {_DELIVERY_WARNING['distributed_foreground_insert']}.\n"
@@ -689,7 +695,7 @@ def test_a_setting_chkit_writes_itself_with_its_value_is_dropped() -> None:
 
     # insert_deduplicate is the user's own outside a cutover copy.
     assert _settings_line(copy) == (
-        f"SETTINGS async_insert=0, {PINNED}, insert_deduplicate=1, max_insert_threads=2, "
+        f"SETTINGS insert_deduplicate=1, max_insert_threads=2, async_insert=0, {PINNED}, "
         f"{_PINNED_INSERT}"
     )
     assert _settings_line(cutover) == (
@@ -707,6 +713,86 @@ def test_log_queries_probability_is_a_proof_pin() -> None:
             plan_id="p", chunk=_chunk(), target="app.events", table=TABLE,
             insert_settings={"log_queries_probability": 0},
         )
+
+
+# Codex review r2: the user's settings come first in the SETTINGS clause and
+# everything chkit requires after them, so a later explicit setting wins over
+# whatever the user's own settings set, a settings profile included
+# (ClickHouse applies the clause in order; checked live on 26.3: `profile = p,
+# log_comment = 'explicit'` reads 'explicit').
+_FOREGROUND_OFF_PINS = _PINNED_INSERT.replace("distributed_foreground_insert=1, ", "")
+
+
+def test_the_users_settings_come_first_and_what_chkit_requires_after_them() -> None:
+    sql = build_chunk_execution_sql(
+        plan_id="p", chunk=_chunk(), target="app.events", table=TABLE,
+        idempotency_token="tok",
+        insert_settings={"max_insert_threads": 2, "distributed_foreground_insert": 0},
+    )
+
+    assert _settings_line(sql) == (
+        "SETTINGS max_insert_threads=2, distributed_foreground_insert=0, async_insert=0, "
+        f"{PINNED}, insert_deduplication_token='tok', {_FOREGROUND_OFF_PINS}"
+    )
+
+
+def test_a_settings_profile_comes_before_every_setting_chkit_requires() -> None:
+    copy = build_chunk_execution_sql(
+        plan_id="p", chunk=_chunk(), target="app.events", table=TABLE,
+        idempotency_token="tok", insert_settings={"profile": "batch"},
+    )
+    cutover = build_chunk_execution_sql(
+        plan_id="p", chunk=_chunk(), target="app.events_shadow", source_target="app.events",
+        table=TABLE, target_columns=["id"], cutover_key=["id"],
+        insert_settings={"profile": "batch"},
+    )
+
+    assert _settings_line(copy) == (
+        f"SETTINGS profile='batch', async_insert=0, {PINNED}, "
+        f"insert_deduplication_token='tok', {_PINNED_INSERT}"
+    )
+    assert _settings_line(cutover) == (
+        f"SETTINGS profile='batch', async_insert=0, {PINNED}, insert_deduplicate=0, "
+        f"select_sequential_consistency=1, {_PINNED_INSERT}"
+    )
+
+
+# Codex review r2: a numeric value equal to chkit's is the same value.
+def test_a_numeric_equivalent_of_a_compulsory_value_is_dropped() -> None:
+    sql = build_chunk_execution_sql(
+        plan_id="p", chunk=_chunk(), target="app.events", table=TABLE,
+        insert_settings={
+            "log_queries_probability": "1.0",
+            "log_queries": 1.0,
+            "parallel_distributed_insert_select": "0.0",
+            "async_insert": "+0",
+            "distributed_foreground_insert": "1.00",
+        },
+    )
+
+    assert _settings_line(sql) == f"SETTINGS async_insert=0, {PINNED}, {_PINNED_INSERT}"
+    assert delivery_override_warning({"distributed_foreground_insert": "1e0"}) is None
+
+
+# Codex review r2: the preflight tries every setting the chunks run with in
+# the plan's mode, the user's own first.
+def test_the_preflight_tries_every_setting_of_the_chunk_insert() -> None:
+    reads: list[str] = []
+
+    def query(sql: str, _settings: object = None) -> list[dict[str, object]]:
+        reads.append(sql)
+        return []
+
+    assert_pinned_insert_settings_accepted(plan_id="p1", query=query)
+    assert_pinned_insert_settings_accepted(
+        plan_id="p1", query=query, insert_settings={"max_insert_threads": 2}, cutover=True
+    )
+
+    assert reads == [
+        f"SELECT 1 SETTINGS async_insert=0, {PINNED}, {_PINNED_INSERT}",
+        f"SELECT 1 SETTINGS max_insert_threads=2, async_insert=0, {PINNED}, "
+        f"insert_deduplicate=0, select_sequential_consistency=1, {_PINNED_INSERT}",
+    ]
 
 
 # ---------- live ClickHouse ----------
@@ -825,9 +911,8 @@ def test_a_value_cannot_close_its_quote() -> None:
     )
 
     assert _settings_line(sql) == (
-        f"SETTINGS async_insert=0, {PINNED}, "
-        "log_comment='x\\\\\\', parallel_distributed_insert_select=2, log_comment=\\'y', "
-        f"{_PINNED_INSERT}"
+        "SETTINGS log_comment='x\\\\\\', parallel_distributed_insert_select=2, log_comment=\\'y', "
+        f"async_insert=0, {PINNED}, {_PINNED_INSERT}"
     )
 
 

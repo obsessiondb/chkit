@@ -40,14 +40,14 @@ describe('insertSettings rendering', () => {
     expect(settingsLine()).toBe(`SETTINGS async_insert=0, ${ASTERISK}, ${PINNED_INSERT_SETTINGS_SQL}`)
   })
 
-  test('are rendered into the single SETTINGS clause in order, before the pins', () => {
+  test('are rendered first in the single SETTINGS clause, in order', () => {
     expect(settingsLine({
       max_insert_threads: 4,
       log_comment: "it's chkit",
       insert_deduplicate: true,
       ratio: 0.5,
     }, 'tok')).toBe(
-      `SETTINGS async_insert=0, ${ASTERISK}, insert_deduplication_token='tok', max_insert_threads=4, log_comment='it\\'s chkit', insert_deduplicate=true, ratio=0.5, ${PINNED_INSERT_SETTINGS_SQL}`,
+      `SETTINGS max_insert_threads=4, log_comment='it\\'s chkit', insert_deduplicate=true, ratio=0.5, async_insert=0, ${ASTERISK}, insert_deduplication_token='tok', ${PINNED_INSERT_SETTINGS_SQL}`,
     )
   })
 
@@ -61,12 +61,12 @@ describe('insertSettings rendering', () => {
       insert_distributed_sync: true,
       materialized_views_ignore_errors: '0',
       max_insert_threads: 2,
-    })).toBe(`SETTINGS async_insert=0, ${ASTERISK}, max_insert_threads=2, ${PINNED_INSERT_SETTINGS_SQL}`)
+    })).toBe(`SETTINGS max_insert_threads=2, async_insert=0, ${ASTERISK}, ${PINNED_INSERT_SETTINGS_SQL}`)
   })
 
   test('a value cannot close its quote', () => {
     expect(settingsLine({ log_comment: "x\\', parallel_distributed_insert_select=2, log_comment='y" })).toBe(
-      `SETTINGS async_insert=0, ${ASTERISK}, log_comment='x\\\\\\', parallel_distributed_insert_select=2, log_comment=\\'y', ${PINNED_INSERT_SETTINGS_SQL}`,
+      `SETTINGS log_comment='x\\\\\\', parallel_distributed_insert_select=2, log_comment=\\'y', async_insert=0, ${ASTERISK}, ${PINNED_INSERT_SETTINGS_SQL}`,
     )
   })
 
@@ -108,24 +108,22 @@ describe('insertSettings proof pins', () => {
 // #821: the delivery pins are defaults; an override replaces the pin in place,
 // under the pinned name, and turns a guarantee off, which a run warns about.
 describe('insertSettings delivery pins', () => {
-  const foregroundOff = PINNED_INSERT_SETTINGS_SQL.replace('distributed_foreground_insert=1', 'distributed_foreground_insert=0')
-  const viewsOff = PINNED_INSERT_SETTINGS_SQL.replace('materialized_views_ignore_errors=0', 'materialized_views_ignore_errors=1')
+  const pinsWithout = (...names: string[]) =>
+    PINNED_INSERT_SETTINGS_SQL.split(', ').filter((part) => !names.includes(part.split('=')[0] ?? '')).join(', ')
+  const foregroundOff = pinsWithout('distributed_foreground_insert')
 
   test.each([
-    [{ distributed_foreground_insert: 0 }, foregroundOff, `distributed_foreground_insert=0 (${FOREGROUND_GUARANTEE})`],
-    [
-      { insert_distributed_sync: false },
-      PINNED_INSERT_SETTINGS_SQL.replace('distributed_foreground_insert=1', 'distributed_foreground_insert=false'),
-      `distributed_foreground_insert=false (${FOREGROUND_GUARANTEE})`,
-    ],
-    [{ materialized_views_ignore_errors: 1 }, viewsOff, `materialized_views_ignore_errors=1 (${VIEWS_GUARANTEE})`],
+    [{ distributed_foreground_insert: 0 }, 'distributed_foreground_insert=0', foregroundOff, `distributed_foreground_insert=0 (${FOREGROUND_GUARANTEE})`],
+    [{ insert_distributed_sync: false }, 'distributed_foreground_insert=false', foregroundOff, `distributed_foreground_insert=false (${FOREGROUND_GUARANTEE})`],
+    [{ materialized_views_ignore_errors: 1 }, 'materialized_views_ignore_errors=1', pinsWithout('materialized_views_ignore_errors'), `materialized_views_ignore_errors=1 (${VIEWS_GUARANTEE})`],
     [
       { distributed_foreground_insert: 0, materialized_views_ignore_errors: 1 },
-      foregroundOff.replace('materialized_views_ignore_errors=0', 'materialized_views_ignore_errors=1'),
+      'distributed_foreground_insert=0, materialized_views_ignore_errors=1',
+      pinsWithout('distributed_foreground_insert', 'materialized_views_ignore_errors'),
       `distributed_foreground_insert=0 (${FOREGROUND_GUARANTEE}); materialized_views_ignore_errors=1 (${VIEWS_GUARANTEE})`,
     ],
-  ] satisfies Array<[InsertSettings, string, string]>)('an override replaces the pin and warns: %p', (settings, pinned, warned) => {
-    expect(settingsLine({ ...settings, max_insert_threads: 2 })).toBe(`SETTINGS async_insert=0, ${ASTERISK}, max_insert_threads=2, ${pinned}`)
+  ] satisfies Array<[InsertSettings, string, string, string]>)('an override replaces the pin and warns: %p', (settings, own, pins, warned) => {
+    expect(settingsLine({ ...settings, max_insert_threads: 2 })).toBe(`SETTINGS ${own}, max_insert_threads=2, async_insert=0, ${ASTERISK}, ${pins}`)
     expect(deliveryOverrideWarning(settings)).toBe(
       `Warning: insertSettings overrides what every backfill chunk INSERT sets by default: ${warned}.`,
     )
@@ -173,7 +171,7 @@ describe('insertSettings delivery pins', () => {
       insertSettings: { distributed_foreground_insert: 0 },
     })
     expect(sql.split('\n').at(-1)).toBe(
-      `SETTINGS async_insert=0, ${ASTERISK}, insert_deduplicate=0, select_sequential_consistency=1, ${foregroundOff}`,
+      `SETTINGS distributed_foreground_insert=0, async_insert=0, ${ASTERISK}, insert_deduplicate=0, select_sequential_consistency=1, ${foregroundOff}`,
     )
   })
 })
@@ -216,7 +214,7 @@ describe('insertSettings fixed settings', () => {
   test('one with its value is dropped', () => {
     // insert_deduplicate is the user's own outside a cutover copy.
     expect(settingsLine({ async_insert: 0, insert_deduplicate: 1, max_insert_threads: 2 })).toBe(
-      `SETTINGS async_insert=0, ${ASTERISK}, insert_deduplicate=1, max_insert_threads=2, ${PINNED_INSERT_SETTINGS_SQL}`,
+      `SETTINGS insert_deduplicate=1, max_insert_threads=2, async_insert=0, ${ASTERISK}, ${PINNED_INSERT_SETTINGS_SQL}`,
     )
     expect(cutoverSql({ select_sequential_consistency: true, insert_deduplicate: 0 }).split('\n').at(-1)).toBe(
       `SETTINGS async_insert=0, ${ASTERISK}, insert_deduplicate=0, select_sequential_consistency=1, ${PINNED_INSERT_SETTINGS_SQL}`,
@@ -228,6 +226,52 @@ describe('insertSettings fixed settings', () => {
   test('log_queries_probability is a proof pin', () => {
     expect(PINNED_INSERT_SETTINGS_SQL).toContain('log_queries_probability=1')
     expect(() => settingsLine({ log_queries_probability: 0 })).toThrow('insertSettings sets log_queries_probability=0, which every')
+  })
+})
+
+// Codex review r2: the user's settings come first in the SETTINGS clause and
+// everything chkit requires after them, so a later explicit setting wins over
+// whatever the user's own settings set, a settings profile included
+// (ClickHouse applies the clause in order; checked live on 26.3: `profile = p,
+// log_comment = 'explicit'` reads 'explicit').
+describe('insertSettings order', () => {
+  const foregroundOffPins = PINNED_INSERT_SETTINGS_SQL.replace('distributed_foreground_insert=1, ', '')
+
+  test("the user's settings come first and what chkit requires after them", () => {
+    expect(settingsLine({ max_insert_threads: 2, distributed_foreground_insert: 0 }, 'tok')).toBe(
+      `SETTINGS max_insert_threads=2, distributed_foreground_insert=0, async_insert=0, ${ASTERISK}, insert_deduplication_token='tok', ${foregroundOffPins}`,
+    )
+  })
+
+  test('a settings profile comes before every setting chkit requires', () => {
+    expect(settingsLine({ profile: 'batch' }, 'tok')).toBe(
+      `SETTINGS profile='batch', async_insert=0, ${ASTERISK}, insert_deduplication_token='tok', ${PINNED_INSERT_SETTINGS_SQL}`,
+    )
+    const cutover = buildChunkExecutionSql({
+      planId: 'p',
+      chunk,
+      target: 'app.events_shadow',
+      sourceTarget: 'app.events',
+      table: { sortKeys: [] },
+      targetColumns: ['id'],
+      cutoverKey: ['id'],
+      insertSettings: { profile: 'batch' },
+    })
+    expect(cutover.split('\n').at(-1)).toBe(
+      `SETTINGS profile='batch', async_insert=0, ${ASTERISK}, insert_deduplicate=0, select_sequential_consistency=1, ${PINNED_INSERT_SETTINGS_SQL}`,
+    )
+  })
+
+  // Codex review r2: a numeric value equal to chkit's is the same value.
+  test('a numeric equivalent of a compulsory value is dropped', () => {
+    expect(settingsLine({
+      log_queries_probability: '1.0',
+      log_queries: 1.0,
+      parallel_distributed_insert_select: '0.0',
+      async_insert: '+0',
+      distributed_foreground_insert: '1.00',
+    })).toBe(`SETTINGS async_insert=0, ${ASTERISK}, ${PINNED_INSERT_SETTINGS_SQL}`)
+    expect(deliveryOverrideWarning({ distributed_foreground_insert: '1e0' })).toBeUndefined()
   })
 })
 

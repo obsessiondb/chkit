@@ -17,7 +17,7 @@ from chkit_plugin_backfill.chunking.boundary_codec import (
     encode_chunk_plan_for_persistence,
 )
 from chkit_plugin_backfill.chunking.planner import generate_chunk_plan
-from chkit_plugin_backfill.chunking.sql import compulsory_setting_names, pinned_insert_settings_sql
+from chkit_plugin_backfill.chunking.sql import chunk_insert_settings_sql, compulsory_setting_names
 from chkit_plugin_backfill.chunking.types import (
     GenerateChunkPlanInput,
     PlannerQuery,
@@ -115,18 +115,19 @@ def assert_pinned_insert_settings_accepted(
     plan_id: str,
     query: PlannerQuery,
     insert_settings: Mapping[str, str | int | float | bool] | None = None,
+    cutover: bool = False,
 ) -> None:
     """Fail before anything is submitted when the server would refuse the
-    settings every chunk INSERT runs with (``PINNED_INSERT_SETTINGS``, with the
-    delivery pins ``insert_settings`` overrides): a user with ``readonly = 1``,
-    or a settings constraint on one of them."""
-    pinned = pinned_insert_settings_sql(insert_settings)
+    settings every chunk INSERT runs with in the plan's mode
+    (``chunk_insert_settings_sql``, the per-chunk dedup token aside): a user
+    with ``readonly = 1``, or a settings constraint on one of them."""
+    settings = chunk_insert_settings_sql(insert_settings, cutover=cutover)
     try:
-        query(f"SELECT 1 SETTINGS {pinned}", None)
+        query(f"SELECT 1 SETTINGS {settings}", None)
     except Exception as error:
         msg = (
             f"Backfill plan {plan_id}: the server refused the settings every chunk INSERT "
-            f"runs with ({pinned}): {error}. Nothing was submitted. Use a "
+            f"runs with ({settings}): {error}. Nothing was submitted. Use a "
             "user allowed to set them (not readonly = 1, and no settings constraint on them)."
         )
         raise BackfillConfigError(msg) from error

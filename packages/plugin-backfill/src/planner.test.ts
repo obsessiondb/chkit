@@ -770,7 +770,8 @@ describe('unprovableTargetFailures', () => {
 // Opus delta review: a server that refuses the INSERT's pinned settings
 // (readonly = 1, a settings constraint) fails the run before it submits.
 describe('assertPinnedInsertSettingsAccepted', () => {
-  const PINNED = "allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, distributed_foreground_insert=1, materialized_views_ignore_errors=0, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0, log_queries_probability=1"
+  const FIXED = 'async_insert=0, asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0'
+  const PINNED = `${FIXED}, allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, distributed_foreground_insert=1, materialized_views_ignore_errors=0, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0, log_queries_probability=1`
 
   test('reads SELECT 1 with the pinned settings', async () => {
     const reads: string[] = []
@@ -794,7 +795,24 @@ describe('assertPinnedInsertSettingsAccepted', () => {
       query: async <T>(sql: string) => { reads.push(sql); return [] as T[] },
       insertSettings: { distributed_foreground_insert: 0 },
     })
-    expect(reads).toEqual([`SELECT 1 SETTINGS ${PINNED.replace('distributed_foreground_insert=1', 'distributed_foreground_insert=0')}`])
+    expect(reads).toEqual([`SELECT 1 SETTINGS distributed_foreground_insert=0, ${PINNED.replace('distributed_foreground_insert=1, ', '')}`])
+  })
+})
+
+// Codex review r2: the preflight tries every setting the chunks run with in
+// the plan's mode, the user's own first.
+describe('assertPinnedInsertSettingsAccepted for the whole chunk INSERT', () => {
+  test('tries the fixed, cutover and user settings too', async () => {
+    const reads: string[] = []
+    const query = async <T>(sql: string) => { reads.push(sql); return [] as T[] }
+    await assertPinnedInsertSettingsAccepted({ planId: 'p1', query })
+    await assertPinnedInsertSettingsAccepted({ planId: 'p1', query, insertSettings: { max_insert_threads: 2 }, cutover: true })
+    const fixed = 'async_insert=0, asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0'
+    const pins = "allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, distributed_foreground_insert=1, materialized_views_ignore_errors=0, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0, log_queries_probability=1"
+    expect(reads).toEqual([
+      `SELECT 1 SETTINGS ${fixed}, ${pins}`,
+      `SELECT 1 SETTINGS max_insert_threads=2, ${fixed}, insert_deduplicate=0, select_sequential_consistency=1, ${pins}`,
+    ])
   })
 })
 

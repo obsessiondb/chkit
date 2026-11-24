@@ -159,9 +159,18 @@ function renderInsertSettingValue(value: string | number | boolean): string {
   return String(value)
 }
 
+// A decimal number as ClickHouse reads a numeric setting's value ("1.0", "+0", "1e0").
+const DECIMAL = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/
+
+/**
+ * A setting value as compared with chkit's: unquoted, lowercased, booleans as
+ * 1/0, and a number in its shortest form, so `'1.0'`, `1` and `true` are the
+ * same value.
+ */
 function normalText(text: string): string {
-  const bare = text.replace(/^'+|'+$/g, '').toLowerCase()
-  return bare === 'true' ? '1' : bare === 'false' ? '0' : bare
+  const unquoted = text.replace(/^'+|'+$/g, '').toLowerCase()
+  const bare = unquoted === 'true' ? '1' : unquoted === 'false' ? '0' : unquoted
+  return DECIMAL.test(bare) ? String(Number(bare)) : bare
 }
 
 function sameValue(value: string | number | boolean, pinned: string): boolean {
@@ -253,16 +262,28 @@ export function effectiveInsertSettings(
 }
 
 /**
- * `PINNED_INSERT_SETTINGS_SQL` with the delivery pins that `insertSettings`
- * (`effectiveInsertSettings`) overrides.
+ * The settings of a chunk INSERT, in one list: the user's own first, delivery
+ * overrides included, then everything chkit requires, so that a later
+ * setting wins over whatever the user's set (a settings profile included):
+ * the fixed settings, a cutover's, the dedup token, and the pins, without the
+ * delivery ones the user overrides.
  */
-export function pinnedInsertSettingsSql(insertSettings: InsertSettings = {}): string {
-  return Object.entries(PINNED_INSERT_SETTINGS)
-    .map(([name, value]) => {
-      const override = isDeliveryPin(name) ? insertSettings[name] : undefined
-      return `${name}=${override === undefined ? value : renderInsertSettingValue(override)}`
-    })
-    .join(', ')
+export function chunkInsertSettingsSql(
+  insertSettings: InsertSettings | undefined,
+  options: { token?: string; cutover?: boolean } = {},
+): string {
+  const cutover = options.cutover ?? false
+  assertInsertSettingsKeepPinned(insertSettings, undefined, { cutover })
+  const effective = effectiveInsertSettings(insertSettings, undefined, { cutover })
+  const parts = Object.entries(effective).map(([key, value]) => `${key}=${renderInsertSettingValue(value)}`)
+  parts.push(...Object.entries(fixedSettings(cutover)).map(([name, value]) => `${name}=${value}`))
+  if (options.token) parts.push(`${TOKEN_SETTING}='${options.token}'`)
+  parts.push(
+    ...Object.entries(PINNED_INSERT_SETTINGS)
+      .filter(([name]) => !(isDeliveryPin(name) && Object.hasOwn(effective, name)))
+      .map(([name, value]) => `${name}=${value}`),
+  )
+  return parts.join(', ')
 }
 
 /**
@@ -278,22 +299,6 @@ export function deliveryOverrideWarning(insertSettings: InsertSettings | undefin
   return `Warning: insertSettings overrides what every backfill chunk INSERT sets by default: ${overridden.join('; ')}.`
 }
 
-/**
- * The single SETTINGS clause (ClickHouse rejects a second one on INSERT ...
- * SELECT): what chkit writes itself, the user's own settings, then the pinned
- * settings with their overrides.
- */
-function renderSettingsClause(insertSettings: InsertSettings | undefined, token: string, cutover: boolean): string {
-  assertInsertSettingsKeepPinned(insertSettings, undefined, { cutover })
-  const effective = effectiveInsertSettings(insertSettings, undefined, { cutover })
-  const parts = Object.entries(fixedSettings(cutover)).map(([name, value]) => `${name}=${value}`)
-  if (token) parts.push(`${TOKEN_SETTING}='${token}'`)
-  for (const [key, value] of Object.entries(effective)) {
-    if (!isDeliveryPin(key)) parts.push(`${key}=${renderInsertSettingValue(value)}`)
-  }
-  parts.push(pinnedInsertSettingsSql(effective))
-  return `SETTINGS ${parts.join(', ')}`
-}
 
 // ── Chunk execution SQL ──────────────────────────────────────────────────────
 
@@ -389,7 +394,7 @@ function buildCutoverChunkSql(input: {
     `WHERE _partition_id = ${quoteSqlString(input.chunk.partitionId)}`,
     ...input.chunkConditions.map((condition) => `  AND ${condition}`),
     `  AND (${key}) NOT IN (SELECT ${key} FROM ${input.target}${shadowConditions.length > 0 ? ` WHERE ${shadowConditions.join(' AND ')}` : ''})`,
-    renderSettingsClause(input.insertSettings, '', true),
+    `SETTINGS ${chunkInsertSettingsSql(input.insertSettings, { cutover: true })}`,
   ]
   return lines.join('\n')
 }
@@ -791,7 +796,7 @@ function buildRangeBoundConditions(range: ChunkRange, sortKey: SortKey): string[
 }
 
 function buildSettingsClause(token: string, insertSettings: InsertSettings | undefined): string {
-  return renderSettingsClause(insertSettings, token, false)
+  return `SETTINGS ${chunkInsertSettingsSql(insertSettings, { token })}`
 }
 
 function buildChunkConditions(chunk: Pick<Chunk, 'ranges'>, sortKeys: SortKey[]): string[] {

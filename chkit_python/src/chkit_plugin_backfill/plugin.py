@@ -364,7 +364,10 @@ def _run_backfill_locked(  # noqa: PLR0912, PLR0915 — mirrors TS runBackfill
             sys.stderr.write(f"{warning}\n")
         run_interruptible(
             lambda: assert_pinned_insert_settings_accepted(
-                plan_id=plan.plan_id, query=db.query_rows, insert_settings=insert_settings
+                plan_id=plan.plan_id,
+                query=db.query_rows,
+                insert_settings=insert_settings,
+                cutover=cutover,
             ),
             stop,
             plan.plan_id,

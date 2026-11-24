@@ -337,7 +337,7 @@ def _checked_insert_settings(
     if warning is not None:
         sys.stderr.write(f"{warning}\n")
     assert_pinned_insert_settings_accepted(
-        plan_id=plan.plan_id, query=query, insert_settings=effective
+        plan_id=plan.plan_id, query=query, insert_settings=effective, cutover=cutover
     )
     return effective
 

@@ -166,14 +166,25 @@ def _compulsory_name(
     return name if name in names else None
 
 
+# A decimal number as ClickHouse reads a numeric setting's value ("1.0", "+0", "1e0").
+_DECIMAL = re.compile(r"[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?")
+
+
+def _normal_text(text: str) -> str:
+    """A setting value as compared with chkit's (TS ``normalText``): unquoted,
+    lowercased, booleans as 1/0, and a number in its shortest form, so
+    ``'1.0'``, ``1`` and ``true`` are the same value."""
+    bare = text.strip("'").lower()
+    bare = {"true": "1", "false": "0"}.get(bare, bare)
+    return js_number_to_string(float(bare)) if _DECIMAL.fullmatch(bare) else bare
+
+
 def _normal_value(value: str | int | float | bool) -> str:
-    bare = _render_insert_setting_value(value).strip("'").lower()
-    return {"true": "1", "false": "0"}.get(bare, bare)
+    return _normal_text(_render_insert_setting_value(value))
 
 
 def _same_value(value: str | int | float | bool, pinned: str) -> bool:
-    bare = pinned.strip("'").lower()
-    return _normal_value(value) == {"true": "1", "false": "0"}.get(bare, bare)
+    return _normal_value(value) == _normal_text(pinned)
 
 
 def _kept_value(name: str, value: str | int | float | bool, *, cutover: bool) -> bool:
@@ -280,18 +291,29 @@ def effective_insert_settings(
     return effective
 
 
-def pinned_insert_settings_sql(
+def chunk_insert_settings_sql(
     insert_settings: Mapping[str, str | int | float | bool] | None = None,
+    *,
+    token: str = "",
+    cutover: bool = False,
 ) -> str:
-    """``PINNED_INSERT_SETTINGS_SQL`` with the delivery pins that
-    ``insert_settings`` (``effective_insert_settings``) overrides."""
-    overrides = insert_settings or {}
-    return ", ".join(
-        f"{name}={_render_insert_setting_value(overrides[name])}"
-        if name in DELIVERY_PINS and name in overrides
-        else f"{name}={value}"
+    """The settings of a chunk INSERT (TS ``chunkInsertSettingsSql``), in one
+    list: the user's own first, delivery overrides included, then everything
+    chkit requires, so that a later setting wins over whatever the user's set
+    (a settings profile included): the fixed settings, a cutover's, the dedup
+    token, and the pins, without the delivery ones the user overrides."""
+    assert_insert_settings_keep_pinned(insert_settings, cutover=cutover)
+    effective = effective_insert_settings(insert_settings, cutover=cutover)
+    parts = [f"{key}={_render_insert_setting_value(value)}" for key, value in effective.items()]
+    parts.extend(f"{name}={value}" for name, value in _fixed_settings(cutover=cutover).items())
+    if token:
+        parts.append(f"{_TOKEN_SETTING}='{token}'")
+    parts.extend(
+        f"{name}={value}"
         for name, value in PINNED_INSERT_SETTINGS.items()
+        if not (name in DELIVERY_PINS and name in effective)
     )
+    return ", ".join(parts)
 
 
 def delivery_override_warning(
@@ -310,29 +332,6 @@ def delivery_override_warning(
         "Warning: insertSettings overrides what every backfill chunk INSERT sets by "
         f"default: {'; '.join(overridden)}."
     )
-
-
-def _render_settings(
-    insert_settings: Mapping[str, str | int | float | bool] | None,
-    token: str,
-    *,
-    cutover: bool,
-) -> str:
-    """The single SETTINGS clause (ClickHouse rejects a second one on INSERT ...
-    SELECT): what chkit writes itself, the user's own settings, then the pinned
-    settings with their overrides."""
-    assert_insert_settings_keep_pinned(insert_settings, cutover=cutover)
-    effective = effective_insert_settings(insert_settings, cutover=cutover)
-    parts = [f"{name}={value}" for name, value in _fixed_settings(cutover=cutover).items()]
-    if token:
-        parts.append(f"{_TOKEN_SETTING}='{token}'")
-    parts.extend(
-        f"{key}={_render_insert_setting_value(value)}"
-        for key, value in effective.items()
-        if key not in DELIVERY_PINS
-    )
-    parts.append(pinned_insert_settings_sql(effective))
-    return f"SETTINGS {', '.join(parts)}"
 
 
 def build_chunk_execution_sql(
@@ -439,7 +438,7 @@ def _build_cutover_chunk_sql(
         f"WHERE _partition_id = {_quote_sql_string(chunk.partition_id)}",
         *(f"  AND {condition}" for condition in chunk_conditions),
         f"  AND ({key}) NOT IN (SELECT {key} FROM {target}{narrowed})",
-        _render_settings(insert_settings, "", cutover=True),
+        f"SETTINGS {chunk_insert_settings_sql(insert_settings, cutover=True)}",
     ]
     return "\n".join(lines)
 
@@ -895,7 +894,7 @@ def _build_settings_clause(
     # cover every ``*`` in the query, including each UNION ALL branch.
     # Per-chunk insert settings from the plugin config (e.g. max_insert_threads,
     # min_insert_block_size_rows) follow what chkit writes itself.
-    return _render_settings(insert_settings, token, cutover=False)
+    return f"SETTINGS {chunk_insert_settings_sql(insert_settings, token=token)}"
 
 
 def _render_insert_setting_value(value: str | int | float | bool) -> str:

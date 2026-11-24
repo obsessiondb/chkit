@@ -4,7 +4,7 @@ import { parseCutoverMetadata, type CutoverMetadata, type MaterializedViewDefini
 import { loadSchemaDefinitions } from '@chkit/core/schema-loader'
 
 import { encodeChunkPlanForPersistence } from './chunking/boundary-codec.js'
-import { compulsorySettingNames, type InsertSettings, pinnedInsertSettingsSql } from './chunking/sql.js'
+import { chunkInsertSettingsSql, compulsorySettingNames, type InsertSettings } from './chunking/sql.js'
 import { generateChunkPlan } from './chunking/planner.js'
 import { findMvsForTarget, resolveMvReplaySource } from './detect.js'
 import { BackfillConfigError } from './errors.js'
@@ -115,16 +115,17 @@ export async function assertBackfillTargetSafe(input: {
 
 /**
  * Fail before anything is submitted when the server would refuse the
- * settings every chunk INSERT runs with (`PINNED_INSERT_SETTINGS`, with the
- * delivery pins `insertSettings` overrides): a user with `readonly = 1`, or a
- * settings constraint on one of them.
+ * settings every chunk INSERT runs with in the plan's mode
+ * (`chunkInsertSettingsSql`, the per-chunk dedup token aside): a user with
+ * `readonly = 1`, or a settings constraint on one of them.
  */
 export async function assertPinnedInsertSettingsAccepted(input: {
   planId: string
   query: ClickHouseQuery
   insertSettings?: InsertSettings
+  cutover?: boolean
 }): Promise<void> {
-  const pinned = pinnedInsertSettingsSql(input.insertSettings)
+  const pinned = chunkInsertSettingsSql(input.insertSettings, { cutover: input.cutover })
   try {
     await input.query(`SELECT 1 SETTINGS ${pinned}`)
   } catch (error) {
