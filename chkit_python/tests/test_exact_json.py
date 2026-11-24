@@ -91,8 +91,8 @@ def test_keeps_the_rest_of_the_envelope_as_clickhouse_sent_it() -> None:
 
 
 def test_reads_an_empty_body_from_a_statement_without_a_result_set_as_no_rows() -> None:
-    assert parse_json_result("", allow_empty=True) == {"data": [], "meta": [], "rows": 0}
-    assert parse_json_result(b" \n", allow_empty=True) == {"data": [], "meta": [], "rows": 0}
+    assert parse_json_result("") == {"data": [], "meta": [], "rows": 0}
+    assert parse_json_result(b" \n") == {"data": [], "meta": [], "rows": 0}
 
 
 def test_json_object_and_dynamic_columns_keep_a_number_unless_a_float_would_change_it() -> None:

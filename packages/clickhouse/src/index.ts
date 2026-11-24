@@ -14,12 +14,12 @@ import {
 	parseTextIndexParams,
 	parseVectorIndexArgs,
 	normalizeTextIndexSQL,
+	parseJsonEachRow,
 	stripWrappingParens,
 } from '@chkit/core'
 import { type ClickHouseSettings, ClickHouseLogLevel, createClient } from '@clickhouse/client'
 import { getLogger } from '@logtape/logtape'
-import { allowsEmptyResult, parseJsonResult } from './exact-json.js'
-import { parseJsonBatches } from './json-batches.js'
+import { parseJsonResult } from './exact-json.js'
 import { allReplicas, resolveReplicaFanout } from './replicas.js'
 import {
 	acquireSendSlot,
@@ -117,7 +117,7 @@ export type ObservableSystemTable = 'processes' | 'query_log'
 
 /** Control proofs require fresh, complete results rather than cached or truncated data. */
 /** One `system.query_log` entry of a query id, newest first. */
-export interface QueryLogRow extends Record<string, unknown> {
+export interface QueryLogRow {
 	type: string
 	written_rows: number | string
 	written_bytes: number | string
@@ -1016,7 +1016,7 @@ export function createExecutorWithClient(
 			controlClient ??= createStatelessClickHouseClient(config, DEFAULT_CLICKHOUSE_SETTINGS, { keepAlive: false })
 			const activeClient = controlClient
 			const controller = new AbortController()
-			let result: Awaited<ReturnType<ClickHouseClient['query']>> | undefined
+			let result: { close(): void } | undefined
 			let expired = false
 			let consumed = false
 			let timer: ReturnType<typeof setTimeout> | undefined
@@ -1030,16 +1030,23 @@ export function createExecutorWithClient(
 			})
 			try {
 				return await Promise.race([deadline, (async () => {
-					const settings: ClickHouseSettings = { ...options?.settings, ...STRICT_CONTROL_SETTINGS, wait_end_of_query: 1 }
+					const settings = { ...options?.settings, ...STRICT_CONTROL_SETTINGS }
 					delete settings.query_id
-					result = await activeClient.query({
-						query: sql, format: 'JSON', abort_signal: controller.signal,
+					if (/^INSERT\b/i.test(sql.trimStart()) || /^KILL\b[\s\S]*\bASYNC\s*;?$/i.test(sql.trimStart())) {
+						const written = await activeClient.command({ query: sql, abort_signal: controller.signal,
+							...(options?.queryId ? { query_id: options.queryId } : {}), clickhouse_settings: settings })
+						assertStreamedQuerySucceeded({ response_headers: written.response_headers, query_id: written.query_id, sql })
+						return []
+					}
+					const response = await activeClient.query({
+						query: sql, format: 'JSONStrings', abort_signal: controller.signal,
 						...(options?.queryId ? { query_id: options.queryId } : {}),
 						clickhouse_settings: settings,
 					})
-					if (expired) { result.close(); throw new Error('Cancellation deadline expired') }
-					assertStreamedQuerySucceeded({ response_headers: result.response_headers, query_id: result.query_id, sql })
-					const rows = parseJsonResult(await result.text(), { numbers: 'roundTrip', allowEmpty: allowsEmptyResult(sql, parseSummaryFromHeaders(result.response_headers)?.result_rows) }).data as T[]
+					result = response
+					if (expired) { response.close(); throw new Error('Cancellation deadline expired') }
+					assertStreamedQuerySucceeded({ response_headers: response.response_headers, query_id: response.query_id, sql })
+					const { data: rows } = await response.json<T>()
 					consumed = true
 					return rows
 				})()])
@@ -1047,10 +1054,12 @@ export function createExecutorWithClient(
 		},
 		async query<T>(sql: string, settings?: ClickHouseSettings): Promise<T[]> {
 			try {
-				const clickhouseSettings = await readSettings(settings)
+				const { default_format, ...querySettings } = settings ?? {}
+				const framed = default_format === 'JSONStrings'
+				const clickhouseSettings = await readSettings(framed ? querySettings : settings)
 				const result = await client.query({
 					query: sql,
-					format: 'JSON',
+					format: framed ? 'JSONStrings' : 'JSONEachRow',
 					http_headers: { 'X-DDL': '1' },
 					...(clickhouseSettings ? { clickhouse_settings: clickhouseSettings } : {}),
 				})
@@ -1064,9 +1073,10 @@ export function createExecutorWithClient(
 					query_id: result.query_id,
 					sql,
 				})
-				// The JSON envelope distinguishes zero rows from a missing response.
-				// Keep query()'s value-based numeric precision contract (#415).
-				const rows = parseJsonResult(await result.text(), { numbers: 'roundTrip', allowEmpty: allowsEmptyResult(sql, parseSummaryFromHeaders(result.response_headers)?.result_rows, clickhouseSettings?.wait_end_of_query) }).data as T[]
+				// The client's JSONEachRow decoder drops the final row when the
+				// response ends without a newline. Decode every nonempty line,
+				// without rounding 64-bit integers and Decimals (#415).
+				const rows = framed ? (await result.json<T>() as { data: T[] }).data : parseJsonEachRow<T>(await result.text())
 				logProfiling(
 					profiler,
 					sql,
@@ -1084,9 +1094,10 @@ export function createExecutorWithClient(
 				const statement = sql.trim()
 				let end = statement.length
 				while (statement[end - 1] === ';') end--
-				// Consume a framed result incrementally, including its terminal row count.
+				// exec, not query: the client's JSONEachRow stream() drops a final
+				// row without a trailing newline, the case query() handles too.
 				const result = await client.exec({
-					query: `${statement.slice(0, end)} \nFORMAT JSON`,
+					query: `${statement.slice(0, end)} \nFORMAT JSONEachRow`,
 					http_headers: { 'X-DDL': '1' },
 					...(clickhouseSettings ? { clickhouse_settings: clickhouseSettings } : {}),
 				})
@@ -1095,7 +1106,17 @@ export function createExecutorWithClient(
 					query_id: result.query_id,
 					sql,
 				})
-				yield* parseJsonBatches<T>(result.stream, { allowEmpty: allowsEmptyResult(sql, parseSummaryFromHeaders(result.response_headers)?.result_rows, clickhouseSettings?.wait_end_of_query) })
+				const decoder = new TextDecoder()
+				let pending = ''
+				for await (const chunk of result.stream) {
+					const text = pending + decoder.decode(chunk, { stream: true })
+					const end = text.lastIndexOf('\n') + 1
+					pending = text.slice(end)
+					const rows = parseJsonEachRow<T>(text.slice(0, end))
+					if (rows.length > 0) yield rows
+				}
+				const rows = parseJsonEachRow<T>(pending + decoder.decode())
+				if (rows.length > 0) yield rows
 				logProfiling(
 					profiler,
 					sql,
@@ -1123,7 +1144,7 @@ export function createExecutorWithClient(
 					query_id: result.query_id,
 					sql,
 				})
-				const payload = parseJsonResult<T>(await result.text(), { allowEmpty: allowsEmptyResult(sql, parseSummaryFromHeaders(result.response_headers)?.result_rows, clickhouseSettings?.wait_end_of_query) })
+				const payload = parseJsonResult<T>(await result.text())
 				logProfiling(
 					profiler,
 					sql,
@@ -1257,19 +1278,16 @@ export function createExecutorWithClient(
 				const running = await client.query({
 					query: `SELECT read_rows, read_bytes, written_rows, written_bytes, elapsed FROM ${processesFrom} WHERE user = currentUser() AND query_id = {qid:String} SETTINGS skip_unavailable_shards = ${skipUnavailable}`,
 					query_params: { qid: queryId },
-					format: 'JSON',
+					format: 'JSONStrings',
 				})
-				// Decoded as executor.query() does (#436). A UInt64 count arrives as a
-				// number, or as a string of its digits beyond 2^53 or when the
-				// profile sets output_format_json_quote_64bit_integers.
-				assertStreamedQuerySucceeded({ response_headers: running.response_headers, query_id: running.query_id, sql: processesFrom })
-				const runningRows = parseJsonResult<{
+
+				const { data: runningRows } = await running.json<{
 					read_rows: number | string
 					read_bytes: number | string
 					written_rows: number | string
 					written_bytes: number | string
 					elapsed: number
-				}>(await running.text(), { numbers: 'roundTrip' }).data
+				}>()
 				const [proc] = runningRows
 				if (proc) {
 					return {
@@ -1311,10 +1329,9 @@ ORDER BY event_time DESC
 ${options?.includeBeforeStart ? '' : 'LIMIT 1'}
 SETTINGS skip_unavailable_shards = ${skipUnavailable}`,
 					query_params: { qid: queryId, after: afterTime },
-					format: 'JSON',
+					format: 'JSONStrings',
 				})
-				assertStreamedQuerySucceeded({ response_headers: log.response_headers, query_id: log.query_id, sql: queryLogFrom })
-				return queryLogOutcome(parseJsonResult<QueryLogRow>(await log.text(), { numbers: 'roundTrip' }).data)
+				return queryLogOutcome((await log.json<QueryLogRow>()).data)
 			} catch (error) {
 				wrapConnectionError(error, config.url, config.username)
 			}

@@ -62,8 +62,8 @@ describe('parseJsonResult (#381)', () => {
 	})
 
 	test('reads an empty body, from a statement without a result set, as no rows', () => {
-		expect(parseJsonResult('', { allowEmpty: true })).toEqual({ data: [], meta: [], rows: 0 })
-		expect(parseJsonResult(' \n', { allowEmpty: true })).toEqual({ data: [], meta: [], rows: 0 })
+		expect(parseJsonResult('')).toEqual({ data: [], meta: [], rows: 0 })
+		expect(parseJsonResult(' \n')).toEqual({ data: [], meta: [], rows: 0 })
 	})
 
 	test('fails when the runtime gives the reviver no source text (Node 20) instead of printing rounded digits', () => {

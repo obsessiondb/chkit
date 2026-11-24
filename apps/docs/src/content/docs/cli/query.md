@@ -38,7 +38,7 @@ Over the `clickhouse` connection, `chkit query` asks ClickHouse for progress hea
 
 ### Statements
 
-`chkit query` reads the result in ClickHouse's `JSON` format, appending `FORMAT JSON` to the statement. Result sets must contain a complete JSON envelope, including metadata, data and a matching row count. A valid zero-row result succeeds; a blank or truncated result response fails. A statement without a result set, such as `CREATE`, `DROP`, `OPTIMIZE` or `INSERT ... SELECT`, prints `(no rows)`, and `--json` prints an envelope with empty `data` and `meta` and `rows` set to `0`. `INSERT ... VALUES` with inline data is not supported, because ClickHouse reads the appended `FORMAT JSON` as part of the values; use `INSERT ... SELECT` instead.
+`chkit query` reads the result in ClickHouse's `JSON` format, appending `FORMAT JSON` to the statement. A statement without a result set, such as `CREATE`, `DROP`, `OPTIMIZE` or `INSERT ... SELECT`, prints `(no rows)`, and `--json` prints an envelope with empty `data` and `meta` and `rows` set to `0`. `INSERT ... VALUES` with inline data is not supported, because ClickHouse reads the appended `FORMAT JSON` as part of the values; use `INSERT ... SELECT` instead.
 
 ### Exact values
 

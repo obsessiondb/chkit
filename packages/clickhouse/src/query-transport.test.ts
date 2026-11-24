@@ -7,22 +7,25 @@ import {
 
 type TransportRequest = { sql: string; url: URL; headers: Headers }
 
-describe('query framed JSON transport', () => {
+describe('query JSONEachRow transport', () => {
   test.each([
-    ['one row without a trailing newline', envelope([{ id: 1 }]), [{ id: 1 }]],
-    ['one row with a trailing newline', envelope([{ id: 1 }]) + '\n', [{ id: 1 }]],
-    ['multiple rows without a trailing newline', envelope([{ id: 1 }, { id: 2 }]), [{ id: 1 }, { id: 2 }]],
-    ['a genuine empty result', envelope([]), []],
+    ['one row without a trailing newline', '{"id":1}', [{ id: 1 }]],
+    ['one row with a trailing newline', '{"id":1}\n', [{ id: 1 }]],
+    ['multiple rows without a trailing newline', '{"id":1}\n{"id":2}', [{ id: 1 }, { id: 2 }]],
+    ['multiple rows with a trailing newline', '{"id":1}\n{"id":2}\n', [{ id: 1 }, { id: 2 }]],
+    ['an empty result', '', []],
+    ['whitespace-only lines', ' \t\r\n\n ', []],
+    ['blank lines between rows', '\n{"id":1}\n \t\n{"id":2}\n\n', [{ id: 1 }, { id: 2 }]],
+    ['CRLF-delimited rows', '{"id":1}\r\n{"id":2}\r\n', [{ id: 1 }, { id: 2 }]],
   ])('decodes %s', async (_name, body, expected) => {
     await withTransport(() => new Response(body), async (executor) => {
       expect(await executor.query('SELECT id FROM app.events')).toEqual(expected)
       expect(await streamRows(executor, 'SELECT id FROM app.events')).toEqual(expected)
-      expect((await executor.queryJson?.('SELECT id FROM app.events'))?.data).toEqual(expected)
     })
   })
 
   test('streams rows and characters split across response chunks', async () => {
-    const chunks = ['{"meta":[],"data":[{"id":1,"name":"\xC3', '\xA9"},{"id":', '2},{"id":3}],"rows":3}']
+    const chunks = ['{"id":1,"name":"\xC3', '\xA9"}\n{"id":', '2}\n{"id":3}']
     const reply = () => new Response(new ReadableStream({
       start(controller) {
         for (const chunk of chunks) controller.enqueue(Uint8Array.from(chunk, (char) => char.charCodeAt(0)))
@@ -39,85 +42,24 @@ describe('query framed JSON transport', () => {
   })
 
   test.each([
-    ['a blank response', ''],
-    ['a whitespace response', ' \n\t'],
-    ['invalid JSON', 'not JSON'],
-    ['a truncated row', '{"meta":[],"data":[{"id":'],
-    ['a truncated envelope after a complete row', '{"meta":[],"data":[{"id":1}'],
-    ['a missing row count', '{"meta":[],"data":[]}'],
-    ['a mismatched row count', '{"meta":[],"data":[],"rows":1}'],
-    ['a non-object data row', '{"meta":[],"data":[null],"rows":1}'],
-    ['malformed column metadata', '{"meta":[{"name":"id"}],"data":[],"rows":0}'],
-    ['non-JSON whitespace between rows', '{"meta":[],"data":[{"id":1}\v],"rows":1}'],
-    ['a missing data array', '{"meta":[],"rows":0}'],
-    ['a server exception after the envelope', envelope([]) + 'Code: 241. DB::Exception'],
+    ['an invalid only row', 'not JSON'],
+    ['an invalid final row without a newline', '{"id":1}\n{"id":'],
+    ['an invalid final row with a newline', '{"id":1}\n{"id":\n'],
+    ['a nonempty exception line', '{"id":1}\nCode: 241. DB::Exception: query failed'],
   ])('rejects %s', async (_name, body) => {
     await withTransport(() => new Response(body), async (executor) => {
-      await expect(executor.query('SELECT id FROM app.events')).rejects.toThrow()
-      await expect(executor.queryJson?.('SELECT id FROM app.events')).rejects.toThrow()
-      await expect(streamRows(executor, 'SELECT id FROM app.events')).rejects.toThrow()
-      await expect(executor.queryControl?.('KILL QUERY WHERE query_id = \'old\' SYNC', 1000)).rejects.toThrow()
+      await expect(executor.query('SELECT id FROM app.events')).rejects.toBeInstanceOf(SyntaxError)
+      await expect(streamRows(executor, 'SELECT id FROM app.events')).rejects.toBeInstanceOf(SyntaxError)
     })
   })
 
-  test('accepts bodyless commands and queryJson DDL, including leading comments', async () => {
-    await withTransport(() => new Response(''), async (executor) => {
-      await executor.command('CREATE TABLE app.t (id UInt8) ENGINE = Memory')
-      expect(await executor.query('\u00a0/* comment */ OPTIMIZE TABLE app.t\ufeff')).toEqual([])
-      expect(await executor.queryControl?.('INSERT INTO app.t SELECT 1', 1000)).toEqual([])
-      expect(await streamRows(executor, '\u00a0/* comment */ OPTIMIZE TABLE app.t\ufeff')).toEqual([])
-      expect((await executor.queryJson?.('\u00a0/* comment */ OPTIMIZE TABLE app.t\ufeff'))?.data).toEqual([])
-      expect((await executor.queryJson?.('EXCHANGE TABLES app.a AND app.b'))?.data).toEqual([])
-      expect((await executor.queryJson?.('DELETE FROM app.t WHERE id = 0'))?.data).toEqual([])
-      await expect(executor.queryJson?.('/* CREATE */ WITH 1 AS id SELECT id')).rejects.toThrow()
-      await expect(executor.queryJson?.('EXPLAIN SELECT 1')).rejects.toThrow()
-    })
-  })
-
-  test('does not turn a missing status response into unknown or finished', async () => {
-    await withTransport(() => new Response(''), async (executor) => {
-      await expect(executor.queryStatus('old', { runningOnly: true })).rejects.toThrow()
-      await expect(executor.queryStatus('old')).rejects.toThrow()
-    })
-  })
-
-  test('validates query-log responses after a genuine zero-row processes response', async () => {
-    await withTransport((sql) => new Response(sql.includes('system.query_log') ? '' : envelope([])), async (executor) => {
-      expect(await executor.queryStatus('old', { runningOnly: true })).toEqual({ status: 'unknown' })
-      await expect(executor.queryStatus('old')).rejects.toThrow()
-      expect(await executor.queryControl?.('KILL QUERY WHERE 0 SYNC', 1000)).toEqual([])
-    })
-  })
-
-  test('keeps precision, nested arrays and escaped delimiters across single-byte chunks', async () => {
-    const body = '{"meta":[{"name":"n","type":"UInt64"}],"data":[{"n":18446744073709551615,"nested":[{"s":"é}\\\"[,"}]}],"rows":1}'
-    await withTransport(() => new Response(new ReadableStream({ start(controller) {
-      for (const byte of new TextEncoder().encode(body)) controller.enqueue(Uint8Array.of(byte))
-      controller.close()
-    } })), async (executor) => {
-      const expected = [{ n: '18446744073709551615', nested: [{ s: 'é}"[,' }] }]
-      expect(await executor.query('SELECT n')).toEqual(expected)
-      expect(await streamRows(executor, 'SELECT n')).toEqual(expected)
-    })
-  })
-
-  test('accepts a bodyless no-match KILL only with a final zero-row summary', async () => {
-    await withTransport(() => new Response('', { headers: { 'x-clickhouse-summary': '{"result_rows":"0"}' } }), async (executor) => {
-      expect(await executor.queryControl?.('KILL QUERY WHERE 0 SYNC', 1000)).toEqual([])
-      expect(await executor.query('KILL QUERY WHERE 0 SYNC')).toEqual([])
-      expect((await executor.queryJson?.('KILL QUERY WHERE 0 SYNC'))?.data).toEqual([])
-      await expect(executor.query('SELECT id FROM app.events')).rejects.toThrow()
-      await expect(executor.query('KILL QUERY WHERE 0 SYNC', { wait_end_of_query: 0 })).rejects.toThrow()
-    })
-  })
-
-  test('retains headers and settings with framed JSON format, request headers and query settings', async () => {
-    await withTransport(() => new Response(envelope([{ id: 1 }])), async (executor, requests) => {
+  test('retains JSONEachRow format, request headers and query settings', async () => {
+    await withTransport(() => new Response('{"id":1}'), async (executor, requests) => {
       expect(await executor.query('SELECT id FROM app.events', { max_result_rows: 3 })).toEqual([{ id: 1 }])
       expect(await streamRows(executor, 'SELECT id FROM app.events;', { max_result_rows: 3 })).toEqual([{ id: 1 }])
       expect(requests).toHaveLength(2)
       for (const request of requests) {
-        expect(request.sql).toContain('FORMAT JSON')
+        expect(request.sql).toContain('FORMAT JSONEachRow')
         expect(request.sql).not.toContain(';')
         expect(request.headers.get('X-DDL')).toBe('1')
         expect(request.url.searchParams.get('max_result_rows')).toBe('3')
@@ -137,6 +79,35 @@ describe('query framed JSON transport', () => {
   })
 })
 
+describe('framed decision reads (OBS-16)', () => {
+  test.each(['', ' \n', '{"meta":[],"data":[', 'not JSON'])(
+    'official clients reject a missing or incomplete envelope: %j', async (body) => {
+      await withTransport(() => new Response(body), async (executor) => {
+        await expect(executor.query('SELECT name FROM journal', { default_format: 'JSONStrings' })).rejects.toThrow()
+        await expect(executor.queryControl?.('SELECT query_id FROM system.processes', 1000)).rejects.toThrow()
+        await expect(executor.queryStatus('old', { runningOnly: true })).rejects.toThrow()
+      })
+    },
+  )
+
+  test('accepts genuine zero rows through the official JSON envelope parser', async () => {
+    await withTransport(() => new Response('{"meta":[],"data":[],"rows":0}'), async (executor) => {
+      expect(await executor.query('SELECT name FROM journal', { default_format: 'JSONStrings' })).toEqual([])
+      expect(await executor.queryControl?.('SELECT query_id FROM system.processes', 1000)).toEqual([])
+      expect(await executor.queryStatus('old', { runningOnly: true })).toEqual({ status: 'unknown' })
+    })
+  })
+
+  test('requests JSONStrings and preserves exact digits without a trailing newline', async () => {
+    await withTransport(() => new Response('{"meta":[],"data":[{"n":"18446744073709551615"}],"rows":1}'), async (executor, requests) => {
+      expect(await executor.query('SELECT n FROM journal', { default_format: 'JSONStrings' })).toEqual([{ n: '18446744073709551615' }])
+      expect(requests[0]?.sql).toMatch(/FORMAT JSONStrings\b/)
+      expect(requests[0]?.url.searchParams.has('output_format_json_quote_64bit_integers')).toBe(false)
+      expect(requests[0]?.url.searchParams.has('output_format_json_quote_decimals')).toBe(false)
+    })
+  })
+})
+
 async function streamRows(
   executor: ClickHouseExecutor,
   sql: string,
@@ -149,7 +120,7 @@ async function streamRows(
 }
 
 async function withTransport(
-  reply: (sql: string) => Response,
+  reply: () => Response,
   check: (executor: ClickHouseExecutor, requests: TransportRequest[]) => Promise<void>,
 ): Promise<void> {
   const requests: TransportRequest[] = []
@@ -161,7 +132,7 @@ async function withTransport(
       // The executor's once-per-executor readonly lookup (#412).
       if (sql.includes("getSetting('readonly')")) return new Response('{"readonly":"0"}\n')
       requests.push({ sql, url: new URL(request.url), headers: request.headers })
-      return reply(sql)
+      return reply()
     },
   })
   const executor = createStatelessClickHouseExecutor({ url: server.url.toString(), database: 'default' })
@@ -171,8 +142,4 @@ async function withTransport(
     await executor.close()
     server.stop(true)
   }
-}
-
-function envelope(rows: unknown[]): string {
-  return JSON.stringify({ meta: [{ name: 'id', type: 'UInt32' }], data: rows, rows: rows.length })
 }

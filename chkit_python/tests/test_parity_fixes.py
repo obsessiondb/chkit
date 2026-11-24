@@ -91,7 +91,6 @@ def test_finding_11_core_module_exports_key_clause_and_sql_helpers() -> None:
 def test_finding_18_client_exposes_introspect_methods_as_methods() -> None:
     fake = MagicMock()
     fake.query.return_value.rows = []
-    fake.query.return_value.summary = {"result_rows": "0"}
     cfg = ChxResolvedClickHouseConfig(
         url="http://localhost:8123",
         username="default",

@@ -1,1 +1,1 @@
-Reject missing or incomplete query responses instead of treating them as absent migration journal entries or query status. Native queries require a final server row-count summary; empty results with `wait_end_of_query=0` fail validation.
+Migration journal and query-status reads reject missing or truncated responses instead of treating recorded work as absent, while valid empty results still succeed.

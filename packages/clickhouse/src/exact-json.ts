@@ -1,4 +1,4 @@
-import { isTrivia, roundTripNumber, tokenizeSQL } from '@chkit/core'
+import { roundTripNumber } from '@chkit/core'
 
 import type { ClickHouseJsonQueryResult } from './index.js'
 
@@ -45,30 +45,24 @@ const JSON_NUMBER = Symbol('JsonNumber')
  * instead would fail for a `readonly = 1` user (#402). In a column whose type
  * is or contains `JSON`, `Object` or `Dynamic`, only a number a double would
  * change becomes a string, as in `parseJsonEachRowLine` (#438). Other numbers
- * stay numbers. Empty bodies are accepted only when the caller explicitly
- * permits a statement without a result set.
+ * stay numbers. A statement without a result set (DDL, `OPTIMIZE`) has an empty
+ * body, read as no rows.
  */
 export function parseJsonResult<T extends Record<string, unknown>>(
 	body: string,
-	options: { allowEmpty?: boolean; numbers?: 'typed' | 'roundTrip'; expectedRows?: number } = {},
 ): ClickHouseJsonQueryResult<T> {
-	if (body.trim() === '') {
-		if (options.allowEmpty) return { data: [], meta: [], rows: 0 }
-		throw new Error('Missing ClickHouse JSON result envelope')
-	}
+	if (body.trim() === '') return { data: [], meta: [], rows: 0 }
 	// context.source is the number's JSON text (Node 21+, Bun).
-	const parsed: unknown = JSON.parse(
+	const { data, meta, ...rest }: JsonEnvelope = JSON.parse(
 		body,
 		(_key, value: unknown, context?: { source?: string }) =>
 			typeof value === 'number' ? jsonNumber(context?.source, value) : value,
 	)
-	assertJsonEnvelope(parsed, options.expectedRows)
-	const { data, meta, ...rest } = parsed
 	const modes = new Map(meta.map((column) => [column.name, numberMode(column.type)]))
 	// Rows keyed by column name: data, totals (WITH TOTALS) and extremes.min/max.
 	const restoreRow = (row: unknown): unknown =>
 		isRecord(row)
-			? Object.fromEntries(Object.entries(row).map(([name, cell]) => [name, restore(cell, options.numbers === 'roundTrip' ? 'roundTrip' : modes.get(name) ?? 'double')]))
+			? Object.fromEntries(Object.entries(row).map(([name, cell]) => [name, restore(cell, modes.get(name) ?? 'double')]))
 			: restore(row, 'double')
 	// data first, as the ObsessionDB executor and the Python port print it.
 	return {
@@ -84,26 +78,6 @@ export function parseJsonResult<T extends Record<string, unknown>>(
 			}),
 		),
 	} as ClickHouseJsonQueryResult<T>
-}
-
-export function allowsEmptyResult(sql: string, resultRows?: unknown, waitEndOfQuery: unknown = 1): boolean {
-	const tokens = tokenizeSQL(sql.trim()).filter((token) => !isTrivia(token))
-	const first = tokens[0]
-	// KILL emits no JSON envelope for no matches, even with FORMAT JSON.
-	if (first?.kind === 'identifier' && first.text.toUpperCase() === 'KILL') {
-		return !['0', 'false'].includes(String(waitEndOfQuery).toLowerCase()) && (resultRows === '0' || resultRows === 0)
-	}
-	// WITH, EXPLAIN and SHOW return result sets.
-	return first?.kind === 'identifier' && /^(?:CREATE|ALTER|DROP|DETACH|ATTACH|TRUNCATE|RENAME|OPTIMIZE|SYSTEM|SET|USE|GRANT|REVOKE|INSERT|DELETE|UPDATE|EXCHANGE|MOVE|UNDROP|BEGIN|COMMIT|ROLLBACK)$/.test(first.text.toUpperCase())
-}
-
-function assertJsonEnvelope(value: unknown, expectedRows?: number): asserts value is JsonEnvelope {
-	if (!isRecord(value) || !Array.isArray(value.meta) || !Array.isArray(value.data)
-		|| !value.meta.every((column) => isRecord(column) && typeof column.name === 'string' && typeof column.type === 'string')
-		|| !value.data.every(isRecord) || !isJsonNumber(value.rows)
-		|| !Number.isSafeInteger(value.rows.value) || value.rows.value !== (expectedRows ?? value.data.length)) {
-		throw new Error('Invalid ClickHouse JSON result envelope')
-	}
 }
 
 function numberMode(type: string): NumberMode {

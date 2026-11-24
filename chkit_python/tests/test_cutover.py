@@ -819,7 +819,7 @@ def test_barrier_sends_settings_with_its_reads_only() -> None:
     settings = {"max_execution_time": "60"}
     wait_for_insert_barrier(client, _BARRIER, settings=settings, sleep=lambda _s: None)
     # The replica probe is chkit's own query; the barrier's reads get the settings.
-    assert client.sent_settings == [None, settings, settings]
+    assert client.sent_settings == [{"default_format": "JSONStrings"}, settings, settings]
 
 
 def test_barrier_times_out_with_the_running_query_ids() -> None:
@@ -899,7 +899,7 @@ def test_wait_for_exchange_waits_for_uuid_agreement(monkeypatch: pytest.MonkeyPa
     polls: list[str] = []
 
     class _Client:
-        def query(self, sql: str) -> _Rows:
+        def query(self, sql: str, settings: object = None) -> _Rows:
             if "system.one" in sql:
                 return _Rows([{"replicas": 2}])
             polls.append(sql)
@@ -919,7 +919,7 @@ def test_wait_for_exchange_waits_for_uuid_agreement(monkeypatch: pytest.MonkeyPa
 
 def test_wait_for_exchange_skips_on_cluster() -> None:
     class _Client:
-        def query(self, _sql: str) -> _Rows:
+        def query(self, _sql: str, settings: object = None) -> _Rows:
             msg = "no query expected"
             raise AssertionError(msg)
 
