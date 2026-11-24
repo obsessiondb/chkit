@@ -419,3 +419,40 @@ def test_shared_udf_queries_retain_literals_independently_of_pair_order() -> Non
                 assert result[changed] != result[stored]
         finally:
             client.execute(f"DROP FUNCTION IF EXISTS {name}")
+
+
+def test_sql_udf_storage_preserves_arithmetic_and_body_drift() -> None:
+    with _connect() as client:
+        name = create_prefix("udf_storage")
+        view_name = name + "view"
+        database = client.database
+        query = f"SELECT {name}(number + 2, number * 2) AS value FROM numbers(3)"
+        try:
+            client.execute(f"CREATE FUNCTION {name} AS (x, y) -> x - y")
+            client.execute(f"CREATE VIEW {database}.{view_name} AS {query}")
+
+            def observe() -> tuple[str, str, str]:
+                stored = str(client.query(
+                    "SELECT as_select FROM system.tables "
+                    f"WHERE database='{database}' AND name='{view_name}'"
+                ).rows[0]["as_select"])
+                result = canonicalize_sql_fragments(
+                    client, [query, stored], wrap=False, stored_query_pairs=[(query, stored)]
+                )
+                return stored, result[query], result[stored]
+
+            stored, expected, actual = poll_until(observe, lambda value: value[1] == value[2])
+            assert name + "(" not in stored
+            assert expected == actual
+            client.execute(f"CREATE OR REPLACE FUNCTION {name} AS (x, y) -> x + y")
+
+            def changed() -> dict[str, str]:
+                return canonicalize_sql_fragments(
+                    client, [query, stored], wrap=False, stored_query_pairs=[(query, stored)]
+                )
+
+            result = poll_until(changed, lambda value: value[query] != value[stored])
+            assert result[query] != result[stored]
+        finally:
+            client.execute(f"DROP VIEW IF EXISTS {database}.{view_name}")
+            client.execute(f"DROP FUNCTION IF EXISTS {name}")

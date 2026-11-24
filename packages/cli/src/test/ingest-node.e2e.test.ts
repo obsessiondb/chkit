@@ -73,7 +73,7 @@ export default defineConfig({
     expect(payload.streams[0]).toMatchObject({ outcome: 'succeeded', rows: CHUNK_ROWS, chunks: 1 })
     const counted = await waitForRows<{ n: string; distinct: string; minimum: string; maximum: string }>(
       executor,
-      `SELECT count() AS n, uniqExact(id) AS distinct, min(id) AS minimum, max(id) AS maximum FROM ${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(tableName)}`,
+      `SELECT count() AS n, uniqExact(id) AS distinct, min(id) AS minimum, max(id) AS maximum FROM ${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(tableName)} SETTINGS select_sequential_consistency = 1, enable_parallel_replicas = 0`,
       (rows) => Number(rows[0]?.n) === CHUNK_ROWS
         && Number(rows[0]?.distinct) === CHUNK_ROWS
         && Number(rows[0]?.minimum) === 0
