@@ -21,6 +21,7 @@ describe.serial('built Slack template installed into a consumer', () => {
   const prefix = createPrefix('slack_registry')
   const root = resolve(import.meta.dir, '../../..')
   const temporary: string[] = []
+  const readSettings = { select_sequential_consistency: '1', enable_parallel_replicas: 0 } as const
 
   afterAll(async () => {
     const tables = await executor.query<{ name: string }>(
@@ -105,32 +106,32 @@ describe.serial('built Slack template installed into a consumer', () => {
     ]
     const rawMessages = await pollUntil(
       () => executor.query<{ id: string; text: string; channel_id: string }>(
-        `SELECT id, JSONExtractString(toJSONString(raw), 'data', 'text') AS text, JSONExtractString(toJSONString(raw), 'channel_id') AS channel_id FROM ${table('messages')} FINAL ORDER BY id`,
+        `SELECT id, JSONExtractString(toJSONString(raw), 'data', 'text') AS text, JSONExtractString(toJSONString(raw), 'channel_id') AS channel_id FROM ${table('messages')} FINAL ORDER BY id`, readSettings,
       ),
       (rows) => JSON.stringify(rows) === JSON.stringify(expectedMessages),
     )
     expect(rawMessages).toEqual(expectedMessages)
-    const nested = await executor.query<{ blocks: string; files: string; reactions: string }>(
-      `SELECT JSONExtractRaw(toJSONString(raw), 'data', 'blocks') AS blocks, JSONExtractRaw(toJSONString(raw), 'data', 'files') AS files, JSONExtractRaw(toJSONString(raw), 'data', 'reactions') AS reactions FROM ${table('messages')} FINAL WHERE id = '${JSON.stringify(['slack.primary', 'messages', 'T1', 'C1', parentMessage.ts])}'`,
-    )
+    const nested = await pollUntil(() => executor.query<{ blocks: string; files: string; reactions: string }>(
+      `SELECT JSONExtractRaw(toJSONString(raw), 'data', 'blocks') AS blocks, JSONExtractRaw(toJSONString(raw), 'data', 'files') AS files, JSONExtractRaw(toJSONString(raw), 'data', 'reactions') AS reactions FROM ${table('messages')} FINAL WHERE id = '${JSON.stringify(['slack.primary', 'messages', 'T1', 'C1', parentMessage.ts])}'`, readSettings,
+    ), (rows) => rows.length === 1)
     expect(JSON.parse(nested[0]?.blocks ?? 'null')).toEqual(parentMessage.blocks)
     expect(JSON.parse(nested[0]?.files ?? 'null')).toEqual(parentMessage.files)
     expect(JSON.parse(nested[0]?.reactions ?? 'null')).toEqual(parentMessage.reactions)
     const rawUsers = await pollUntil(
       () => executor.query<{ id: string; value: string }>(
-        `SELECT id, JSONExtractString(toJSONString(raw), 'data', 'profile', 'fields', 'custom_field', 'value') AS value FROM ${table('users')} FINAL ORDER BY id`,
+        `SELECT id, JSONExtractString(toJSONString(raw), 'data', 'profile', 'fields', 'custom_field', 'value') AS value FROM ${table('users')} FINAL ORDER BY id`, readSettings,
       ),
       (rows) => rows.find((row) => row.id.includes(user.id))?.value === 'retained',
     )
     expect(rawUsers.find((row) => row.id.includes(user.id))?.value).toBe('retained')
     const rawChannels = await pollUntil(
       () => executor.query<{ name: string }>(
-        `SELECT JSONExtractString(toJSONString(raw), 'data', 'name') AS name FROM ${table('channels')} FINAL`,
+        `SELECT JSONExtractString(toJSONString(raw), 'data', 'name') AS name FROM ${table('channels')} FINAL`, readSettings,
       ),
       (rows) => rows.length === 1 && rows[0]?.name === channel.name,
     )
     expect(rawChannels).toEqual([{ name: channel.name }])
-    const preserved = await executor.query<{ id: string }>(`SELECT id FROM ${existingTable}`)
+    const preserved = await pollUntil(() => executor.query<{ id: string }>(`SELECT id FROM ${existingTable}`, readSettings), (rows) => rows.length === 1)
     expect(Number(preserved[0]?.id)).toBe(7)
 
     const pipelinePath = join(project, 'src/integrations/slack/pipeline.ts')
