@@ -8,6 +8,8 @@ import type { ClickHouseExecutor } from '@chkit/clickhouse'
 import { loadDefinitionModules, loadSchemaDefinitions } from '@chkit/core/schema-loader'
 
 import { rawTable } from './destination.js'
+import { HttpError } from './errors.js'
+import { runAttempt } from './retry.js'
 import { timestampWindow } from './incremental.js'
 import { checkGraph, createIngestPlugin, formatStreamErrors } from './plugin.js'
 import { collectPipelines, definePipeline, defineStream, selectStreams } from './registry.js'
@@ -288,4 +290,66 @@ describe('exported pipeline discovery', () => {
       expect(output[0]).toMatchObject({ ok: false, command: command.name, error: expect.stringContaining('pageSize must be at most 100') })
     }
   })
+})
+
+describe('execution retry options', () => {
+  test('preserves factory defaults, registration precedence, and omitted runtime defaults', () => {
+    const plugin = createIngestPlugin({ retry: { retries: 2, minTimeout: 0, randomize: false } })
+    expect(plugin.optionsSchema.safeParse({})).toMatchObject({ success: true, data: { retry: { retries: 2, minTimeout: 0, randomize: false } } })
+    expect(plugin.optionsSchema.safeParse({ retry: { retries: 0 } })).toMatchObject({ success: true, data: { retry: { retries: 0 } } })
+    const defaults = createIngestPlugin().optionsSchema.safeParse({})
+    expect(defaults.success).toBe(true)
+    if (!defaults.success) throw new Error('Expected valid defaults')
+    expect(defaults.data.retry).toBeUndefined()
+    expect(plugin.optionsSchema.safeParse({ retry: {} })).toMatchObject({ success: true, data: { retry: {} } })
+  })
+
+  test('validates the supported fields and rejects hooks and invalid values', () => {
+    const schema = createIngestPlugin().optionsSchema
+    expect(schema.safeParse({ retry: { retries: 0, minTimeout: 0, maxTimeout: 0, maxRetryTime: 0, randomize: false } }).success).toBe(true)
+    for (const retries of [-1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '2', null]) {
+      expect(schema.safeParse({ retry: { retries } }).success).toBe(false)
+    }
+    for (const field of ['minTimeout', 'maxTimeout', 'maxRetryTime']) {
+      for (const value of [-1, NaN, Infinity, '1000', null]) {
+        expect(schema.safeParse({ retry: { [field]: value } }).success).toBe(false)
+      }
+    }
+    for (const field of ['minTimeout', 'maxTimeout']) {
+      expect(schema.safeParse({ retry: { [field]: 2147483648 } }).success).toBe(false)
+    }
+    for (const retry of [null, 2, { randomize: 'false' }, { classifyError: () => 'transient' }, { factor: 2 }]) {
+      expect(schema.safeParse({ retry }).success).toBe(false)
+    }
+  })
+})
+
+test('run rejects invalid retry flags before loading a graph or opening a connection', async () => {
+  const plugin = createIngestPlugin()
+  const options = plugin.optionsSchema.safeParse({})
+  if (!options.success) throw new Error('Expected valid defaults')
+  const run = plugin.commands[0]
+  for (const raw of ['-1', '1.5', 'NaN', 'Infinity', '9007199254740992', '', ' ', '1e2', '0x10', true, []]) {
+    const output: unknown[] = []
+    const code = await run.run({
+      args: [], flags: { '--retries': raw }, jsonMode: true, options: options.data,
+      config: resolveConfig({ schema: [] }), configPath: '/unused/config.ts',
+      print: (value) => { output.push(value) },
+    })
+    expect(code).toBe(2)
+    expect(output).toEqual([{ command: 'run', ok: false, error: expect.stringContaining('Invalid value for --retries') }])
+  }
+})
+
+
+test('zero retries also disables provider-directed retries', async () => {
+  const error = await HttpError.fromResponse(new Response('', { status: 429, headers: { 'retry-after': '1' } }))
+  let attempts = 0
+  let scheduled = 0
+  await expect(runAttempt(async () => { attempts += 1; throw error }, { retries: 0 }, {
+    signal: new AbortController().signal,
+    onRetry: () => { scheduled += 1 },
+  })).rejects.toBe(error)
+  expect(attempts).toBe(1)
+  expect(scheduled).toBe(0)
 })
