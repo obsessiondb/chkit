@@ -44,6 +44,7 @@ from typing import Literal, TypeVar
 
 from chkit import __version__
 from chkit.cli.commands.migrate_errors import MigrateError, in_progress_checksum_mismatch_error
+from chkit.cli.commands.migrate_lock import async_without_lock_accepted, migrate_lock_disabled
 from chkit.cli.commands.migrate_query_intents import QueryContext, QueryTracker
 from chkit.cli.commands.migrate_recovery import (
     assert_completed_statement,
@@ -570,6 +571,20 @@ def _start_and_poll(
 def _assert_lock_held(input_: AsyncApplyInput) -> None:
     """Two runs without the lock could both submit the statement, each under an
     id of its own (#767). The run stops before it; the next one takes the lock."""
+    # A run with the lock turned off holds none either, unless the user
+    # accepts the risk (#810).
+    if migrate_lock_disabled() and not async_without_lock_accepted():
+        msg = (
+            f"Async migration step {input_.operation_type} (statement "
+            f"{input_.statement_index + 1} of {input_.migration_name}) was not submitted: "
+            "CHKIT_MIGRATE_LOCK is off, so this run holds no migrate lock, and two runs "
+            "without the lock could both submit it. The statements before it are "
+            "recorded. Unset CHKIT_MIGRATE_LOCK and run chkit migrate --apply again to "
+            "submit it under the lock. When the lock cannot work on this target "
+            "(migrate_lock_unverifiable) and no other migrate runs against it, set "
+            "CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK=1 to submit it without the lock."
+        )
+        raise MigrateError("async_needs_lock", msg)
     if not input_.lockless_bootstrap:
         return
     msg = (
