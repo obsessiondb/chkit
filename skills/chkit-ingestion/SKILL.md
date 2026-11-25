@@ -1,6 +1,6 @@
 ---
 name: chkit-ingestion
-description: Author or improve API ingestion sources and registry integrations with @chkit/plugin-ingest. Use for provider-specific sync, pagination, durable checkpoints, recovery, raw destinations, and loader choices; excludes generated insert helpers from plugin-codegen.
+description: Author or improve API ingestion sources and registry integrations with @chkit/plugin-sync. Use for provider-specific sync, pagination, durable checkpoints, recovery, raw destinations, and loader choices; excludes generated insert helpers from plugin-codegen.
 ---
 
 # chkit ingestion authoring
@@ -37,7 +37,7 @@ Readers need no special error types and no injected dependencies.
 - Do not pace requests with fixed waits. A pipeline's requests share one queue: a rate-limited response with `Retry-After` pauses all of them, and that retry does not count against the retry limit. In the client, map every other provider rate-limit signal to `HttpError.withStatus(response, 429, { retryAfterMs })`: a rate limit reported as 403 or in a successful body, or a wait in a provider reset header. Map it inside the request's attempt: a `paginate` page, or `context.attempt` around the request.
 - Retries need no configuration, and definitions take no retry settings. In tests, pass `retry` (for example `{ retries: 1, minTimeout: 0 }`) to `runIngestion` or `createSourceContext`.
 - Validate provider payloads with `z.looseObject` so raw rows keep every field; use strict schemas for checkpoints. Keep credentials out of checkpoint scopes and anything else that is stored.
-- Test through `runIngestion` with a fixture `fetch` and a config that carries a fixture credential; use `createSourceContext` or `createReadContext` from `@chkit/plugin-ingest/testing` to call a client or reader directly: a 503 retries once; a malformed payload or invalid checkpoint fails without `retry_scheduled` events; a missing credential fails before any request.
+- Test through `runIngestion` with a fixture `fetch` and a config that carries a fixture credential; use `createSourceContext` or `createReadContext` from `@chkit/plugin-sync/testing` to call a client or reader directly: a 503 retries once; a malformed payload or invalid checkpoint fails without `retry_scheduled` events; a missing credential fails before any request.
 
 ## Registry quality bar
 
@@ -90,4 +90,4 @@ Keep one draft version artifact per integration per unmerged PR. Releases alread
 
 Registry template-only updates must not add package changesets or bump `chkit`; use the independent template release above. Shared runtime, CLI, plugin, and library behavior changes still need package changesets. Mixed PRs release each affected surface separately; registry files never exempt package changes.
 
-Deliver definitions, config, and run/query commands. Inspect exports with `chkit ingest list`; generate and review migrations, then use `chkit check` against the configured development target after applying them. `check` has no `--offline` flag. Test checkpoint behavior through `runIngestion` and memory adapters, not just reader iteration; use the applicable recovery cases in the stable-sync reference for registry sources. Keep live writes within authorization. Report verified behavior and limitations.
+Deliver definitions, config, and run/query commands. Inspect exports with `chkit sync list`; generate and review migrations, then use `chkit check` against the configured development target after applying them. `check` has no `--offline` flag. Test checkpoint behavior through `runIngestion` and memory adapters, not just reader iteration; use the applicable recovery cases in the stable-sync reference for registry sources. Keep live writes within authorization. Report verified behavior and limitations.

@@ -270,9 +270,13 @@ def test_parse_submit_input_lets_flags_override_the_backfill_plugin_options() ->
 
 
 class _UnusedExecutor:
-    """Stand-in remote executor; the faked planner never queries it."""
+    """Stand-in remote executor; the faked planner never queries it. It answers
+    only the insert settings checks a submit runs: the server lists no aliases,
+    and accepts the settings."""
 
     def query(self, sql: str, settings: Any = None) -> Any:
+        if "FROM system.settings" in sql or sql.startswith("SELECT 1 SETTINGS "):
+            return SimpleNamespace(rows=[])
         msg = "remote executor must not be queried when the planner is faked"
         raise AssertionError(msg)
 
@@ -622,6 +626,11 @@ def _patch_jobs_api(
         raise AssertionError(msg)
 
     monkeypatch.setattr(backfill_resubmit_module, "jobs_get", fake_jobs_get)
+    monkeypatch.setattr(
+        backfill_submit_module,
+        "create_remote_executor",
+        lambda _creds, *, service_slug: _UnusedExecutor(),
+    )
     monkeypatch.setattr(backfill_submit_module, "jobs_submit", fake_jobs_submit)
     monkeypatch.setattr(backfill_submit_module, "build_backfill_plan", no_planning)
     return calls

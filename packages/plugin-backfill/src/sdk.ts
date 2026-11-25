@@ -7,14 +7,14 @@ export {
   encodeChunkPlanForPersistence,
 } from './chunking/boundary-codec.js'
 export { generateChunkPlan } from './chunking/planner.js'
-export { buildBackfillPlan } from './planner.js'
+export { assertPinnedInsertSettingsAccepted, buildBackfillPlan, readPinnedSettingAliases } from './planner.js'
 export {
   confirmBackfillSubmission,
   listRemoteSubmissions,
   readPlanSubmission,
   recordBackfillSubmission,
 } from './state.js'
-export { PlanSchema, SubmitSchema, parseByteSize } from './options.js'
+export { insertSettingsFromOptions, PlanSchema, SubmitSchema, parseByteSize } from './options.js'
 export {
   CHKIT_BACKFILL_LOGGER_CATEGORY,
   CHKIT_LOGGER_CATEGORY,
@@ -22,8 +22,12 @@ export {
 } from './logging.js'
 export {
   buildChunkExecutionSql,
+  assertInsertSettingsKeepPinned,
   buildWhereClauseFromChunk,
+  deliveryOverrideWarning,
+  effectiveInsertSettings,
   injectSortKeyFilter,
+  type InsertSettings,
   PINNED_INSERT_SETTINGS,
   rewriteSelectColumns,
 } from './chunking/sql.js'

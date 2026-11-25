@@ -1,5 +1,0 @@
----
-"chkit": patch
----
-
-`generate` counts a lambda parameter named like a column when it orders the `MODIFY COLUMN` statements around a default cycle, so `migrate` no longer fails with `Cyclic alias detected` on such a change.

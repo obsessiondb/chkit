@@ -52,6 +52,54 @@ function toApiSettings(
 	return Object.keys(out).length > 0 ? out : undefined
 }
 
+// A write is stored when it returns: no asynchronous INSERT, and one that a
+// table's own async_insert setting still makes asynchronous waits for its flush
+// (#804), as a direct connection sends (#790).
+const DURABLE_INSERT_SETTINGS = { async_insert: 0, wait_for_async_insert: 1 } as const
+
+interface SettingRow {
+	name: string
+	value: string
+	readonly: string
+}
+
+const SETTING_ROWS_SQL =
+	"SELECT name, value, toString(readonly) AS readonly FROM system.settings WHERE name IN ('readonly', 'async_insert', 'wait_for_async_insert')"
+
+/**
+ * The durable-insert settings the user's profile lets a write send. A setting
+ * the user cannot change (a constraint) is left out when it already has that
+ * value, as ClickHouse rejects any change of it, also on DDL. Fixed at another
+ * value, the write is refused. A readonly = 1 user gets the server's own error,
+ * which refuses its writes. chkit-py: `_durable_insert_settings`.
+ */
+function durableInsertSettings(rows: readonly SettingRow[]): ClickHouseSettings {
+	const byName = new Map(rows.map((row) => [row.name, row]))
+	if (byName.get('readonly')?.value === '1') return {}
+	const out: ClickHouseSettings = {}
+	for (const [name, value] of Object.entries(DURABLE_INSERT_SETTINGS)) {
+		const row = byName.get(name)
+		if (!row) continue
+		if (row.readonly === '0') out[name] = value
+		else if (row.value !== String(value)) {
+			throw new Error(
+				`Setting ${name} is fixed at ${row.value} for this ClickHouse user, and chkit writes need ${name} = ${value} to be stored when they return.`,
+			)
+		}
+	}
+	return out
+}
+
+/** `promise`, or the signal's reason once it aborts; the promise itself runs on. */
+function untilAborted<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+	if (!signal) return promise
+	return new Promise<T>((resolve, reject) => {
+		const onAbort = () => reject(signal.reason)
+		signal.addEventListener('abort', onAbort, { once: true })
+		promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
+	})
+}
+
 export function normalizeQueryData<T>(
 	res: Awaited<ReturnType<ApiClient['workbench']['query']['execute']>>,
 ): T[] {
@@ -115,13 +163,32 @@ export function createRemoteExecutor(deps: {
 	const { credentials, serviceSlug } = deps
 	const client = createApiClient(credentials)
 
+	// The service user's durable-insert settings, looked up once per executor.
+	// A failed lookup is not cached.
+	let settingRows: Promise<SettingRow[]> | undefined
+	function settingRowsOnce(): Promise<SettingRow[]> {
+		settingRows ??= executor.query<SettingRow>(SETTING_ROWS_SQL).catch((error: unknown) => {
+			settingRows = undefined
+			throw error
+		})
+		return settingRows
+	}
+
+	// Sent with writes (command, insert, submit) under the caller's settings, as
+	// a direct connection sends.
+	async function writeSettings(settings?: ClickHouseSettings): Promise<ClickHouseSettings> {
+		return { ...durableInsertSettings(await settingRowsOnce()), ...settings }
+	}
+
 	const executor: ClickHouseExecutor = {
 		queryControlCluster: 'default',
 		async commandTracked(sql, check, beforeAttempt, settings?) {
+			// Looked up first: no request may come between the last check and the send.
+			const sent = await writeSettings(settings)
 			check()
 			const queryId = await beforeAttempt()
 			check()
-			const apiSettings = toApiSettings(settings) ?? {}
+			const apiSettings = toApiSettings(sent) ?? {}
 			delete apiSettings.query_id
 			const res = await client.workbench.query.execute({
 				serviceSlug,
@@ -165,7 +232,7 @@ export function createRemoteExecutor(deps: {
 		},
 
 		async command(sql, settings?) {
-			const apiSettings = toApiSettings(settings)
+			const apiSettings = toApiSettings(await writeSettings(settings))
 			const res = await client.workbench.query.execute({
 				serviceSlug,
 				query: sql,
@@ -203,7 +270,7 @@ export function createRemoteExecutor(deps: {
 			if (!query) return
 			// Per-insert settings such as insert_deduplication_token must reach
 			// ClickHouse, so this cannot go through command(), which sends none.
-			const apiSettings = toApiSettings(params.settings)
+			const apiSettings = toApiSettings(await writeSettings(params.settings))
 			const res = await client.workbench.query.execute({
 				serviceSlug,
 				query,
@@ -214,9 +281,12 @@ export function createRemoteExecutor(deps: {
 
 		async submit(sql, queryId?, settings?, options?) {
 			// Never start a request after the caller gave up on it (#767): the
-			// signal also aborts the fetch while it connects.
+			// signal also aborts the fetch while it connects. The settings are
+			// resolved first, so no request comes between the last check and the
+			// send, and a stalled lookup doesn't hold up the caller's abort.
 			options?.signal?.throwIfAborted()
-			const apiSettings = toApiSettings(settings)
+			const apiSettings = toApiSettings(await untilAborted(writeSettings(settings), options?.signal))
+			options?.signal?.throwIfAborted()
 			const res = await client.workbench.query.execute(
 				{
 					serviceSlug,

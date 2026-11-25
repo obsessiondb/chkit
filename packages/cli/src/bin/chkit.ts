@@ -8,7 +8,7 @@ import { querySql } from '../commands/query.js'
 import { cmdSkills } from '../commands/skills.js'
 import { getInternalPlugins } from '../internal-plugins/index.js'
 import { normalizeGlobalArgs } from '../runtime/argv.js'
-import { forwardedPluginName, parseCommandArgs, parseInitFlags, runResolvedCommand } from '../runtime/command-dispatch.js'
+import { findForwardedPlugin, forwardedPluginName, parseCommandArgs, parseInitFlags, runResolvedCommand } from '../runtime/command-dispatch.js'
 import { createCommandRegistry } from '../runtime/command-registry.js'
 import { ConfigNotFoundError, type LoadedConfig, loadConfig, profileFallbackPlugins } from '../runtime/config.js'
 import { debug } from '../runtime/debug.js'
@@ -29,9 +29,10 @@ import { CLI_VERSION } from '../runtime/version.js'
 
 const WELL_KNOWN_PLUGIN_COMMANDS: Record<string, string> = {
   codegen: 'Codegen',
-  ingest: 'Ingest',
+  ingest: 'Sync',
   obsessiondb: 'ObsessionDB',
   pull: 'Pull',
+  sync: 'Sync',
 }
 
 /**
@@ -425,6 +426,12 @@ async function run(): Promise<void> {
   })
 
   const resolved = registry.get(commandName)
+  const forwarded = commandName === 'plugin' ? forwardedPluginName(argv.slice(1)) : undefined
+  if (commandName === 'ingest' && resolved?.name === 'sync') {
+    console.error('Deprecated: chkit ingest is now chkit sync.')
+  } else if (forwarded === 'ingest' && findForwardedPlugin(pluginRuntime.plugins, 'sync')?.plugin.manifest.name === 'ingest') {
+    console.error('Deprecated: chkit plugin ingest is now chkit plugin sync.')
+  }
   // `chkit obsessiondb` reads its command name as `chkit plugin obsessiondb`
   // does, as in chkit-py (#771, #776).
   const forwardsCommandName = commandName === 'obsessiondb'

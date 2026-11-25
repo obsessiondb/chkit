@@ -2,4 +2,4 @@
 "@chkit/plugin-backfill": patch
 ---
 
-`chkit plugin backfill resume` no longer submits a chunk again unless the server shows its last attempt failed before it wrote a row: when the outcome is unknown (no row in `system.query_log`, a failure after written rows, lost contact while polling, a replica the user may not read, or a checkpoint from an older release), it stops and names the chunk and its query id, and the new `--accept-unknown` flag replays those chunks.
+`backfill run`, `resume` and `cancel` lock the plan to prevent duplicate submissions, while resume tracks each replay separately and retries only attempts proven to have failed before writing rows; uncertain outcomes stop with the query ID and require `--accept-unknown` to replay. Chunk inserts disable parallel replica and distributed INSERT SELECT execution and require full query logging to prevent replaying partially written data, including on older ClickHouse versions.
