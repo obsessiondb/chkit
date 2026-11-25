@@ -20,7 +20,7 @@ const READ_SETTINGS: ClickHouseSettings = { ...FRAMED, select_sequential_consist
 const REPLICATED_ENGINE = "ReplicatedMergeTree('/clickhouse/tables/{uuid}/chkit_ingestion_journal', '{shard}_{replica}')"
 const REPLICA_CHECKS = 20
 const REPLICA_CHECK_INTERVAL_MS = 500
-const NO_CONVERSION = 'chkit does not convert an existing journal. Stop ingestion, copy the rows of every replica\'s journal into a new ReplicatedMergeTree table created ON CLUSTER, and set ingest({ journalTable }) to it.'
+const NO_CONVERSION = 'chkit does not convert an existing journal. Stop ingestion, copy the rows of every replica\'s journal into a new ReplicatedMergeTree table created ON CLUSTER, and set sync({ journalTable }) to it.'
 
 export interface ClickHouseJournalOptions {
   /** Must allow concurrent queries: use a stateless executor, not a session-bound one. */

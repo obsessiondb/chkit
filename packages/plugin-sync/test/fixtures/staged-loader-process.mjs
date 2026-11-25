@@ -5,7 +5,7 @@ import { table } from '@chkit/core'
 import {
   createClickHouseDestination, createClickHouseJournal, createStagedLoaderExecutor, cursorState, definePipeline, defineStream,
   ingestionColumns, runIngestion, selectStreams, stagedLoader,
-} from '@chkit/plugin-ingest'
+} from '@chkit/plugin-sync'
 
 const lines = createInterface({ input: process.stdin })[Symbol.asyncIterator]()
 const first = await lines.next()

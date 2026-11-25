@@ -1,4 +1,4 @@
-import { rawRows, rawTable, type ReadContext } from '@chkit/plugin-ingest'
+import { rawRows, rawTable, type ReadContext } from '@chkit/plugin-sync'
 
 import { createLinearClient } from '../client.js'
 import type { LinearConfig } from '../config.js'

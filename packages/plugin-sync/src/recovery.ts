@@ -88,7 +88,7 @@ export async function repairJournal(
   const validated = validateJournalHistory(source.selected, namespaceId)
   const plan = sourcePlan(source, validated, namespaceId, table, options.targetId)
   if (fingerprint === undefined) return { applied: false, activated: false, plan }
-  if (fingerprint !== plan.fingerprint) throw new Error('Journal changed since review. Stop all writers, run ingest repair again, and review the new fingerprint.')
+  if (fingerprint !== plan.fingerprint) throw new Error('Journal changed since review. Stop all writers, run chkit sync repair again, and review the new fingerprint.')
   if (!plan.repairable) throw new Error(plan.problems.join(' '))
   if (plan.healthy) return { applied: false, activated: false, plan }
 
@@ -101,7 +101,7 @@ export async function repairJournal(
     ...plan,
     archiveTable,
     replacementTable,
-    activation: `Keep all ingestion writers stopped. Configure ingest({ journalTable: '${replacementTable}' }), then restart them. The active journal has not been changed.`,
+    activation: `Keep all ingestion writers stopped. Configure sync({ journalTable: '${replacementTable}' }), then restart them. The active journal has not been changed.`,
   }
   const assertSourceUnchanged = async () => {
     if (await tableDigest(table, options) !== source.digest) {
@@ -194,7 +194,7 @@ function sourcePlan(
     checkpoint: validated.checkpoint,
     archiveTable: `${sourceTable}_archive_${suffix}`,
     replacementTable,
-    activation: `Stop all ingestion writers, materialize the reviewed repair, then configure ingest({ journalTable: '${replacementTable}' }) before restarting them.`,
+    activation: `Stop all ingestion writers, materialize the reviewed repair, then configure sync({ journalTable: '${replacementTable}' }) before restarting them.`,
     replayWarning: 'The next run resumes from the selected valid checkpoint. Uncertain destination writes may be loaded again (at least once).',
   }
 }

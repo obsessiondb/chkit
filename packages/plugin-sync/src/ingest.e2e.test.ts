@@ -11,7 +11,7 @@ import { createClickHouseJournal } from './journal.js'
 import { definePipeline, defineStream, selectStreams } from './registry.js'
 import type { DestinationAdapter } from './types.js'
 
-describe('@chkit/plugin-ingest live env e2e', () => {
+describe('@chkit/plugin-sync live env e2e', () => {
   const liveEnv = getLiveEnv()
   const prefix = createPrefix('ingest')
   const database = liveEnv.clickhouseDatabase
