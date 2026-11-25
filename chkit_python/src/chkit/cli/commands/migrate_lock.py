@@ -433,6 +433,8 @@ class MigrateLock:
         self._beat = 0
         self._deps = deps
         self._log = log
+        # Set when release() could not write the release.
+        self.release_failed = False
         self._lost: str | None = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="chkit-migrate-lock", daemon=True)
@@ -561,6 +563,7 @@ class MigrateLock:
                 released=True,
             )
         except Exception as error:
+            self.release_failed = True
             self._log(
                 f"⚠ Could not release the migrate lock ({error}); other runs can take it "
                 f"{_seconds(self._deps.timings.lease_ms)}s after this run's last heartbeat."
