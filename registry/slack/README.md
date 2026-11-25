@@ -1,6 +1,6 @@
 # Slack raw ingestion
 
-This is editable source code: change the readers, schemas, and `pipeline.ts` directly. It uses the [chkit CLI](https://www.npmjs.com/package/chkit), `@chkit/core`, and `@chkit/plugin-ingest`; subsequent runs execute the installed code without contacting the registry.
+This is editable source code: change the readers, schemas, and `pipeline.ts` directly. It uses the [chkit CLI](https://www.npmjs.com/package/chkit), `@chkit/core`, and `@chkit/plugin-sync`; subsequent runs execute the installed code without contacting the registry.
 
 ## First run
 
@@ -19,11 +19,11 @@ Bun loads a project `.env`. A scheduler or other runtime must explicitly supply 
 
 ```sh
 bunx chkit check
-bunx chkit ingest list --tag provider:slack
+bunx chkit sync list --tag provider:slack
 bunx chkit generate --name add-slack
 # Review the generated SQL.
 bunx chkit migrate --apply
-bunx chkit ingest run --tag provider:slack
+bunx chkit sync run --tag provider:slack
 ```
 
 Use an external scheduler to repeat ingestion, with one ingestion process per project and destination at a time.
@@ -74,7 +74,7 @@ History and thread reads can take hours or days at conservative defaults. Restri
 To read only messages:
 
 ```sh
-bunx chkit ingest run --tag provider:slack --tag resource:messages --max-duration 86400
+bunx chkit sync run --tag provider:slack --tag resource:messages --max-duration 86400
 ```
 
 ## Incremental messages and recovery
@@ -116,6 +116,6 @@ For a custom install path, point the command at its `tests/slack.test.ts`. Tests
 
 ## Smoke check
 
-After a migration and successful run, inspect `chkit ingest status --tag provider:slack` and query `SELECT count() FROM default.slack_messages_raw FINAL`. Compare a known message and an older thread with their stored payloads. Add a reply to that old thread, then run a messages-only backfill with a new ID and `--from` before the root's timestamp to verify the reply is collected. Normal incremental runs revisit roots within the selected overlap; an old root outside that range requires an explicit backfill. Row counts alone do not establish complete live API coverage.
+After a migration and successful run, inspect `chkit sync status --tag provider:slack` and query `SELECT count() FROM default.slack_messages_raw FINAL`. Compare a known message and an older thread with their stored payloads. Add a reply to that old thread, then run a messages-only backfill with a new ID and `--from` before the root's timestamp to verify the reply is collected. Normal incremental runs revisit roots within the selected overlap; an old root outside that range requires an explicit backfill. Row counts alone do not establish complete live API coverage.
 
 The [Slack integration guide](https://chkit.obsessiondb.com/integrations/slack/) covers installation, SQL queries, scheduling, and recovery.

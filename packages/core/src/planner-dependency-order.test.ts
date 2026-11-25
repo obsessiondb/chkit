@@ -578,6 +578,13 @@ describe('orderByDependencies', () => {
   test('ignores prerequisites that are not in the list', () => {
     expect(orderByDependencies(['a', 'b'], (x) => x, () => ['zzz'])).toEqual(['a', 'b'])
   })
+
+  test('keeps a 50,000-item dependency cycle in input order without overflowing the stack', () => {
+    // Item i needs i+1 and the last item needs 0: the search walks all 50,000 before it returns.
+    const n = 50_000
+    const items = Array.from({ length: n }, (_, i) => i)
+    expect(orderByDependencies(items, String, (key) => [String((Number(key) + 1) % n)])).toEqual(items)
+  })
 })
 
 describe('planDiff orders ADD COLUMNs by the columns their expressions read (#681)', () => {
@@ -760,6 +767,18 @@ describe('planDiff orders the column statements of a table by the columns they r
     ).toEqual(['ALTER TABLE app.t DROP COLUMN IF EXISTS `b`;', 'ALTER TABLE app.t DROP COLUMN IF EXISTS `a`;'])
   })
 
+  test('drops a 3,000-column ALIAS chain from the last column to the first', () => {
+    const n = 3000
+    const columns: ColumnDefinition[] = Array.from({ length: n }, (_, i) =>
+      i === 0
+        ? { name: 'c0', type: 'UInt64' }
+        : { name: `c${i}`, type: 'UInt64', defaultKind: 'ALIAS', default: { expression: `c${i - 1} + 1` } }
+    )
+    expect(sqls([t(columns)], [t([])])).toEqual(
+      Array.from({ length: n }, (_, i) => `ALTER TABLE app.t DROP COLUMN IF EXISTS \`c${n - 1 - i}\`;`)
+    )
+  })
+
   test('drops a dotted column after the MODIFY of the column whose old expression reads it unquoted', () => {
     expect(
       sqls(
@@ -812,6 +831,81 @@ describe('planDiff orders the column statements of a table by the columns they r
       'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT arraySum(arrayMap(c -> c, [1]));',
       'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT a;',
       'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `c` UInt64 DEFAULT id;',
+    ])
+  })
+
+  // ALTER's check for cyclic defaults counts a lambda parameter named like a
+  // column as a read of it, so MODIFY `a` DEFAULT b first met the old `b`
+  // DEFAULT that declares `a`: Cyclic alias detected (#799).
+  test.each([
+    'arraySum(arrayMap(a -> 1, [1]))',
+    'arraySum(arrayMap((x, a) -> x, [1], [2]))',
+    'arraySum(arrayMap(lambda(tuple(a), 1), [1]))',
+  ])('an old lambda parameter named like a column holds back the MODIFY that reads back: %s', (expression) => {
+    expect(
+      sqls(
+        [t([{ name: 'a', type: 'UInt64' }, { name: 'b', type: 'UInt64', default: { expression } }])],
+        [t([{ name: 'a', type: 'UInt64', default: { expression: 'b' } }, { name: 'b', type: 'UInt64' }])]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `b` REMOVE DEFAULT;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64;',
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;',
+    ])
+  })
+
+  test('a new lambda parameter named like a column waits for the release of its old read back (#799)', () => {
+    expect(
+      sqls(
+        [t([{ name: 'a', type: 'UInt64' }, { name: 'b', type: 'UInt64', default: { expression: 'a' } }])],
+        [
+          t([
+            { name: 'a', type: 'UInt64', default: { expression: 'arraySum(arrayMap(b -> 1, [1]))' } },
+            { name: 'b', type: 'UInt64' },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `b` REMOVE DEFAULT;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64;',
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT arraySum(arrayMap(b -> 1, [1]));',
+    ])
+  })
+
+  test('a lambda parameter use reads the dotted column it names (#799)', () => {
+    expect(
+      sqls(
+        [
+          t([
+            { name: 'w.z', type: 'UInt64' },
+            { name: 'b', type: 'UInt64', default: { expression: 'arraySum(arrayMap(w -> w.z, [tuple(1)::Tuple(z UInt64)]))' } },
+          ]),
+        ],
+        [t([{ name: 'w.z', type: 'UInt64', default: { expression: 'b' } }, { name: 'b', type: 'UInt64' }])]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `b` REMOVE DEFAULT;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64;',
+      'ALTER TABLE app.t MODIFY COLUMN `w.z` UInt64 DEFAULT b;',
+    ])
+  })
+
+  // ALTER's cycle check reads `w.a` as the column `w.a` or `w`, never `a`, so
+  // the new `b` no longer reads `a` and its MODIFY releases the cycle (#799).
+  test('a lambda parameter use does not read the column named by its last part (#799)', () => {
+    expect(
+      sqls(
+        [t([{ name: 'a', type: 'UInt64' }, { name: 'b', type: 'UInt64', default: { expression: 'a' } }])],
+        [
+          t([
+            { name: 'a', type: 'UInt64', default: { expression: 'b' } },
+            { name: 'b', type: 'UInt64', default: { expression: 'arraySum(arrayMap(w -> w.a, [tuple(1)::Tuple(a UInt64)]))' } },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT arraySum(arrayMap(w -> w.a, [tuple(1)::Tuple(a UInt64)]));',
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;',
     ])
   })
 

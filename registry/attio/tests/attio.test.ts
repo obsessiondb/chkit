@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
-import { HttpError, runIngestion, selectStreams, type PipelineDefinition } from '@chkit/plugin-ingest'
-import { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-ingest/testing'
+import { HttpError, runIngestion, selectStreams, type PipelineDefinition } from '@chkit/plugin-sync'
+import { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-sync/testing'
 
 import type { AttioReaderConfig } from '../config.js'
 import * as definitions from '../index.js'

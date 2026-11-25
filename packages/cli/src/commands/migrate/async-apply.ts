@@ -588,7 +588,9 @@ function acceptChangedChecksum(
 // only system.processes is read: the check needs no outcome, and a fresh server
 // has no system.query_log until its first log flush. With one, the check also
 // reads the attempt's outcome from system.query_log (#672), and fails like an
-// unreadable replica when query_log cannot be read.
+// unreadable replica when query_log cannot be read. A failed outcome lookup
+// leaves the attempt's outcome unknown, so it stops with async_outcome_unknown
+// (#782).
 async function checkInFlight(
   db: ClickHouseExecutor,
   queryId: string,
@@ -604,15 +606,16 @@ async function checkInFlight(
     )
   } catch (error) {
     if (attemptLowerBound !== undefined && QUERY_LOG_ACCESS_DENIED.test(describeError(error))) {
-      throw new Error(
+      throw new MigrateError(
+        'async_outcome_unknown',
         `Async migration step ${operationType} (query_id ${queryId}): the ClickHouse user cannot read system.query_log, which tells whether the previous attempt finished (${describeError(error)}). Nothing was resubmitted and no before-retry SQL ran. Grant SELECT ON system.query_log to the user; until then a re-run of \`chkit migrate --apply\` stops here too.`,
         { cause: error },
       )
     }
-    throw new Error(
-      `Async migration step ${operationType} (query_id ${queryId}): could not check whether a previous attempt is still running (${describeError(error)}). Nothing was resubmitted and no before-retry SQL ran — re-run \`chkit migrate --apply\`.`,
-      { cause: error },
-    )
+    const message = `Async migration step ${operationType} (query_id ${queryId}): could not check whether a previous attempt is still running (${describeError(error)}). Nothing was resubmitted and no before-retry SQL ran — re-run \`chkit migrate --apply\`.`
+    throw attemptLowerBound === undefined
+      ? new Error(message, { cause: error })
+      : new MigrateError('async_outcome_unknown', message, { cause: error })
   }
 }
 

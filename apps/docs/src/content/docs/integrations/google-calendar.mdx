@@ -16,8 +16,8 @@ bunx chkit add google-calendar --with-tests
 bunx chkit check
 bunx chkit generate --name add_google_calendar
 bunx chkit migrate --apply
-bunx chkit ingest run --tag provider:google-calendar
-bunx chkit ingest status --tag provider:google-calendar
+bunx chkit sync run --tag provider:google-calendar
+bunx chkit sync status --tag provider:google-calendar
 ```
 
 Set `GOOGLE_CALENDAR_ACCESS_TOKEN` with `calendar.readonly` access before ingestion, or set `accessToken` in `src/integrations/google-calendar/config.ts`. Review installation settings and chunk limits in the same file. `primary` is resolved through calendar metadata to detect a different account reusing the checkpoint. Configuration and the token are checked when a stream runs: schema imports do not need credentials or call Google, and invalid settings or a missing token fail the stream before any request.
@@ -69,5 +69,5 @@ Fixtures cover page resumption, empty deltas, sink failures before token promoti
 ## Related pages
 
 - [App registry](/integrations/)
-- [Ingestion plugin](/plugins/ingest/)
-- [Sync CLI](/cli/ingest/)
+- [Sync plugin](/plugins/sync/)
+- [Sync CLI](/cli/sync/)

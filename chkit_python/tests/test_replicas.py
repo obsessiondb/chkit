@@ -41,7 +41,7 @@ class _ReplicaClient:
     replicas: int = 2
     queries: list[str] = field(default_factory=list[str])
 
-    def query(self, sql: str) -> _Result:
+    def query(self, sql: str, settings: object = None) -> _Result:
         self.queries.append(sql)
         if "system.one" in sql:
             return _Result([{"replicas": self.replicas}])
@@ -64,7 +64,7 @@ def test_reports_the_replicas_of_a_multi_replica_target_once_per_client() -> Non
 
 def test_falls_back_to_the_single_replica_path_when_the_cluster_cannot_be_queried() -> None:
     class _NoCluster:
-        def query(self, sql: str) -> _Result:
+        def query(self, sql: str, settings: object = None) -> _Result:
             msg = "Requested cluster 'default' not found. (CLUSTER_DOESNT_EXIST)"
             raise RuntimeError(msg)
 
@@ -82,7 +82,7 @@ class _Failing:
     def __init__(self, message: str) -> None:
         self.message = message
 
-    def query(self, sql: str) -> _Result:
+    def query(self, sql: str, settings: object = None) -> _Result:
         raise RuntimeError(self.message)
 
 
@@ -103,7 +103,7 @@ def test_probe_replica_access_reports_a_denied_or_missing_cluster_or_no_count_as
     missing = "Requested cluster 'default' not found. (CLUSTER_DOESNT_EXIST)"
 
     class _Empty:
-        def query(self, sql: str) -> _Result:
+        def query(self, sql: str, settings: object = None) -> _Result:
             return _Result([])
 
     assert probe_replica_access(_Failing(denied)) == ReplicaAccess(
@@ -123,7 +123,7 @@ def test_probe_replica_access_reports_a_denied_or_missing_cluster_or_no_count_as
 # and pass for a single-node target.
 def test_probe_replica_access_raises_when_a_replica_does_not_answer() -> None:
     class _OneDown:
-        def query(self, sql: str) -> _Result:
+        def query(self, sql: str, settings: object = None) -> _Result:
             if "skip_unavailable_shards = 0" in sql:
                 msg = "Code: 279. DB::NetException: All connection tries failed. (ALL_CONNECTION_TRIES_FAILED)"
                 raise RuntimeError(msg)
@@ -137,7 +137,7 @@ def test_probe_replica_access_raises_when_a_replica_does_not_answer() -> None:
 class _ColumnReplicaClient(_ReplicaClient):
     """A column wait reads every replica's definition: one row per replica."""
 
-    def query(self, sql: str) -> _Result:
+    def query(self, sql: str, settings: object = None) -> _Result:
         result = super().query(sql)
         if "system.columns" not in sql:
             return result
@@ -163,7 +163,7 @@ def test_waits_until_every_replica_stores_the_same_dictionary_uuid_after_a_passw
     visible = [{"replicas": 2, "agreed": 0}, {"replicas": 2, "agreed": 1}]
 
     class _Catalog:
-        def query(self, sql: str) -> _Result:
+        def query(self, sql: str, settings: object = None) -> _Result:
             queries.append(sql)
             if "system.one" in sql:
                 return _Result([{"replicas": 2}])
@@ -231,7 +231,7 @@ def test_waits_until_every_replica_lists_the_journal_table_before_reading_it() -
     client = _ReplicaClient([1, 2])
     real_query = client.query
 
-    def query(sql: str) -> _Result:
+    def query(sql: str, settings: object = None) -> _Result:
         if sql.startswith("SELECT currentDatabase()"):
             client.queries.append(sql)
             return _Result([{"database": "default"}])

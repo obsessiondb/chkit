@@ -144,6 +144,18 @@ class PluginConfig(BaseModel):
         default=None, alias="insertSettings"
     )
 
+    @field_validator("insert_settings")
+    @classmethod
+    def _finite_insert_settings(
+        cls, value: dict[str, str | int | float | bool] | None
+    ) -> dict[str, str | int | float | bool] | None:
+        # TS zod numbers refuse NaN and infinities; so does chkit-py.
+        for key, item in (value or {}).items():
+            if isinstance(item, float) and not math.isfinite(item):
+                msg = f"insertSettings.{key} must be a finite number"
+                raise ValueError(msg)
+        return value
+
     # TS PluginConfigSchema is non-strict zod: unknown keys are stripped, not
     # rejected ("validated softly at load time").
     model_config = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)

@@ -20,7 +20,7 @@ The [app registry](/integrations/) installs the Attio integration as editable Ty
 
 ## Install the Attio integration
 
-Run these commands in a TypeScript project with a `package.json`. Use a chkit release that includes the registry and ingestion plugin; the examples use the beta release.
+Run these commands in a TypeScript project with a `package.json`. The examples use the chkit beta release with registry and Sync plugin support.
 
 ```sh
 bun add -d chkit@beta
@@ -29,9 +29,9 @@ bunx chkit add attio --dry-run
 bunx chkit add attio
 ```
 
-The installer copies the provider source, installs compatible dependencies, registers the ingestion plugin, and connects the exported schemas and pipeline to the project's config. An existing project's schema definitions and connection settings remain in place. See [installation behavior](/cli/add/) for supported config shapes and conflicts.
+The installer copies the provider source, installs compatible dependencies, registers the Sync plugin, and connects the exported schemas and pipeline to the project's config. An existing project's schema definitions and connection settings remain in place. See [installation behavior](/cli/add/) for supported config shapes and conflicts.
 
-`add` prepares the project. Migrations create the ClickHouse objects, and `ingest run` performs the API calls. The registry is only used to obtain source files; subsequent syncs execute the installed code.
+`add` prepares the project. Migrations create the ClickHouse objects, and `chkit sync run` performs the API calls. The registry is only used to obtain source files; subsequent syncs execute the installed code.
 
 ### Configure the ClickHouse connection
 
@@ -39,11 +39,11 @@ For a new project, the generated `clickhouse.config.ts` has this shape:
 
 ```ts
 import { defineConfig } from '@chkit/core'
-import { ingest } from '@chkit/plugin-ingest'
+import { sync } from '@chkit/plugin-sync'
 
 export default defineConfig({
   entry: './src/integrations/attio/index.ts',
-  plugins: [ingest()],
+  plugins: [sync()],
   clickhouse: {
     url: process.env.CLICKHOUSE_URL ?? 'http://localhost:8123',
     username: process.env.CLICKHOUSE_USER ?? 'default',
@@ -77,7 +77,7 @@ ATTIO_API_TOKEN=replace-with-the-access-token-from-attio
 
 Bun loads the project's `.env`; a scheduler must supply `ATTIO_API_TOKEN` through its own secret or environment configuration, together with the ClickHouse connection variables. The installer writes required names to `.env.example`, which does not load credentials. Keep real tokens out of source control.
 
-The installed `config.ts` passes `ATTIO_API_TOKEN` as `apiToken`; set `apiToken` there to use another token, for example for a second installation. The reader sends the token in an `Authorization: Bearer` header when a request runs. Schema inspection, migration generation, and `ingest list` do not need an Attio token. An existing OAuth access token also works, but this integration does not obtain or refresh OAuth tokens; see [Attio authentication](https://docs.attio.com/rest-api/guides/authentication).
+The installed `config.ts` passes `ATTIO_API_TOKEN` as `apiToken`; set `apiToken` there to use another token, for example for a second installation. The reader sends the token in an `Authorization: Bearer` header when a request runs. Schema inspection, migration generation, and `chkit sync list` do not need an Attio token. An existing OAuth access token also works, but this integration does not obtain or refresh OAuth tokens; see [Attio authentication](https://docs.attio.com/rest-api/guides/authentication).
 
 A token's permissions also determine which data the API returns. A `401` or `403` fails the affected stream with a diagnostic; the reader does not turn a permission error into an empty result.
 
@@ -126,7 +126,7 @@ export const attioConfig: AttioConfig = {
 | `notesPageSize` | Positive integer up to `50`, default `50`, for notes |
 | `apiToken` | Attio access token, default `ATTIO_API_TOKEN` |
 
-Each reader validates the reader settings (all except `database` and `tablePrefix`) with zod when its stream runs. Invalid settings or a missing token fail that stream before any request. Schema imports, `chkit check`, `generate`, `migrate`, and `ingest list` do not validate them.
+Each reader validates the reader settings (all except `database` and `tablePrefix`) with zod when its stream runs. Invalid settings or a missing token fail that stream before any request. Schema imports, `chkit check`, `generate`, `migrate`, and `chkit sync list` do not validate them.
 
 Add `deals` or a custom slug to `objects` to collect that type, and add list slugs or IDs to `lists` to collect their entries. Empty arrays disable the corresponding child streams. The objects and lists catalog streams retain all accessible metadata independently of these selections. An unknown or inaccessible configured slug or ID fails its stream visibly. Notes, tasks, and members remain workspace-wide; their readers need separate changes to narrow their coverage.
 
@@ -138,7 +138,7 @@ Keep `sourceId` stable after ingestion starts. For a second workspace, use a dis
 
 ```sh
 bunx chkit check
-bunx chkit ingest list --tag provider:attio
+bunx chkit sync list --tag provider:attio
 bunx chkit generate --name add-attio
 bunx chkit migrate --json
 ```
@@ -147,7 +147,7 @@ Review the generated SQL, then apply it and run ingestion:
 
 ```sh
 bunx chkit migrate --apply
-bunx chkit ingest run --tag provider:attio
+bunx chkit sync run --tag provider:attio
 bunx chkit query "SELECT count() FROM default.attio_records_raw FINAL"
 bunx chkit query "SELECT name, domains FROM default.attio_companies LIMIT 10"
 ```
@@ -182,7 +182,7 @@ Every API path in the resource table is relative to `https://api.attio.com/v2`. 
 | `tasks` | `limit` and `offset` query parameters; `sort=created_at:asc`; no completion filter |
 | `members` | Single collection request |
 
-Paginated reads use the ingestion plugin's `paginate()` helper: they start at offset zero, advance by the number of returned entities, and stop when a page is shorter than the requested limit. Each reader resolves only its configured object/list, so running People records does not depend on the objects catalog having run first. The pipeline's stream array does not establish dependencies.
+Paginated reads use the Sync plugin's `paginate()` helper: they start at offset zero, advance by the number of returned entities, and stop when a page is shorter than the requested limit. Each reader resolves only its configured object/list, so running People records does not depend on the objects catalog having run first. The pipeline's stream array does not establish dependencies.
 
 ## How the sync works
 
@@ -224,7 +224,7 @@ Requests run without fixed delays. Attio can apply lower limits, including query
 
 Destination writes have a separate retry policy and reuse an insert deduplication token. Physical duplicate suppression depends on ClickHouse's deduplication settings and window. The logical row identity and `FINAL` queries reconcile repeated observations; this is not an exactly-once delivery guarantee.
 
-Writes become visible batch by batch. A failed or interrupted run can leave already loaded pages visible, with no rollback to the previous complete workspace snapshot. A normal stream failure allows other selected streams to be attempted. `ingest run` exits with `0` only when all selected streams succeed; an incomplete execution exits with `1`.
+Writes become visible batch by batch. A failed or interrupted run can leave already loaded pages visible, with no rollback to the previous complete workspace snapshot. A normal stream failure allows other selected streams to be attempted. `chkit sync run` exits with `0` only when all selected streams succeed; an incomplete execution exits with `1`.
 
 ## Included people, company, and deal views
 
@@ -326,7 +326,7 @@ The last example assumes a text attribute with API slug `customer_tier`. Adapt t
 After the first successful run, schedule this finite command through cron, CI, or a job runner:
 
 ```sh
-bunx chkit ingest run --tag provider:attio --max-duration 3600 --json
+bunx chkit sync run --tag provider:attio --max-duration 3600 --json
 ```
 
 The scheduler supplies the project directory, credentials, runtime, and cadence. ChKit records independent journal histories for overlapping runs. Scheduler concurrency controls limit provider requests and resource use; pipeline limits govern concurrency within one process. See [overlapping runs and checkpoint recovery](/api-sync/operations/#overlapping-runs-and-checkpoint-recovery).
@@ -334,9 +334,9 @@ The scheduler supplies the project directory, credentials, runtime, and cadence.
 For a narrower run, select all configured records streams:
 
 ```sh
-bunx chkit ingest list --tag provider:attio --tag resource:records
-bunx chkit ingest run --tag provider:attio --tag resource:records --json
-bunx chkit ingest status --tag provider:attio --json
+bunx chkit sync list --tag provider:attio --tag resource:records
+bunx chkit sync run --tag provider:attio --tag resource:records --json
+bunx chkit sync status --tag provider:attio --json
 ```
 
 Repeated tags use AND matching. Add `--tag object:people` to select only People records. Its record stream carries `resource:records` and `object:people`; its attribute stream carries `resource:object_attributes` and `object:people`. With the default source ID, `--tag stream:attio.primary.records.people` selects the People record stream. List readers carry `list:<ref>` together with `resource:entries` or `resource:list_attributes`.
@@ -404,7 +404,7 @@ Repository-only packaging and live-database tests remain outside the installed t
 - [Integration list](/integrations/): available apps with dedicated ClickHouse integration guides.
 - [`chkit registry`](/cli/registry/): discover and inspect installable apps.
 - [`chkit add`](/cli/add/): installation flags, project wiring, and ownership.
-- [`chkit ingest`](/cli/ingest/): stream selection, outcomes, and execution budgets.
+- [`chkit sync`](/cli/sync/): stream selection, outcomes, and execution budgets.
 - [Destinations and transformations](/api-sync/destinations/): raw JSON, replacement semantics, and deletion handling.
 - [Scheduling and recovery](/api-sync/operations/): operational limits and retry behavior.
 - [Test a source](/api-sync/testing/): fixture-based checks for customized readers.

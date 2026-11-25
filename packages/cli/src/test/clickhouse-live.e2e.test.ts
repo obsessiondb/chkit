@@ -63,94 +63,6 @@ describe('@chkit/cli doppler env e2e', () => {
   const liveEnv = getLiveEnv()
 
   test(
-    'runs init + generate + migrate + status against live ClickHouse',
-    async () => {
-      const executor = createLiveExecutor(liveEnv)
-      const database = liveEnv.clickhouseDatabase
-      const journalTable = createJournalTableName('flow')
-      const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
-      const prefix = createPrefix('flow')
-      const usersTable = `${prefix}users`
-      const usersView = `${prefix}users_view`
-      const fixture = await createFixture({
-        database,
-        usersTableName: usersTable,
-        usersViewName: usersView,
-      })
-
-      try {
-        const initResult = runCli(fixture.dir, ['init'], cliEnv)
-        expect(initResult.exitCode).toBe(0)
-
-        const generateResult = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'], cliEnv)
-        expect(generateResult.exitCode).toBe(0)
-        const generatePayload = JSON.parse(generateResult.stdout) as { migrationFile: string | null }
-        expect(generatePayload.migrationFile).toBeTruthy()
-        if (!generatePayload.migrationFile) {
-          throw new Error('expected generated migration file')
-        }
-
-        const planResult = await runCliWithRetry(fixture.dir, [
-          'migrate',
-          '--config',
-          fixture.configPath,
-          '--json',
-        ], { extraEnv: cliEnv })
-        if (planResult.exitCode !== 0) {
-          throw new Error(formatTestDiagnostic('migrate --json plan failed', planResult))
-        }
-        expect(planResult.exitCode).toBe(0)
-        const planPayload = JSON.parse(planResult.stdout) as { pending: string[] }
-        expect(planPayload.pending.length).toBe(1)
-
-        const executeResult = await runCliWithRetry(fixture.dir, [
-          'migrate',
-          '--config',
-          fixture.configPath,
-          '--execute',
-          '--json',
-        ], { extraEnv: cliEnv })
-        if (executeResult.exitCode !== 0) {
-          throw new Error(formatTestDiagnostic('migrate --execute failed', executeResult))
-        }
-        expect(executeResult.exitCode).toBe(0)
-        const executePayload = JSON.parse(executeResult.stdout) as {
-          mode: string
-          applied: Array<{ name: string }>
-        }
-        expect(executePayload.mode).toBe('execute')
-        expect(executePayload.applied.length).toBe(1)
-
-        const statusResult = runCli(fixture.dir, ['status', '--config', fixture.configPath, '--json'], cliEnv)
-        expect(statusResult.exitCode).toBe(0)
-        const statusPayload = JSON.parse(statusResult.stdout) as {
-          total: number
-          applied: number
-          pending: number
-          checksumMismatchCount: number
-        }
-        expect(statusPayload.total).toBe(1)
-        expect(statusPayload.applied).toBe(1)
-        expect(statusPayload.pending).toBe(0)
-        expect(statusPayload.checksumMismatchCount).toBe(0)
-
-        const generatedSqlPath = generatePayload.migrationFile.startsWith('/')
-          ? generatePayload.migrationFile
-          : join(fixture.migrationsDir, generatePayload.migrationFile)
-        const generatedSql = await readFile(generatedSqlPath, 'utf8')
-        expect(generatedSql.length).toBeGreaterThan(0)
-      } finally {
-        await rm(fixture.dir, { recursive: true, force: true })
-        await executor.command(`DROP VIEW IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersView)}`)
-        await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
-        await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
-        await executor.close()
-      }
-    },
-    240_000
-  )
-
-  test(
     'migrate applies table + materialized view without DDL race condition',
     async () => {
       const executor = createLiveExecutor(liveEnv)
@@ -617,6 +529,9 @@ export default schema(target, rmv)
       try {
         const firstGenerate = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'], cliEnv)
         expect(firstGenerate.exitCode).toBe(0)
+        const firstPlan = await runCliWithRetry(fixture.dir, ['migrate', '--config', fixture.configPath, '--json'], { extraEnv: cliEnv })
+        expect(firstPlan.exitCode, formatTestDiagnostic('migrate --json plan failed', firstPlan)).toBe(0)
+        expect((JSON.parse(firstPlan.stdout) as { pending: string[] }).pending.length).toBe(1)
         const firstExecute = await runCliWithRetry(fixture.dir, [
           'migrate',
           '--config',

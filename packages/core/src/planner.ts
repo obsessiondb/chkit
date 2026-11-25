@@ -893,6 +893,9 @@ export function orderColumnStatements(
 ): MigrationOperation[] {
   const reads = columnDefaultReads(definitions.next)
   const oldReads = columnDefaultReads(definitions.previous)
+  // ALTER's check for cyclic defaults also reads lambda parameters (#799).
+  const cycleReads = columnDefaultReads(definitions.next, true)
+  const oldCycleReads = columnDefaultReads(definitions.previous, true)
   const ttlReads = tableTtlReads(definitions.next)
   const oldTtlReads = tableTtlReads(definitions.previous)
   const renamedTo = new Map(renames.map((rename) => [columnRenameKey(rename), columnKey(rename, rename.to)]))
@@ -919,6 +922,7 @@ export function orderColumnStatements(
   })
 
   const added = new Set(statements.filter((op) => op.type === 'alter_table_add_column').map((op) => op.key))
+  const releases = cycleReleases(cycleReads, oldCycleReads, added, new Set(modifies.keys()))
   const prerequisites = statements.map((op, index) => {
     const found = new Set<number>()
     if (op.type === 'alter_table_add_column' || op.type === 'alter_table_modify_column') {
@@ -932,7 +936,7 @@ export function orderColumnStatements(
     }
     // A column's last statement is the MODIFY COLUMN that sets its new expression.
     if (op.type === 'alter_table_modify_column' && statements[index + 1]?.key !== op.key) {
-      for (const column of cycleReleases(op.key, reads, oldReads, added)) {
+      for (const column of releases.get(op.key) ?? []) {
         for (const other of modifies.get(column) ?? []) found.add(other)
       }
     }
@@ -951,48 +955,130 @@ export function orderColumnStatements(
 }
 
 /**
- * The columns whose MODIFY must run before the MODIFY that gives column `key`
- * its new expression (#769). ClickHouse rejects an expression that closes a
- * cycle. The new expression closes one through column P when it reads a
- * column that leads to P, and P's old expression reads a column that leads
- * back to `key`, which P's new expression no longer reads. "Leads to" follows
- * reads that both the old and the new expression of their column have, so
- * the path exists in every intermediate state and only P's MODIFY breaks it.
- * On the way to P it also follows the reads of `added` columns: the MODIFY
- * runs after the ADD of every added column its expression reads through them.
- * Every such P is read by the new expression through the new schema, so these
- * edges can't form a cycle unless the new schema has one.
+ * For each `modified` column K, the `modified` columns whose MODIFY must run
+ * before the MODIFY that gives K its new expression (#769). ClickHouse
+ * rejects an expression that closes a cycle. K's new expression closes one
+ * through column P when it reads a column that leads to P, and P's old
+ * expression reads a column that leads back to K, which P's new expression
+ * no longer reads. "Leads to" follows reads that both the old and the new
+ * expression of their column have, so the path exists in every intermediate
+ * state and only P's MODIFY breaks it. On the way to P it also follows the
+ * reads of `added` columns: the MODIFY runs after the ADD of every added
+ * column its expression reads through them. Every such P is read by K's new
+ * expression through the new schema, so these edges can't form a cycle unless
+ * the new schema has one.
+ *
+ * Such a K, P and every column between them lie on a cycle of old and new
+ * reads, so the search starts from the old reads that P drops and keeps to
+ * the columns on such cycles (#789). Beyond work linear in the reads, it
+ * searches those columns once for each old read that a P drops, and once
+ * more for each such read and P when the first search finds a K: a deep
+ * chain of defaults costs no more than a short one, unless many dropped
+ * reads lead into the same long part of a cycle. Beyond the result, memory
+ * stays linear in the reads.
  */
 function cycleReleases(
-  key: string,
   reads: DependencyGraph,
   oldReads: DependencyGraph,
-  added: ReadonlySet<string>
-): string[] {
-  const reachable = (from: string, throughAdded: boolean): Set<string> => {
+  added: ReadonlySet<string>,
+  modified: ReadonlySet<string>
+): Map<string, string[]> {
+  const cyclic = onCycles(reads, oldReads)
+  // Column → the columns that lead to it, the first step from K excluded.
+  const leadsFrom = new Map<string, string[]>()
+  for (const [column, columnReads] of reads) {
+    if (!cyclic.has(column)) continue
+    const follow = added.has(column)
+    for (const read of columnReads) {
+      if (cyclic.has(read) && (follow || oldReads.get(column)?.has(read))) {
+        const from = leadsFrom.get(read)
+        if (from === undefined) leadsFrom.set(read, [column])
+        else from.push(column)
+      }
+    }
+  }
+  const closure = (from: string, next: (column: string) => Iterable<string>): Set<string> => {
     const seen = new Set([from])
     const pending = [from]
     for (let column = pending.pop(); column !== undefined; column = pending.pop()) {
-      const follow = throughAdded && added.has(column)
-      for (const read of reads.get(column) ?? []) {
-        if ((follow || oldReads.get(column)?.has(read)) && !seen.has(read)) {
-          seen.add(read)
-          pending.push(read)
+      for (const other of next(column)) {
+        if (cyclic.has(other) && !seen.has(other)) {
+          seen.add(other)
+          pending.push(other)
         }
       }
     }
     return seen
   }
-  const released = new Set<string>()
-  for (const read of reads.get(key) ?? []) {
-    for (const column of reachable(read, true)) {
-      if (column === key) continue
-      for (const dropped of oldReads.get(column) ?? []) {
-        if (!reads.get(column)?.has(dropped) && reachable(dropped, false).has(key)) released.add(column)
+  const stableReads = (column: string) =>
+    [...(reads.get(column) ?? [])].filter((read) => oldReads.get(column)?.has(read))
+  // Dropped read → the breakers that drop it. Each closure is searched,
+  // used and let go, so the searches need memory linear in the reads.
+  const droppedBy = new Map<string, string[]>()
+  for (const breaker of [...modified].sort(compareCodePoints)) {
+    if (!cyclic.has(breaker)) continue
+    for (const dropped of oldReads.get(breaker) ?? []) {
+      if (reads.get(breaker)?.has(dropped) || !cyclic.has(dropped)) continue
+      const breakers = droppedBy.get(dropped)
+      if (breakers === undefined) droppedBy.set(dropped, [breaker])
+      else breakers.push(breaker)
+    }
+  }
+  const released = new Map<string, Set<string>>()
+  for (const [dropped, breakers] of droppedBy) {
+    const back = closure(dropped, stableReads)
+    for (const breaker of breakers) {
+      let leadsToBreaker: Set<string> | undefined
+      for (const key of back) {
+        if (key === breaker || !modified.has(key)) continue
+        leadsToBreaker ??= closure(breaker, (column) => leadsFrom.get(column) ?? [])
+        const target = leadsToBreaker
+        if ([...(reads.get(key) ?? [])].some((read) => target.has(read))) {
+          released.set(key, (released.get(key) ?? new Set<string>()).add(breaker))
+        }
       }
     }
   }
-  return [...released]
+  return new Map([...released].map(([key, breakers]) => [key, [...breakers]]))
+}
+
+/**
+ * The columns that lie on a cycle of `reads` and `oldReads` together, or on
+ * a path between two such cycles: what is left after taking away, again and
+ * again, every column that reads none of the rest or that none of the rest
+ * reads.
+ */
+function onCycles(reads: DependencyGraph, oldReads: DependencyGraph): Set<string> {
+  const readsOf = new Map<string, Set<string>>()
+  const readBy = new Map<string, Set<string>>()
+  const link = (map: Map<string, Set<string>>, from: string, to: string) =>
+    map.set(from, (map.get(from) ?? new Set<string>()).add(to))
+  for (const graph of [reads, oldReads]) {
+    for (const [column, columnReads] of graph) {
+      for (const read of columnReads) {
+        link(readsOf, column, read)
+        link(readBy, read, column)
+      }
+    }
+  }
+  const left = new Set([...readsOf.keys()].filter((column) => readBy.has(column)))
+  const outs = new Map([...left].map((column) => [column, [...(readsOf.get(column) ?? [])].filter((read) => left.has(read)).length]))
+  const ins = new Map([...left].map((column) => [column, [...(readBy.get(column) ?? [])].filter((other) => left.has(other)).length]))
+  const pending = [...left].filter((column) => outs.get(column) === 0 || ins.get(column) === 0)
+  for (let column = pending.pop(); column !== undefined; column = pending.pop()) {
+    if (!left.delete(column)) continue
+    for (const read of readsOf.get(column) ?? []) {
+      const count = (ins.get(read) ?? 0) - 1
+      ins.set(read, count)
+      if (count === 0 && left.has(read)) pending.push(read)
+    }
+    for (const other of readBy.get(column) ?? []) {
+      const count = (outs.get(other) ?? 0) - 1
+      outs.set(other, count)
+      if (count === 0 && left.has(other)) pending.push(other)
+    }
+  }
+  return left
 }
 
 function columnKey(table: { database: string; table: string }, column: string): string {
@@ -1053,9 +1139,10 @@ function longestColumnPrefix(parts: string[], columns: ReadonlySet<string>): str
 /**
  * Column operation key → keys of the other columns of the same table that the
  * column's default expression names. A name followed by `(` is a function
- * call, not a column, and neither are the names `notColumnNames` finds.
+ * call, not a column, and neither are the names `notColumnNames` finds. With
+ * `lambdas`, the lambdas' own names read columns as well (`lambdaReads`).
  */
-export function columnDefaultReads(definitions: SchemaDefinition[]): DependencyGraph {
+export function columnDefaultReads(definitions: SchemaDefinition[], lambdas = false): DependencyGraph {
   const graph = new Map<string, Set<string>>()
   for (const def of definitions) {
     if (def.kind !== 'table') continue
@@ -1066,7 +1153,8 @@ export function columnDefaultReads(definitions: SchemaDefinition[]): DependencyG
       const parsed = parseColumnDefault(column.default)
       if (parsed.kind !== 'expression') continue
       const read = new Set<string>()
-      for (const name of dottedNames(parsed.sql, names)) {
+      const found = dottedNames(parsed.sql, names)
+      for (const name of lambdas ? [...found, ...lambdaReads(parsed.sql, names)] : found) {
         if (name !== column.name) read.add(keyOf(name))
       }
       graph.set(keyOf(column.name), read)
@@ -1168,6 +1256,40 @@ function lambdaParameters(tokens: SQLToken[], arrow: number): { names: Set<strin
     if (separator !== ',') return undefined
   }
   return undefined
+}
+
+/**
+ * The columns the lambdas in `sql` name where `dottedNames` skips them (#768).
+ * ClickHouse's ALTER check for cyclic defaults (code 174) reads a lambda's
+ * parameters as columns, even one its body never uses, and a use with `.name`
+ * parts as the longest leading part that is a column: `w -> w.a` reads the
+ * column `w.a` or `w`, never `a` (#799).
+ */
+function lambdaReads(sql: string, columns: ReadonlySet<string>): string[] {
+  const tokens = tokenizeSQL(sql).filter((token) => !isTrivia(token))
+  const found: string[] = []
+  tokens.forEach((token, i) => {
+    const next = tokens[i + 1]
+    if (token.text !== '-' || next?.text !== '>' || token.end !== next.start) return
+    const params = lambdaParameters(tokens, i)
+    if (params === undefined) return
+    for (const name of params.names) if (columns.has(name)) found.push(name)
+    const end = groupEnd(tokens, i + 2)
+    for (let j = i + 2; j < end; j += 1) {
+      const name = identifierName(tokens[j]!)
+      if (name === undefined || !params.names.has(name) || tokens[j - 1]?.text === '.') continue
+      const run = [name]
+      for (let part = tokens[j + 2]; tokens[j + 1]?.text === '.' && part !== undefined; part = tokens[j + 2]) {
+        const partName = identifierName(part)
+        if (partName === undefined) break
+        run.push(partName)
+        j += 2
+      }
+      const column = longestColumnPrefix(run, columns)
+      if (column !== undefined) found.push(column)
+    }
+  })
+  return found
 }
 
 /** Index of the first `,` or unmatched closing bracket at the depth of `from`, or the end. */

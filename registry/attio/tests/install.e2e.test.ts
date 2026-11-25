@@ -5,8 +5,8 @@ import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { createStatelessLiveExecutor, createPrefix, getLiveEnv, quoteIdent, waitForTable, waitForView } from '@chkit/clickhouse/e2e-testkit'
-import { createClickHouseDestination, definePipeline, runIngestion, selectStreams } from '@chkit/plugin-ingest'
-import { createMemoryJournal } from '@chkit/plugin-ingest/testing'
+import { createClickHouseDestination, definePipeline, runIngestion, selectStreams } from '@chkit/plugin-sync'
+import { createMemoryJournal } from '@chkit/plugin-sync/testing'
 
 import { buildRegistryCatalog } from '../../../packages/cli/src/registry/build.js'
 import { CLI_VERSION } from '../../../packages/cli/src/runtime/version.js'
@@ -39,7 +39,7 @@ describe.serial('built Attio template installed into a consumer', () => {
     // Exercise source with workspace packages, retaining the template version and changelog.
     const workspaceCatalog = { ...catalog, items: catalog.items.map((item) => item.name === 'attio' ? {
       ...item,
-      dependencies: [`@chkit/core@${CLI_VERSION}`, `@chkit/plugin-ingest@${CLI_VERSION}`, ...item.dependencies.filter((dependency) => !dependency.startsWith('@chkit/'))],
+      dependencies: [`@chkit/core@${CLI_VERSION}`, `@chkit/plugin-sync@${CLI_VERSION}`, ...item.dependencies.filter((dependency) => !dependency.startsWith('@chkit/'))],
       meta: { chkit: { ...item.meta.chkit, chkit: CLI_VERSION, ingest: CLI_VERSION } },
     } : item) }
     await buildRegistryCatalog({ catalog: workspaceCatalog, sourceRoot: join(root, 'registry'), outputDir })
@@ -64,6 +64,9 @@ describe.serial('built Attio template installed into a consumer', () => {
     const add = cli(['add', 'attio', '--registry', outputDir, '--with-tests', '--no-install', '--json'])
     expect(add.exitCode, formatTestDiagnostic('install', add)).toBe(0)
     expect(JSON.parse(add.stdout).template.name).toBe('attio')
+    const projectConfig = await readFile(join(project, 'clickhouse.config.ts'), 'utf8')
+    expect(projectConfig).toContain(`load({ journalTable: '${prefix}sync' })`)
+    expect(projectConfig).not.toContain('@chkit/plugin-sync')
     const fixtureTests = Bun.spawnSync(['bun', 'test', 'src/integrations/attio/tests/attio.test.ts'], {
       cwd: project, env: { ...process.env, ATTIO_API_TOKEN: '' },
     })
@@ -75,10 +78,10 @@ describe.serial('built Attio template installed into a consumer', () => {
       .replace("tablePrefix: 'attio'", `tablePrefix: '${prefix}'`)
       .replace("objects: ['people', 'companies']", "objects: ['people', 'subscriptions']"))
 
-    const list = cli(['ingest', 'list', '--tag', 'provider:attio', '--json'])
+    const list = cli(['sync', 'list', '--tag', 'provider:attio', '--json'])
     expect(list.exitCode, formatTestDiagnostic('list without token', list)).toBe(0)
     expect(JSON.parse(list.stdout).streams).toHaveLength(9)
-    const peopleOnly = cli(['ingest', 'list', '--tag', 'provider:attio', '--tag', 'resource:records', '--tag', 'object:people', '--json'])
+    const peopleOnly = cli(['sync', 'list', '--tag', 'provider:attio', '--tag', 'resource:records', '--tag', 'object:people', '--json'])
     expect(peopleOnly.exitCode, formatTestDiagnostic('one object stream', peopleOnly)).toBe(0)
     expect(JSON.parse(peopleOnly.stdout).streams.map((stream: { streamId: string }) => stream.streamId)).toEqual(['attio.primary.records.people'])
     const generate = cli(['generate', '--name', 'attio_fixture', '--json'])
@@ -136,7 +139,7 @@ describe.serial('built Attio template installed into a consumer', () => {
     const pipelinePath = join(project, 'src/integrations/attio/pipeline.ts')
     const pipelineContent = await readFile(pipelinePath, 'utf8')
     await writeFile(pipelinePath, pipelineContent.split('\n').filter((line) => !line.includes("tags: ['resource:notes']")).join('\n'))
-    const narrowed = cli(['ingest', 'list', '--json'])
+    const narrowed = cli(['sync', 'list', '--json'])
     expect(narrowed.exitCode, formatTestDiagnostic('removed notes', narrowed)).toBe(0)
     expect(JSON.parse(narrowed.stdout).streams).toHaveLength(8)
     await waitForTable(executor, env.clickhouseDatabase, `${prefix}_notes_raw`)
@@ -145,11 +148,16 @@ describe.serial('built Attio template installed into a consumer', () => {
 
 async function writeProject(project: string, root: string, database: string, prefix: string): Promise<void> {
   await linkWorkspaceModules(root, project)
+  await writeFile(join(project, 'package.json'), JSON.stringify({
+    name: 'attio-fixture-consumer', private: true, type: 'module',
+    devDependencies: { '@chkit/plugin-ingest': CLI_VERSION },
+  }))
   await mkdir(join(project, 'src/db/schema'), { recursive: true })
   await writeFile(join(project, 'src/db/schema/existing.ts'), `import { table } from '@chkit/core'
 export const existing = table({ database: ${JSON.stringify(database)}, name: '${prefix}existing', engine: 'MergeTree', columns: [{ name: 'id', type: 'UInt64' }], orderBy: ['id'] })\n`)
   await writeFile(join(project, 'clickhouse.config.ts'), `import { defineConfig } from '@chkit/core'
-export default defineConfig({ schema: './src/db/schema/**/*.ts', clickhouse: {
+import { ingest as load } from '@chkit/plugin-ingest'
+export default defineConfig({ schema: './src/db/schema/**/*.ts', plugins: [load({ journalTable: '${prefix}sync' })], clickhouse: {
   url: process.env.CLICKHOUSE_URL || (process.env.CLICKHOUSE_HOST ? 'https://' + process.env.CLICKHOUSE_HOST : undefined),
   username: process.env.CLICKHOUSE_USER ?? 'default', password: process.env.CLICKHOUSE_PASSWORD,
   database: ${JSON.stringify(database)},

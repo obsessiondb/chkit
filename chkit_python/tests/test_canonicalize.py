@@ -263,3 +263,28 @@ def test_normalize_function_names_leaves_dot_qualified_names_alone() -> None:
     assert normalize_function_names("SELECT analytics.CEILING(x), FLOOR(y)", TEST_REGISTRY) == (
         "SELECT analytics.CEILING(x), floor(y)"
     )
+
+
+def test_unavailable_storage_analysis_retains_both_sides() -> None:
+    class UnavailableAnalysis(_FakeClient):
+        attempts = 0
+
+        def query(self, sql: str, settings: dict[str, Any] | None = None) -> QueryResult:
+            if sql.startswith("EXPLAIN"):
+                self.attempts += 1
+                raise RuntimeError("analysis unavailable")
+            return super().query(sql, settings)
+
+    expected = "WITH c AS (SELECT 1 AS x) SELECT x FROM c UNION ALL SELECT x FROM c"
+    actual = (
+        "WITH c AS (SELECT 1 AS x) SELECT x FROM c UNION ALL "
+        "WITH c AS (SELECT 1 AS x) SELECT x FROM c"
+    )
+    client = UnavailableAnalysis([expected, actual])
+    result = canonicalize_sql_fragments(
+        client, [expected, actual], wrap=False, stored_query_pairs=[(expected, actual)]
+    )
+    assert client.attempts == 2
+    assert result[expected] == expected
+    assert result[actual] == actual
+    assert result[expected] != result[actual]

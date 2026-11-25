@@ -39,6 +39,7 @@ from chkit_plugin_backfill.types import BackfillChunkState, BackfillProgress
 from tests.e2e_testkit import LiveEnv, create_prefix, poll_until, resolve_live_env
 
 SOURCE_ROWS = 2000
+BUCKETS = 4
 
 
 def _clickhouse_config(env: LiveEnv) -> ChxResolvedClickHouseConfig:
@@ -111,7 +112,7 @@ class _ExecContext:
 
 def _count_rows(ddl: ClickHouseClient, fqn: str) -> int:
     rows = ddl.query(
-        f"SELECT count() AS cnt FROM {fqn} SETTINGS select_sequential_consistency = 1"
+        f"SELECT count() AS cnt FROM {fqn} SETTINGS select_sequential_consistency = 1, enable_parallel_replicas = 0"
     ).rows
     return int(rows[0]["cnt"]) if rows else 0
 
@@ -129,7 +130,7 @@ def _sql_for_chunk(ctx: _ExecContext, chunk_id: str) -> str:
         target=ctx.target_fqn,
         source_target=ctx.source_fqn,
         table=ctx.plan.table,
-    )
+    ) + ", select_sequential_consistency = 1, enable_parallel_replicas = 0"
 
 
 @pytest.fixture(scope="module")
@@ -156,15 +157,25 @@ def exec_ctx() -> Iterator[_ExecContext]:
     rows = [{"id": i, "bucket": i % 4, "payload": "x" * 256} for i in range(SOURCE_ROWS)]
     ddl.insert(source_fqn, rows)
 
-    # Target a few chunks per run so resume/replay operate on more than one chunk.
-    bytes_rows = ddl.query(
-        "SELECT toString(sum(data_uncompressed_bytes)) AS total\n"
-        "    FROM system.parts\n"
-        f"    WHERE database = '{db}' AND table = '{source_table}' AND active = 1\n"
-        "    SETTINGS select_sequential_consistency = 1"
-    ).rows
-    uncompressed_bytes = int(float(bytes_rows[0]["total"])) if bytes_rows else 0
-    target_chunk_bytes = max(1, uncompressed_bytes // 4)
+    # A fresh insert can precede its system.parts metadata on ObsessionDB.
+    # A zero byte count would request one-byte chunks and millions of row probes.
+    def source_bytes() -> int:
+        count = _count_rows(ddl, source_fqn)
+        metrics = ddl.query(
+            "SELECT toString(sum(data_uncompressed_bytes)) AS total, "
+            "toString(sum(rows)) AS rows, toString(uniqExact(partition_id)) AS partitions "
+            "FROM system.parts "
+            f"WHERE database = '{db}' AND table = '{source_table}' AND active = 1 "
+            "SETTINGS select_sequential_consistency = 1"
+        ).rows[0]
+        if (count != SOURCE_ROWS or int(metrics["rows"]) != SOURCE_ROWS
+                or int(metrics["partitions"]) != BUCKETS):
+            return 0
+        return int(metrics["total"])
+
+    uncompressed_bytes = poll_until(source_bytes, lambda total: total > 0, timeout=45.0)
+    assert uncompressed_bytes > 0, "all source rows, partitions and byte metadata must be visible"
+    target_chunk_bytes = uncompressed_bytes // BUCKETS
 
     def planner_query(
         sql: str, settings: QuerySettings | None
@@ -201,6 +212,8 @@ def test_produces_a_multi_chunk_plan_to_exercise_the_loop(
     exec_ctx: _ExecContext,
 ) -> None:
     assert len(exec_ctx.plan.chunks) > 1
+    assert len(exec_ctx.plan.partitions) == BUCKETS
+    assert exec_ctx.plan.total_rows == SOURCE_ROWS
 
 
 def test_full_backfill_copies_every_source_row_into_the_target(
