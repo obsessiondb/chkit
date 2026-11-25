@@ -8,6 +8,7 @@ import { checksumSQL } from '../../runtime/migration-store.js'
 import {
   extractExecutableStatements,
   extractMigrationOperationSummaries,
+  extractStatementOperations,
 } from '../../runtime/safety-markers.js'
 import { retryMismatchError, statementIdentities, verifyRetryEdit } from './recovery.js'
 
@@ -81,8 +82,9 @@ export async function resolveRetry(
   // statements the plugins return.
   const statements = extractExecutableStatements(sql)
   const identities = statementIdentities(
-    extractMigrationOperationSummaries(sql),
+    extractStatementOperations(sql),
     statements.map((statement) => (input.pluginsRewriteStatements ? undefined : statementFingerprint(statement))),
+    extractMigrationOperationSummaries(sql),
   )
   const check = verifyRetryEdit(state.operations, identities)
   if (!check.ok) throw retryMismatchError(migration, check)
