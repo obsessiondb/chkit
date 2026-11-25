@@ -18,7 +18,7 @@ The [app registry](/integrations/) installs three raw tables, full scans for use
 
 ## Install the Slack integration
 
-Run these commands in a TypeScript project with a `package.json`. Use a chkit release that includes the registry and ingestion plugin; these examples use the beta release.
+Run these commands in a TypeScript project with a `package.json`. The examples use the chkit beta release with registry and Sync plugin support.
 
 ```sh
 bun add -d chkit@beta
@@ -27,7 +27,7 @@ bunx chkit add slack --dry-run
 bunx chkit add slack
 ```
 
-The installer copies source files, installs compatible dependencies, registers the ingestion plugin, and connects the exported schemas and pipeline to the project config. See [installation behavior](/cli/add/) for config wiring and conflicts. Subsequent runs execute the installed code without contacting the registry.
+The installer copies source files, installs compatible dependencies, registers the Sync plugin, and connects the exported schemas and pipeline to the project config. See [installation behavior](/cli/add/) for config wiring and conflicts. Subsequent runs execute the installed code without contacting the registry.
 
 ### Configure the ClickHouse connection
 
@@ -35,11 +35,11 @@ For a new project, the generated `clickhouse.config.ts` has this shape:
 
 ```ts
 import { defineConfig } from '@chkit/core'
-import { ingest } from '@chkit/plugin-ingest'
+import { sync } from '@chkit/plugin-sync'
 
 export default defineConfig({
   entry: './src/integrations/slack/index.ts',
-  plugins: [ingest()],
+  plugins: [sync()],
   clickhouse: {
     url: process.env.CLICKHOUSE_URL ?? 'http://localhost:8123',
     username: process.env.CLICKHOUSE_USER ?? 'default',
@@ -90,7 +90,7 @@ SLACK_API_TOKEN=replace-with-the-slack-access-token
 
 Bun loads the project's `.env`. A scheduler must supply `SLACK_API_TOKEN` and the ClickHouse connection variables through its own environment or secret configuration. `.env.example` lists variable names and does not load credentials. Keep real tokens out of source control.
 
-`token` in the copied `config.ts` defaults to `SLACK_API_TOKEN`; set it to use another token, for example for a second installation. Each stream reads its settings and token when it runs and sends the token as an `Authorization: Bearer` header. Invalid settings or a missing token fail that stream before any Slack request. Schema imports, `check`, migration generation, and `ingest list` need no Slack token. This integration does not issue or refresh OAuth tokens; manage that lifecycle separately using [Slack authentication](https://docs.slack.dev/authentication/).
+`token` in the copied `config.ts` defaults to `SLACK_API_TOKEN`; set it to use another token, for example for a second installation. Each stream reads its settings and token when it runs and sends the token as an `Authorization: Bearer` header. Invalid settings or a missing token fail that stream before any Slack request. Schema imports, `check`, migration generation, and `chkit sync list` need no Slack token. This integration does not issue or refresh OAuth tokens; manage that lifecycle separately using [Slack authentication](https://docs.slack.dev/authentication/).
 
 ## Choose conversations and destination names
 
@@ -134,7 +134,7 @@ Discovery includes archived conversations returned by Slack. Selecting private c
 
 ```sh
 bunx chkit check
-bunx chkit ingest list --tag provider:slack
+bunx chkit sync list --tag provider:slack
 bunx chkit generate --name add-slack
 bunx chkit migrate --json
 ```
@@ -143,7 +143,7 @@ Review the generated SQL, apply it, and run ingestion:
 
 ```sh
 bunx chkit migrate --apply
-bunx chkit ingest run --tag provider:slack
+bunx chkit sync run --tag provider:slack
 bunx chkit query "SELECT count() FROM default.slack_messages_raw FINAL"
 ```
 
@@ -169,7 +169,7 @@ Every API URL is relative to `https://slack.com/api/`. Each reader calls [`POST 
 | `users` | `users.list` across the accessible workspace |
 | `messages` | Independent conversation discovery, then `conversations.history` for each selected conversation; `conversations.replies` for roots with `reply_count > 0` when replies are enabled |
 
-All three readers use the ingestion plugin's `paginate` helper. Channels and users yield selected pages as they arrive, following `response_metadata.next_cursor` until absent, null, or empty. Configured conversation IDs are validated when discovery finishes; a missing ID fails the stream while any loaded pages remain visible. Messages use exact `oldest` and `latest` time boundaries, preserving progress independently of temporary cursors. Their paginator crosses empty or parent-only pages and retains native `has_more` in metadata; a page with timestamp progress returns control to the message reader. Cursor expiration restarts the unfinished interval once. Repeated cursors and responses without a safe continuation fail visibly. Each stream discovers its workspace and parents independently.
+All three readers use the Sync plugin's `paginate` helper. Channels and users yield selected pages as they arrive, following `response_metadata.next_cursor` until absent, null, or empty. Configured conversation IDs are validated when discovery finishes; a missing ID fails the stream while any loaded pages remain visible. Messages use exact `oldest` and `latest` time boundaries, preserving progress independently of temporary cursors. Their paginator crosses empty or parent-only pages and retains native `has_more` in metadata; a page with timestamp progress returns control to the message reader. Cursor expiration restarts the unfinished interval once. Repeated cursors and responses without a safe continuation fail visibly. Each stream discovers its workspace and parents independently.
 
 For each channel, history advances newest first. Read every selected reply for one history page before committing its history timestamp boundary and requesting older history. Replies advance oldest first with temporary local timestamp boundaries. Threads retain the parent returned by Slack under its history identity. Incomplete history pages replay with their replies, and no temporary cursor or thread frontier enters durable state.
 
@@ -201,7 +201,7 @@ Requests have a 30-second timeout and run through the ingestion executor's cance
 
 Slack often reports errors in a successful HTTP response with `ok: false`. Authentication, permission, missing-scope, and unsupported-token errors fail with the Slack code and required scopes when supplied. Invalid payloads, identity fields, and checkpoints fail at once without a retry. A request that keeps failing transiently exhausts its budget before the stream fails; restarting the reader does not multiply its request retries.
 
-Writes become visible batch by batch. A failed or interrupted run leaves already loaded rows in place. Repeated IDs reconcile in ClickHouse; this does not provide an atomic workspace snapshot or exactly-once delivery. A normal stream failure allows other selected streams to be attempted. `ingest run` exits with `0` only when all selected streams succeed.
+Writes become visible batch by batch. A failed or interrupted run leaves already loaded rows in place. Repeated IDs reconcile in ClickHouse; this does not provide an atomic workspace snapshot or exactly-once delivery. A normal stream failure allows other selected streams to be attempted. `chkit sync run` exits with `0` only when all selected streams succeed.
 
 ## Scheduling, verification, and recovery
 
@@ -210,9 +210,9 @@ Schedule a finite ingestion command through cron, CI, or a job runner. The sched
 For a narrower messages run:
 
 ```sh
-bunx chkit ingest list --tag provider:slack --tag resource:messages
-bunx chkit ingest run --tag provider:slack --tag resource:messages --max-duration 86400 --json
-bunx chkit ingest status --tag provider:slack --json
+bunx chkit sync list --tag provider:slack --tag resource:messages
+bunx chkit sync run --tag provider:slack --tag resource:messages --max-duration 86400 --json
+bunx chkit sync status --tag provider:slack --json
 ```
 
 Repeated tags use AND matching. With the default source ID, `--tag stream:slack.primary.messages` selects the same stream. `status` reports message checkpoints; full metadata reads have no incremental bookmark. Verify the execution's stream outcomes and query known retained messages rather than relying only on a row count.
@@ -263,7 +263,7 @@ The optional tests mock Slack responses and use an in-memory destination. They n
 - [Integration list](/integrations/): available apps and dedicated sync guides.
 - [`chkit registry`](/cli/registry/): inspect app coverage and installable files.
 - [`chkit add`](/cli/add/): installation flags, config wiring, and ownership.
-- [`chkit ingest`](/cli/ingest/): stream selection and execution budgets.
+- [`chkit sync`](/cli/sync/): stream selection and execution budgets.
 - [Destinations and transformations](/api-sync/destinations/): raw JSON, replacement semantics, and deletion handling.
 - [Scheduling and recovery](/api-sync/operations/): scheduling, retries, and outcomes.
 - [Test a source](/api-sync/testing/): fixture checks for customized readers.

@@ -1,5 +1,14 @@
 # @chkit/core
 
+## 0.2.0-beta.18
+
+## 0.2.0-beta.17
+
+### Patch Changes
+
+- 1b7d8c7: Nullable LowCardinality columns render as `LowCardinality(Nullable(T))`, whether declared with `nullable: true`, `.nullable()`, `.optional()` or `t.nullable()`.
+- 729783a: `generate` no longer fails on a refreshable materialized view without `APPEND` that targets a `Replicated*` table. ObsessionDB, ClickHouse Cloud and `Replicated` databases accept replace-mode refreshes, so chkit now only warns that a non-replicated (`Atomic`) database refuses them.
+
 ## 0.2.0-beta.16
 
 ## 0.2.0-beta.15

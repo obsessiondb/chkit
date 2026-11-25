@@ -44,6 +44,7 @@ from chkit.cli.migration_store import (
 )
 from chkit.clickhouse.client import (
     ClickHouseClient,
+    QueryResult,
     clickhouse_error_message,
     is_unknown_database_error,
 )
@@ -467,6 +468,9 @@ class JournalStore:
         # writer of the version it read would otherwise be lost.
         self._newest_version: dict[str, datetime] = {}
 
+    def _query(self, statement: str, settings: dict[str, Any] | None = None) -> QueryResult:
+        return self._client.query(statement, {**(settings or {}), "default_format": "JSONStrings"})
+
     @property
     def database_missing(self) -> bool:
         return self._database_missing
@@ -522,7 +526,7 @@ class JournalStore:
         if self._bootstrapped or (self._table_missing and not create):
             return
         try:
-            self._client.query(
+            self._query(
                 f"SELECT name, migration_completed, operations FROM {self._table} LIMIT 0"
             )
         except Exception as exc:
@@ -639,7 +643,7 @@ class JournalStore:
         fanout = self._replica_fanout()
         if fanout is None:
             return False
-        rows = self._client.query(
+        rows = self._query(
             f"SELECT count() AS replicas FROM {all_replicas(fanout, 'system.tables')} "
             f"WHERE database = currentDatabase() AND name = '{self._table}'"
         ).rows
@@ -657,7 +661,7 @@ class JournalStore:
         wait_for_table(self._client, self._database_name(), self._table, cluster=self._cluster)
 
     def _current_database(self) -> str:
-        rows = self._client.query("SELECT currentDatabase() AS database").rows
+        rows = self._query("SELECT currentDatabase() AS database").rows
         return str(rows[0].get("database", "default")) if rows else "default"
 
     def _detect_fingerprint_column(self) -> bool:
@@ -671,14 +675,14 @@ class JournalStore:
         fanout = self._replica_fanout()
         if fanout is None:
             try:
-                self._client.query(f"SELECT {_FINGERPRINTS_COLUMN} FROM {self._table} LIMIT 0")
+                self._query(f"SELECT {_FINGERPRINTS_COLUMN} FROM {self._table} LIMIT 0")
             except Exception as exc:
                 if not _is_clickhouse_error(exc, _UNKNOWN_IDENTIFIER):
                     raise
                 return False
             return True
         try:
-            rows = self._client.query(
+            rows = self._query(
                 f"SELECT count() AS replicas FROM {all_replicas(fanout, 'system.columns')} "
                 f"WHERE database = currentDatabase() AND table = '{self._table}' "
                 f"AND name = '{_FINGERPRINTS_COLUMN}'"
@@ -715,7 +719,7 @@ class JournalStore:
         the query. The CREATE statement is read whatever identifier quoting the
         user's settings choose; one chkit cannot read stops the run.
         """
-        rows = self._client.query(
+        rows = self._query(
             "SELECT hostName() AS replica, create_table_query FROM "
             f"{all_replicas(fanout, 'system.tables')} "
             f"WHERE database = currentDatabase() AND name = '{self._table}'"
@@ -858,7 +862,7 @@ class JournalStore:
                 f"FROM {self._table} FINAL WHERE {where} ORDER BY name{limit}"
             )
             try:
-                return self._client.query(
+                return self._query(
                     f"{sql} SETTINGS select_sequential_consistency = 1"
                 ).rows
             except Exception as exc:
@@ -866,11 +870,11 @@ class JournalStore:
                 # reads, so there is no write of its own to wait for.
                 if not _is_clickhouse_error(exc, _READONLY):
                     raise
-                return self._client.query(sql).rows
+                return self._query(sql).rows
         # The fingerprints come from the same row version as the operations.
         latest = f", latest.6 AS {_FINGERPRINTS_COLUMN}" if fingerprints else ""
         versioned = f", {fingerprint_select}" if fingerprints else ""
-        return self._client.query(
+        return self._query(
             "SELECT name, toString(latest.1) AS applied_at, latest.2 AS checksum, "
             "latest.3 AS chkit_version, latest.4 AS migration_completed, "
             f"latest.5 AS operations{latest} FROM (SELECT name, argMax(tuple(applied_at, "
@@ -958,7 +962,7 @@ class JournalStore:
         if self._database_missing or self._table_missing:
             return EveryCopyRead(covered=True, op=None)
         database = self._database_name()
-        rows = self._client.query(
+        rows = self._query(
             "SELECT engine FROM system.tables WHERE database = currentDatabase() "
             f"AND name = '{self._table}'"
         ).rows
@@ -998,7 +1002,7 @@ class JournalStore:
         cluster = override.cluster if override is not None else (self._cluster or "default")
         # Every server of the cluster answers, or the read fails: an
         # unavailable one is never skipped, and no limit cuts the reply short.
-        copies = self._client.query(
+        copies = self._query(
             "SELECT replica, members, present, applied_at, operations, operation_fingerprints "
             f"FROM clusterAllReplicas('{_escape_sql_string(cluster)}', view({per_copy}))",
             settings={**STRICT_CONTROL_SETTINGS, "skip_unavailable_shards": 0},

@@ -1,3 +1,1 @@
-Plugin hooks run as in TS (#488): `status`, `check`, `drift` and `query` give them every
-flag that was passed, `generate` and `snapshot rebuild` run `on_init` and `get_context` (so
-they show the ObsessionDB service banner), and `pull` runs `on_config_loaded`.
+Plugin lifecycle hooks run around every command with the supplied flags and final exit code, including failures; when several `get_context` hooks provide executors, the last is used and the others are closed.

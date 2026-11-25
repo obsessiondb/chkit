@@ -1,12 +1,13 @@
-import { createClickHouseExecutor, createStatelessClickHouseExecutor } from '@chkit/clickhouse'
+import { type createClickHouseExecutor, createStatelessClickHouseExecutor } from '@chkit/clickhouse'
 import { createPluginRunner, withFactoryDefaults } from '@chkit/core'
 
-import { executeBackfill, type BackfillProgress } from './async-backfill.js'
-import { buildChunkExecutionSql } from './chunking/sql.js'
+import { BackfillInterruptedError, CHECKPOINT_VERSION, executeBackfill, untilAborted } from './async-backfill.js'
+import { assertInsertSettingsKeepPinned, buildChunkExecutionSql, deliveryOverrideWarning, effectiveInsertSettings, type InsertSettings } from './chunking/sql.js'
 import { generateIdempotencyToken } from './chunking/utils/ids.js'
 import { BackfillConfigError } from './errors.js'
 import {
   CheckSchema,
+  insertSettingsFromOptions,
   PLAN_FLAGS,
   PLAN_FLAG_MAP,
   PLAN_ID_FLAGS,
@@ -30,7 +31,7 @@ import {
   type StatusOptions,
 } from './options.js'
 import { planPayload, statusPayload, cancelPayload, doctorPayload } from './payload.js'
-import { assertBackfillTargetSafe, assertReplayColumnsStillInsertable, buildBackfillPlan } from './planner.js'
+import { assertBackfillTargetSafe, assertPinnedInsertSettingsAccepted, assertReplayColumnsStillInsertable, buildBackfillPlan, readPinnedSettingAliases, unprovableTargetFailures } from './planner.js'
 import { evaluateBackfillCheck } from './check.js'
 import { cancelBackfillRun, getBackfillDoctorReport, getBackfillStatus } from './queries.js'
 import {
@@ -42,6 +43,7 @@ import {
   summarizeRunStatus,
   writeJson,
 } from './state.js'
+import { runLockPath, withRunLock } from './run-lock.js'
 import type {
   BackfillPlugin,
   BackfillPluginCommandContext,
@@ -67,13 +69,13 @@ async function runBackfill(input: {
   concurrency: number
   pollIntervalMs: number
   stateDir?: string
-  resumeFrom?: BackfillProgress
-  replayFailed?: boolean
+  resume?: { replayFailed: boolean; acceptUnknown: boolean }
   configPath: string
   config: Parameters<typeof readPlan>[0]['config']
   clickhouse: NonNullable<Parameters<typeof createClickHouseExecutor>[0]>
   print: (value: unknown) => void
   jsonMode: boolean
+  insertSettings?: InsertSettings
 }): Promise<number> {
   const { plan, stateDir } = await readPlan({
     planId: input.planId,
@@ -82,19 +84,53 @@ async function runBackfill(input: {
     stateDir: input.stateDir,
   })
 
+  const paths = backfillPaths(stateDir, plan.planId)
+
+  // The lock is held from before the checkpoint is read until the run ends,
+  // so two runs or resumes never submit one chunk under two query ids, and
+  // released on SIGINT or SIGTERM once no chunk can write the checkpoint (#765).
+  return withRunLock(runLockPath(paths.runsDir, plan.planId), plan.planId, (signal) =>
+    runBackfillLocked(input, plan, paths, signal),
+  )
+}
+
+async function runBackfillLocked(
+  input: Parameters<typeof runBackfill>[0],
+  plan: Awaited<ReturnType<typeof readPlan>>['plan'],
+  paths: ReturnType<typeof backfillPaths>,
+  signal: AbortSignal,
+): Promise<number> {
+  // insertSettings that would undo what chkit writes on the INSERT are
+  // refused before anything is read or submitted.
+  const cutover = Boolean(plan.execution.cutoverKey?.length && plan.execution.targetColumns?.length)
+  assertInsertSettingsKeepPinned(input.insertSettings, undefined, { cutover })
+  // Check for existing run state
+  const existingRun = await readRun(paths.runPath)
+
+  if (input.resume) {
+    if (!existingRun) {
+      throw new BackfillConfigError(
+        `Run state not found for plan ${plan.planId}. Start with backfill run before resume.`
+      )
+    }
+    if (existingRun.status === 'completed') {
+      if (input.jsonMode) {
+        input.print({ ok: true, noop: true, planId: plan.planId, status: 'completed', message: 'Run already completed. Nothing to resume.' })
+      } else {
+        input.print(`Backfill ${plan.planId}: already completed. Nothing to resume.`)
+      }
+      return 0
+    }
+  }
+  const resumeFrom = input.resume ? existingRun?.progress : undefined
+
   ensureEnvironmentMatch({
     plan,
     clickhouse: input.clickhouse,
     forceEnvironment: input.forceEnvironment,
   })
 
-  const paths = backfillPaths(stateDir, plan.planId)
-
-  // Check for existing run state
-  const existingRun = await readRun(paths.runPath)
-  const resumeFrom = input.resumeFrom
-
-  if (existingRun && !resumeFrom) {
+  if (existingRun && !input.resume) {
     // `run` command (no resumeFrom) must not silently continue an existing run.
     // Users should use `backfill resume` instead.
     const status = existingRun.status
@@ -113,18 +149,47 @@ async function runBackfill(input: {
     )
   }
 
-  const db = createClickHouseExecutor(input.clickhouse)
+  // Chunk workers read and poll concurrently, which a session-bound executor
+  // rejects ("Session is locked by a concurrent client"): a stateless one.
+  const db = createStatelessClickHouseExecutor(input.clickhouse)
 
   try {
     const [database, table] = plan.target.split('.')
     if (!database || !table) throw new BackfillConfigError('Invalid backfill target.')
-    const insertableColumns = await assertBackfillTargetSafe({ database, table, mode: plan.execution.mode, query: (sql, settings) => db.query(sql, settings) })
+    // A metadata read that hangs must not keep an interrupted run, and its lock.
+    const insertableColumns = await untilAborted(
+      assertBackfillTargetSafe({ database, table, mode: plan.execution.mode, query: (sql, settings) => db.query(sql, settings) }),
+      signal,
+      () => new BackfillInterruptedError(`Backfill plan ${plan.planId}: interrupted.`),
+    )
+    const aliases = await untilAborted(
+      readPinnedSettingAliases((sql, settings) => db.query(sql, settings)),
+      signal,
+      () => new BackfillInterruptedError(`Backfill plan ${plan.planId}: interrupted.`),
+    )
+    assertInsertSettingsKeepPinned(input.insertSettings, aliases, { cutover })
+    const insertSettings = effectiveInsertSettings(input.insertSettings, aliases)
+    const warning = deliveryOverrideWarning(insertSettings)
+    if (warning) process.stderr.write(`${warning}\n`)
+    await untilAborted(
+      assertPinnedInsertSettingsAccepted({ planId: plan.planId, query: (sql, settings) => db.query(sql, settings), insertSettings, cutover, token: plan.execution.requireIdempotencyToken && !cutover }),
+      signal,
+      () => new BackfillInterruptedError(`Backfill plan ${plan.planId}: interrupted.`),
+    )
+    const unprovableFailures = await untilAborted(
+      unprovableTargetFailures({ database, table, query: (sql, settings) => db.query(sql, settings) }),
+      signal,
+      () => new BackfillInterruptedError(`Backfill plan ${plan.planId}: interrupted.`),
+    )
     assertReplayColumnsStillInsertable({
       planId: plan.planId,
       target: plan.target,
       targetColumns: plan.execution.targetColumns,
       insertableColumns,
     })
+    // A resume keeps the format it read until executeBackfill reports
+    // progress, which is always in this release's format.
+    const checkpointVersion = input.resume ? existingRun?.checkpointVersion : CHECKPOINT_VERSION
     const runState: BackfillRunState = {
       planId: plan.planId,
       target: plan.target,
@@ -132,10 +197,12 @@ async function runBackfill(input: {
       startedAt: existingRun?.startedAt ?? nowIso(),
       updatedAt: nowIso(),
       progress: resumeFrom ?? {},
+      ...(checkpointVersion === undefined ? {} : { checkpointVersion }),
     }
 
     await writeJson(paths.runPath, runState)
 
+    let progressWrites: Promise<void> = Promise.resolve()
     const result = await executeBackfill({
       executor: db,
       cluster: input.clickhouse.cluster,
@@ -153,6 +220,7 @@ async function runBackfill(input: {
           mvReplayQueries: plan.execution.mvReplayQueries,
           targetColumns: plan.execution.targetColumns,
           cutoverKey: plan.execution.cutoverKey,
+          insertSettings,
           idempotencyToken: plan.execution.requireIdempotencyToken
             ? generateIdempotencyToken(plan.planId, planChunk.id)
             : '',
@@ -161,14 +229,29 @@ async function runBackfill(input: {
       concurrency: input.concurrency,
       pollIntervalMs: input.pollIntervalMs,
       resumeFrom,
-      replayFailed: input.replayFailed,
-      onProgress: async (progress) => {
+      checkpointVersion: existingRun?.checkpointVersion,
+      signal,
+      replayFailed: input.resume?.replayFailed,
+      acceptUnknown: input.resume?.acceptUnknown,
+      unprovableFailures,
+      // Chunks report progress concurrently; one write at a time keeps an
+      // older snapshot's rename from landing after a newer one.
+      onProgress: (progress) => {
         runState.progress = progress
+        runState.checkpointVersion = CHECKPOINT_VERSION
         runState.updatedAt = nowIso()
-        await writeJson(paths.runPath, runState)
+        progressWrites = progressWrites.then(() => writeJson(paths.runPath, runState))
+        return progressWrites
       },
     })
+    await progressWrites
 
+    // A run is completed only when every chunk is done (#765).
+    if (result.failed === 0 && result.completed !== result.total) {
+      throw new Error(
+        `Backfill plan ${plan.planId}: ${result.total - result.completed} of ${result.total} chunks did not run, so the run is not marked completed. Resume it.`,
+      )
+    }
     runState.status = result.failed > 0 ? 'failed' : 'completed'
     runState.completedAt = nowIso()
     runState.updatedAt = nowIso()
@@ -204,7 +287,10 @@ async function runBackfill(input: {
 
     return result.failed > 0 ? 1 : 0
   } finally {
-    await db.close()
+    // After an interrupt the process exits once the lock is released: a
+    // close that waits for a running INSERT would hold it until the INSERT ends.
+    if (signal.aborted) void db.close().catch(() => undefined)
+    else await db.close()
   }
 }
 
@@ -215,13 +301,14 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
   const runOptionsSchema = withFactoryDefaults(RunSchema, factoryOptions)
   const resumeOptionsSchema = withFactoryDefaults(ResumeSchema, factoryOptions)
   const statusOptionsSchema = withFactoryDefaults(StatusSchema, factoryOptions)
+  const pluginOptionsSchema = withFactoryDefaults(PluginConfigSchema, factoryOptions)
 
   return {
     manifest: {
       name: 'backfill',
       apiVersion: 1,
     },
-    optionsSchema: withFactoryDefaults(PluginConfigSchema, factoryOptions),
+    optionsSchema: pluginOptionsSchema,
     commands: [
       {
         name: 'plan',
@@ -259,8 +346,10 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
                 },
                 // ObsessionDB enables parallel replicas by default, which inflates
                 // aggregate results (count, GROUP BY). Disable for planning queries
-                // until ObsessionDB handles it at the profile level.
-                querySettings: { enable_parallel_replicas: 0 },
+                // until ObsessionDB handles it at the profile level. Under the name
+                // every ClickHouse version accepts: enable_parallel_replicas is only
+                // an alias of it from 24.10 on, and older servers reject it.
+                querySettings: { allow_experimental_parallel_reading_from_replicas: 0 },
               })
 
               const payload = planPayload(output)
@@ -333,6 +422,7 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
               concurrency: opts.concurrency,
               pollIntervalMs: opts.pollIntervalMs,
               stateDir: opts.stateDir,
+              insertSettings: insertSettingsFromOptions(pluginOptionsSchema.safeParse(context.rawOptions)),
               configPath: context.configPath,
               config: context.config,
               clickhouse: context.config.clickhouse,
@@ -361,36 +451,14 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
               )
             }
 
-            const { stateDir } = await readPlan({
-              planId: opts.planId,
-              configPath: context.configPath,
-              config: context.config,
-              stateDir: opts.stateDir,
-            })
-            const paths = backfillPaths(stateDir, opts.planId)
-            const existingRun = await readRun(paths.runPath)
-            if (!existingRun) {
-              throw new BackfillConfigError(
-                `Run state not found for plan ${opts.planId}. Start with backfill run before resume.`
-              )
-            }
-            if (existingRun.status === 'completed') {
-              if (context.jsonMode) {
-                context.print({ ok: true, noop: true, planId: opts.planId, status: 'completed', message: 'Run already completed. Nothing to resume.' })
-              } else {
-                context.print(`Backfill ${opts.planId}: already completed. Nothing to resume.`)
-              }
-              return 0
-            }
-
             return runBackfill({
               planId: opts.planId,
               forceEnvironment: opts.forceEnvironment,
               concurrency: opts.concurrency,
               pollIntervalMs: opts.pollIntervalMs,
               stateDir: opts.stateDir,
-              resumeFrom: existingRun.progress,
-              replayFailed: opts.replayFailed,
+              insertSettings: insertSettingsFromOptions(pluginOptionsSchema.safeParse(context.rawOptions)),
+              resume: { replayFailed: opts.replayFailed, acceptUnknown: opts.acceptUnknown },
               configPath: context.configPath,
               config: context.config,
               clickhouse: context.config.clickhouse,

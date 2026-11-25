@@ -268,7 +268,7 @@ class _ScriptedClient:
         self.events: list[str] = []
         self._submit_raises = submit_raises
 
-    def query(self, statement: str) -> QueryResult:
+    def query(self, statement: str, settings: object = None) -> QueryResult:
         self.events.append(f"query: {statement}")
         return QueryResult(
             column_names=["now_ms", "database"],
@@ -1877,8 +1877,10 @@ def test_a_user_that_cannot_read_query_log_is_told_which_grant_it_lacks() -> Non
         ]
     )
     journal = _FakeJournalStore(state=_started_record())
-    with pytest.raises(RuntimeError) as raised:
+    with pytest.raises(MigrateError) as raised:
         apply_async_statement(_rerun_input(client, journal))
+    # The attempt's outcome stays unknown (#782).
+    assert raised.value.code == "async_outcome_unknown"
     message = str(raised.value)
     assert message.startswith(
         "Async migration step alter_table_modify_column (query_id "
@@ -2215,6 +2217,7 @@ def test_a_submission_given_up_before_it_is_sent_never_starts() -> None:
 
     release = threading.Event()
     submission = migrate_async_apply._Submission(submit)
+    submission.start()
     submission.abandon()
     release.set()
     assert submission.wait() is not None
@@ -2718,3 +2721,209 @@ def test_a_rerun_after_ctrl_c_before_the_submit_sends_the_attempt_once(
     assert result.kind == "completed"
     assert rerun.executed == []
     assert len(rerun.submitted) == 1
+
+
+class _ParkedSubmitClient(_ScriptedClient):
+    """Its submit runs through the guard in steps a test releases: before the
+    request starts (``connect``), after it connected (``write``) and once its
+    bytes are written (``written``). ``sent`` lists the requests written."""
+
+    def __init__(self, statuses: list[QueryStatus | BaseException]) -> None:
+        super().__init__(statuses=statuses)
+        self.connect = threading.Event()
+        self.write = threading.Event()
+        self.written = threading.Event()
+        self.writing = threading.Event()
+        self.sent: list[str] = []
+        self.done = threading.Event()
+
+    def submit(
+        self,
+        statement: str,
+        query_id: str | None = None,
+        settings: dict[str, Any] | None = None,
+        *,
+        before_send: Any = None,
+    ) -> str:
+        try:
+            self.connect.wait(timeout=30)
+            before_send()
+            self.write.wait(timeout=30)
+            before_send.begin_write()
+            self.writing.set()
+            self.written.wait(timeout=30)
+            self.sent.append(statement)
+            before_send.end_write()
+            return query_id or "auto-id"
+        finally:
+            self.done.set()
+
+
+def _interrupt_as_the_submit_thread_starts(
+    monkeypatch: pytest.MonkeyPatch, after_start: Any = None
+) -> None:
+    """Ctrl-C right after the submit thread started, as it lands while
+    ``Thread.start`` returns."""
+    real_start = threading.Thread.start
+
+    def start(thread: threading.Thread) -> None:
+        real_start(thread)
+        if thread.name == migrate_async_apply.SUBMIT_THREAD_NAME:
+            if after_start is not None:
+                after_start()
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+
+
+def _last_marker(journal: _FakeJournalStore) -> str:
+    return [w.operations[0].last_error for w in journal.writes or []][-1]
+
+
+def test_ctrl_c_as_the_submit_thread_starts_cancels_the_submit_and_reverts_to_prepared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ctrl-C while the submit thread starts gives the submit up before the
+    run releases its migrate lock: the request never starts, and the record
+    goes back to prepared, since nothing was sent."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+    _interrupt_as_the_submit_thread_starts(monkeypatch)
+    client = _ParkedSubmitClient(statuses=[QueryStatus(status="unknown")])
+    journal = _FakeJournalStore()
+    with pytest.raises(KeyboardInterrupt):
+        apply_async_statement(_input(client=client, journal=journal))
+    # The migrate lock is released here; then the parked send resumes.
+    client.connect.set()
+    client.write.set()
+    client.written.set()
+    assert client.done.wait(timeout=5)
+    assert client.sent == []
+    assert _last_marker(journal) == _PREPARED_MARKER
+
+
+def test_ctrl_c_as_the_submit_thread_starts_after_the_request_was_written_keeps_the_fence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request already written is not taken back: the record stays "may have
+    been sent", so the next run reads its outcome instead of submitting again."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+    client = _ParkedSubmitClient(statuses=[QueryStatus(status="unknown")])
+    client.connect.set()
+    client.write.set()
+    client.written.set()
+    _interrupt_as_the_submit_thread_starts(monkeypatch, lambda: client.done.wait(timeout=5))
+    journal = _FakeJournalStore()
+    with pytest.raises(KeyboardInterrupt):
+        apply_async_statement(_input(client=client, journal=journal))
+    assert client.sent == ["INSERT INTO db.t SELECT 1"]
+    assert _last_marker(journal) == _ATTEMPT_MARKER
+
+
+def test_ctrl_c_as_the_submit_thread_starts_waits_for_a_write_under_way(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request being written keeps the run, and its migrate lock, until it
+    is written; its record stays "may have been sent"."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+    client = _ParkedSubmitClient(statuses=[QueryStatus(status="unknown")])
+    client.connect.set()
+    client.write.set()
+
+    def finish_the_write_later() -> None:
+        assert client.writing.wait(timeout=5)
+        threading.Timer(0.3, client.written.set).start()
+
+    _interrupt_as_the_submit_thread_starts(monkeypatch, finish_the_write_later)
+    journal = _FakeJournalStore()
+    with pytest.raises(KeyboardInterrupt):
+        apply_async_statement(_input(client=client, journal=journal))
+    assert client.sent == ["INSERT INTO db.t SELECT 1"]
+    assert _last_marker(journal) == _ATTEMPT_MARKER
+
+
+def test_ctrl_c_before_the_submit_thread_is_created_reverts_to_prepared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ctrl-C after the attempt's record and before its submit exists puts the
+    record back to prepared, and nothing is sent."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+
+    def interrupted(_ms: int) -> str:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(migrate_async_apply, "_query_log_lower_bound", interrupted)
+    client = _ParkedSubmitClient(statuses=[QueryStatus(status="unknown")])
+    journal = _FakeJournalStore()
+    with pytest.raises(KeyboardInterrupt):
+        apply_async_statement(_input(client=client, journal=journal))
+    assert client.sent == []
+    assert not client.done.is_set()
+    assert _last_marker(journal) == _PREPARED_MARKER
+
+
+def test_ctrl_c_while_a_failed_run_waits_for_its_submit_cancels_the_submit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run that failed waits for its submit request; Ctrl-C during that wait
+    gives the submit up before the migrate lock is released, so a request
+    still connecting never writes."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+    real_join = threading.Thread.join
+
+    def join(thread: threading.Thread, timeout: float | None = None) -> None:
+        if thread.name == migrate_async_apply.SUBMIT_THREAD_NAME:
+            # The send connects only after the interrupted wait.
+            threading.Timer(0.3, client.write.set).start()
+            raise KeyboardInterrupt
+        real_join(thread, timeout)
+
+    monkeypatch.setattr(threading.Thread, "join", join)
+    client = _ParkedSubmitClient(
+        statuses=[
+            QueryStatus(status="unknown"),
+            QueryStatus(status="running", written_rows=1, written_bytes=8),
+        ]
+    )
+    client.connect.set()
+    client.written.set()
+
+    def log(line: str) -> None:
+        # A failure that does not give the submit up, as a closed stdout.
+        if "written=" in line:
+            msg = "log failed"
+            raise RuntimeError(msg)
+
+    with pytest.raises(KeyboardInterrupt):
+        apply_async_statement(_input(client=client, journal=_FakeJournalStore(), log=log))
+    client.write.set()
+    assert client.done.wait(timeout=5)
+    assert client.sent == []
+
+
+def test_a_second_abandon_does_not_wait_for_the_connect_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run that gave the submit up already does not wait out the connect
+    timeout a second time when its stop unwinds (#793)."""
+    # The connect wait is the timeout plus a 5 s margin: 0.5 s here.
+    monkeypatch.setattr(migrate_async_apply, "SUBMIT_CONNECT_TIMEOUT_SECONDS", -4.5)
+    release = threading.Event()
+
+    def submit(before_send: Any) -> None:
+        before_send()
+        release.wait(timeout=30)
+        before_send.begin_write()
+
+    submission = migrate_async_apply._Submission(submit)
+    submission.start()
+    try:
+        deadline = time.monotonic() + 5
+        while submission._state != "connecting" and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert submission.abandon() is False
+        began = time.monotonic()
+        assert submission.abandon_unsent() is False
+        assert time.monotonic() - began < 0.25
+    finally:
+        release.set()
+    assert submission.wait() is not None
