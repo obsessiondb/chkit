@@ -419,7 +419,7 @@ export async function applyMigration(input: {
         const wrapped = statementError({ file, index: i, total: statements.length, statement, error })
         // A stop of an async statement keeps its code for --json (#767).
         if (error instanceof MigrateError && ASYNC_STOP_CODES.has(error.code)) {
-          throw new MigrateError(error.code, wrapped.message)
+          throw new MigrateError(error.code, wrapped.message, { cause: error })
         }
         throw wrapped
       }

@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 from chkit.clickhouse.client import ClickHouseClient
+from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout_or_raise
 from chkit.core.model import ChxResolvedClickHouseConfig
 from tests.e2e_testkit import (
     create_journal_table_name,
@@ -181,18 +182,31 @@ def _values(fixture: Fixture) -> list[int]:
 def test_a_killed_alter_update_whose_mutation_completed_is_not_run_again(
     killed: Fixture,
 ) -> None:
+    fanout = resolve_replica_fanout_or_raise(killed.client)
+    processes = all_replicas(fanout, "system.processes") if fanout else "system.processes"
     first = _start(killed)
     running = poll_until(
         lambda: killed.client.query(
-            "SELECT query_id FROM system.processes WHERE current_database = "
+            f"SELECT query_id FROM {processes} WHERE current_database = "
             f"'{killed.database}' AND query LIKE 'ALTER TABLE t UPDATE%'"
         ).rows,
         lambda rows: len(rows) > 0,
         timeout=60.0,
         interval=0.2,
     )
-    killed.client.execute(f"KILL QUERY WHERE query_id = '{running[0]['query_id']}' SYNC")
-    _wait(first)
+    assert running, "the async ALTER must be observed before cancellation"
+    cancellation = poll_until(
+        lambda: killed.client.query_control(
+            f"KILL QUERY WHERE query_id = '{running[0]['query_id']}' SYNC", 10_000
+        ).rows,
+        lambda rows: len(rows) > 0,
+        timeout=10.0,
+        interval=0.1,
+    )
+    assert "finished" in [row["kill_status"] for row in cancellation]
+    stopped = _wait(first)
+    assert stopped.exit_code == 1, _diagnostic("killed run", stopped)
+    assert json.loads(stopped.stdout)["error"]["code"] == "async_outcome_unknown"
     expected = [100, 101, 102, 103, 104]
     assert poll_until(lambda: _values(killed), lambda rows: rows == expected, timeout=60.0) == (
         expected

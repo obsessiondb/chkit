@@ -79,6 +79,35 @@ describe('query JSONEachRow transport', () => {
   })
 })
 
+describe('framed decision reads (OBS-16)', () => {
+  test.each(['', ' \n', '{"meta":[],"data":[', 'not JSON'])(
+    'official clients reject a missing or incomplete envelope: %j', async (body) => {
+      await withTransport(() => new Response(body), async (executor) => {
+        await expect(executor.query('SELECT name FROM journal', { default_format: 'JSONStrings' })).rejects.toThrow()
+        await expect(executor.queryControl?.('SELECT query_id FROM system.processes', 1000)).rejects.toThrow()
+        await expect(executor.queryStatus('old', { runningOnly: true })).rejects.toThrow()
+      })
+    },
+  )
+
+  test('accepts genuine zero rows through the official JSON envelope parser', async () => {
+    await withTransport(() => new Response('{"meta":[],"data":[],"rows":0}'), async (executor) => {
+      expect(await executor.query('SELECT name FROM journal', { default_format: 'JSONStrings' })).toEqual([])
+      expect(await executor.queryControl?.('SELECT query_id FROM system.processes', 1000)).toEqual([])
+      expect(await executor.queryStatus('old', { runningOnly: true })).toEqual({ status: 'unknown' })
+    })
+  })
+
+  test('requests JSONStrings and preserves exact digits without a trailing newline', async () => {
+    await withTransport(() => new Response('{"meta":[],"data":[{"n":"18446744073709551615"}],"rows":1}'), async (executor, requests) => {
+      expect(await executor.query('SELECT n FROM journal', { default_format: 'JSONStrings' })).toEqual([{ n: '18446744073709551615' }])
+      expect(requests[0]?.sql).toMatch(/FORMAT JSONStrings\b/)
+      expect(requests[0]?.url.searchParams.has('output_format_json_quote_64bit_integers')).toBe(false)
+      expect(requests[0]?.url.searchParams.has('output_format_json_quote_decimals')).toBe(false)
+    })
+  })
+})
+
 async function streamRows(
   executor: ClickHouseExecutor,
   sql: string,

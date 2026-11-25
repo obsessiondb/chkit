@@ -13,7 +13,7 @@ bunx chkit check
 bunx chkit generate --name add_lemlist
 # Review the migration before applying it.
 bunx chkit migrate --apply
-bunx chkit ingest run --tag provider:lemlist
+bunx chkit sync run --tag provider:lemlist
 ```
 
 ## Resources
@@ -41,8 +41,8 @@ Activities use the provider's inclusive `minDate`/`maxDate` filters on `createdA
 The upper bound does not freeze the provider dataset. Late arrivals or deletions can still change offset pages, and older activities can receive backfilled metadata. Do not treat activity offsets as change cursors or row chunks as immutable page identities. Periodic historical replay refreshes metadata and catches arrivals beyond the overlap:
 
 ```sh
-bunx chkit ingest run --tag provider:lemlist --tag resource:activities --backfill reconcile-2026-10-04 --from 2000-01-01
-bunx chkit ingest status --tag provider:lemlist --json
+bunx chkit sync run --tag provider:lemlist --tag resource:activities --backfill reconcile-2026-10-04 --from 2000-01-01
+bunx chkit sync status --tag provider:lemlist --json
 ```
 
 Use a new backfill ID for each complete reconciliation; reusing an ID resumes that backfill. A reused ID with an upper bound earlier than its committed frontier is rejected; use a new ID for a narrower historical range. Date intervals intentionally have inclusive shared boundaries; stable `_id` row keys reconcile repeated observations. Empty completion markers carry interval identities, while mutable row chunks do not.

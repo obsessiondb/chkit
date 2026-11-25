@@ -1,4 +1,4 @@
-import { rawRows, rawTable, timestampWindow, type IncrementalStrategy, type ReadContext, type TimestampRange, type TimestampWindowState } from '@chkit/plugin-ingest'
+import { rawRows, rawTable, timestampWindow, type IncrementalStrategy, type ReadContext, type TimestampRange, type TimestampWindowState } from '@chkit/plugin-sync'
 
 import { createLemlistClient } from '../client.js'
 import { lemlistConfig, type LemlistReaderConfig } from '../config.js'

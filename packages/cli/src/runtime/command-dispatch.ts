@@ -264,10 +264,18 @@ export function forwardedCommandFlags(
 			const targets = Array.isArray(extension.command)
 				? extension.command
 				: [extension.command]
-			return targets.includes(pluginName) ? [...extension.flags] : []
+			return targets.some((target) => findForwardedPlugin(plugins, target)?.plugin.manifest.name === pluginName)
+				? [...extension.flags]
+				: []
 		}),
 	)
 	return [...(command.flags ?? []), ...extensionFlags]
+}
+
+export function findForwardedPlugin(plugins: PluginRuntime['plugins'], name: string | undefined) {
+	const byName = (namespace: string | undefined) =>
+		plugins.find((entry) => !entry.internal && entry.plugin.manifest.name === namespace)
+	return byName(name) ?? (name === 'sync' ? byName('ingest') : undefined)
 }
 
 /**
@@ -299,12 +307,10 @@ function parseForwardedInitFlags(
 ): ParsedFlags | null {
 	const { flags, rest } = forwarderFlags(argsAfterCommand)
 	const { pluginName, commandName, commandArgs } = routeForwardedArgs(rest)
-	// As in `cmdPlugin`, the built-in plugins are not targets of `chkit plugin`.
-	const command = plugins
-		.find((entry) => !entry.internal && entry.plugin.manifest.name === pluginName)
-		?.plugin.commands?.find((cmd) => cmd.name === commandName)
-	if (!pluginName || !command) return flags
-	const defs = forwardedCommandFlags(plugins, pluginName, command)
+	const plugin = findForwardedPlugin(plugins, pluginName)?.plugin
+	const command = plugin?.commands?.find((cmd) => cmd.name === commandName)
+	if (!plugin || !command) return flags
+	const defs = forwardedCommandFlags(plugins, plugin.manifest.name, command)
 	try {
 		const parsed = parsePluginCommandArgs(commandArgs, defs)
 		// As in `cmdPlugin`, a command that takes no arguments rejects them (#659).

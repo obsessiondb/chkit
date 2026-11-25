@@ -1016,7 +1016,7 @@ export function createExecutorWithClient(
 			controlClient ??= createStatelessClickHouseClient(config, DEFAULT_CLICKHOUSE_SETTINGS, { keepAlive: false })
 			const activeClient = controlClient
 			const controller = new AbortController()
-			let result: Awaited<ReturnType<ClickHouseClient['query']>> | undefined
+			let result: { close(): void } | undefined
 			let expired = false
 			let consumed = false
 			let timer: ReturnType<typeof setTimeout> | undefined
@@ -1032,14 +1032,21 @@ export function createExecutorWithClient(
 				return await Promise.race([deadline, (async () => {
 					const settings = { ...options?.settings, ...STRICT_CONTROL_SETTINGS }
 					delete settings.query_id
-					result = await activeClient.query({
-						query: sql, format: 'JSONEachRow', abort_signal: controller.signal,
+					if (/^INSERT\b/i.test(sql.trimStart()) || /^KILL\b[\s\S]*\bASYNC\s*;?$/i.test(sql.trimStart())) {
+						const written = await activeClient.command({ query: sql, abort_signal: controller.signal,
+							...(options?.queryId ? { query_id: options.queryId } : {}), clickhouse_settings: settings })
+						assertStreamedQuerySucceeded({ response_headers: written.response_headers, query_id: written.query_id, sql })
+						return []
+					}
+					const response = await activeClient.query({
+						query: sql, format: 'JSONStrings', abort_signal: controller.signal,
 						...(options?.queryId ? { query_id: options.queryId } : {}),
 						clickhouse_settings: settings,
 					})
-					if (expired) { result.close(); throw new Error('Cancellation deadline expired') }
-					assertStreamedQuerySucceeded({ response_headers: result.response_headers, query_id: result.query_id, sql })
-					const rows = parseJsonEachRow<T>(await result.text())
+					result = response
+					if (expired) { response.close(); throw new Error('Cancellation deadline expired') }
+					assertStreamedQuerySucceeded({ response_headers: response.response_headers, query_id: response.query_id, sql })
+					const { data: rows } = await response.json<T>()
 					consumed = true
 					return rows
 				})()])
@@ -1047,10 +1054,12 @@ export function createExecutorWithClient(
 		},
 		async query<T>(sql: string, settings?: ClickHouseSettings): Promise<T[]> {
 			try {
-				const clickhouseSettings = await readSettings(settings)
+				const { default_format, ...querySettings } = settings ?? {}
+				const framed = default_format === 'JSONStrings'
+				const clickhouseSettings = await readSettings(framed ? querySettings : settings)
 				const result = await client.query({
 					query: sql,
-					format: 'JSONEachRow',
+					format: framed ? 'JSONStrings' : 'JSONEachRow',
 					http_headers: { 'X-DDL': '1' },
 					...(clickhouseSettings ? { clickhouse_settings: clickhouseSettings } : {}),
 				})
@@ -1067,7 +1076,7 @@ export function createExecutorWithClient(
 				// The client's JSONEachRow decoder drops the final row when the
 				// response ends without a newline. Decode every nonempty line,
 				// without rounding 64-bit integers and Decimals (#415).
-				const rows = parseJsonEachRow<T>(await result.text())
+				const rows = framed ? (await result.json<T>() as { data: T[] }).data : parseJsonEachRow<T>(await result.text())
 				logProfiling(
 					profiler,
 					sql,
@@ -1269,18 +1278,16 @@ export function createExecutorWithClient(
 				const running = await client.query({
 					query: `SELECT read_rows, read_bytes, written_rows, written_bytes, elapsed FROM ${processesFrom} WHERE user = currentUser() AND query_id = {qid:String} SETTINGS skip_unavailable_shards = ${skipUnavailable}`,
 					query_params: { qid: queryId },
-					format: 'JSONEachRow',
+					format: 'JSONStrings',
 				})
-				// Decoded as executor.query() does (#436). A UInt64 count arrives as a
-				// number, or as a string of its digits beyond 2^53 or when the
-				// profile sets output_format_json_quote_64bit_integers.
-				const runningRows = parseJsonEachRow<{
+
+				const { data: runningRows } = await running.json<{
 					read_rows: number | string
 					read_bytes: number | string
 					written_rows: number | string
 					written_bytes: number | string
 					elapsed: number
-				}>(await running.text())
+				}>()
 				const [proc] = runningRows
 				if (proc) {
 					return {
@@ -1322,9 +1329,9 @@ ORDER BY event_time DESC
 ${options?.includeBeforeStart ? '' : 'LIMIT 1'}
 SETTINGS skip_unavailable_shards = ${skipUnavailable}`,
 					query_params: { qid: queryId, after: afterTime },
-					format: 'JSONEachRow',
+					format: 'JSONStrings',
 				})
-				return queryLogOutcome(parseJsonEachRow<QueryLogRow>(await log.text()))
+				return queryLogOutcome((await log.json<QueryLogRow>()).data)
 			} catch (error) {
 				wrapConnectionError(error, config.url, config.username)
 			}
@@ -1344,7 +1351,13 @@ SETTINGS skip_unavailable_shards = ${skipUnavailable}`,
 FROM system.tables
 WHERE is_temporary = 0
   AND database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA')
-  AND NOT startsWith(name, '_chkit_')`,
+  AND NOT startsWith(name, '_chkit_')
+  AND (database, name) NOT IN (
+    SELECT database, arrayJoin([
+      concat('.inner_id.', toString(uuid)),
+      concat('.tmp.inner_id.', toString(uuid))
+    ]) FROM system.tables WHERE engine = 'MaterializedView'
+  )`,
 			)
 
 			const out: SchemaObjectRef[] = []

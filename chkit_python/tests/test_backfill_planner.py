@@ -375,7 +375,7 @@ events_mv = materialized_view(
     assert "SELECT toStartOfHour(event_time)" in sql
     assert "FROM app.events" in sql
     assert "GROUP BY event_time" in sql
-    assert "SETTINGS async_insert=0" in sql
+    assert "SETTINGS distributed_foreground_insert=1, materialized_views_ignore_errors=0, async_insert=0" in sql
     assert "FROM app.events_agg" not in sql
     # Single MV: no UNION ALL, output identical to prior behavior.
     assert "UNION ALL" not in sql
@@ -505,7 +505,7 @@ def test_omits_idempotency_token_when_disabled(tmp_path: Path) -> None:
     )
 
     assert output.plan.execution.require_idempotency_token is False
-    assert "SETTINGS async_insert=0" in sql
+    assert "SETTINGS distributed_foreground_insert=1, materialized_views_ignore_errors=0, async_insert=0" in sql
     assert "insert_deduplication_token" not in sql
 
 
@@ -856,8 +856,10 @@ def test_a_target_whose_engine_cannot_be_read_cannot_either(
 # Opus delta review: a server that refuses the INSERT's pinned settings
 # (readonly = 1, a settings constraint) fails the run before it submits.
 _PINNED_SQL = (
+    "distributed_foreground_insert=1, materialized_views_ignore_errors=0, "
+    "async_insert=0, asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0, "
     "allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, log_queries=1, "
-    "log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0"
+    "log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0, log_queries_probability=1"
 )
 
 

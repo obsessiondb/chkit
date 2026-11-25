@@ -1,1 +1,0 @@
-`codegen`, `obsessiondb` and `plugin` report `Missing value for --config` when `--config` / `-c` is followed by a token that starts with `--`, as in TS, instead of loading a config file named after that token; under `--json`, `chkit plugin` reports a missing `--config` value with the `usage` error envelope, as in TS.

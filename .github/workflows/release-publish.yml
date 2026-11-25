@@ -14,10 +14,10 @@ name: "Release: publish"
 # Runs on a GitHub-hosted runner: npm Trusted Publishing does not support
 # self-hosted runners, which is what Blacksmith runners register as. The quality
 # gates run `bun run verify`, which starts the local test stack (test/infra) as
-# in ci.yml's verify job, never the shared ObsessionDB test database.
+# in ci.yml's verify job. Stable releases also require the ObsessionDB suite.
 #
 # Prerequisites (configured once, out of band):
-#   - npm Trusted Publisher on each of the 11 packages -> GitHub Actions,
+#   - npm Trusted Publisher on each published package -> GitHub Actions,
 #     obsessiondb/chkit, workflow release-publish.yml, environment release,
 #     with "Allow npm dist-tag" enabled (off by default).
 #   - GitHub environment `release`, deployment branches limited to main.
@@ -56,10 +56,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: bun run ./scripts/manual-release.ts detect
 
+  obsessiondb:
+    needs: detect
+    if: needs.detect.outputs.release == 'true' && !contains(needs.detect.outputs.version, '-')
+    uses: ./.github/workflows/obsessiondb.yml
+    secrets: inherit
+
   publish:
     name: Publish v${{ needs.detect.outputs.version }}
-    needs: detect
-    if: needs.detect.outputs.release == 'true'
+    needs: [detect, obsessiondb]
+    if: >-
+      !cancelled() && needs.detect.outputs.release == 'true' &&
+      (needs.obsessiondb.result == 'success' ||
+       (contains(needs.detect.outputs.version, '-') && needs.obsessiondb.result == 'skipped'))
     runs-on: ubuntu-24.04 # GitHub-hosted: required for npm Trusted Publishing
     environment: release
     concurrency:

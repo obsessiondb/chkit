@@ -1385,6 +1385,70 @@ def test_an_async_statement_without_a_readable_outcome_keeps_async_outcome_unkno
     assert store.writes == []
 
 
+class _FailedLookupAsyncClient(_NoOutcomeAsyncClient):
+    """The outcome lookup of the recorded async attempt fails."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self.error = error
+
+    def query_status(
+        self, _query_id: str, **_options: Any
+    ) -> QueryStatus:
+        raise self.error
+
+
+@pytest.mark.parametrize(
+    ("lookup_error", "text"),
+    [
+        (
+            RuntimeError("HTTP 504: gateway timeout"),
+            "could not check whether a previous attempt is still running "
+            "(HTTP 504: gateway timeout)",
+        ),
+        (
+            RuntimeError(
+                "Code: 497. DB::Exception: default: Not enough privileges. To execute "
+                "this query, it's necessary to have the grant SELECT(type, query_id) ON "
+                "system.query_log. (ACCESS_DENIED)"
+            ),
+            "the ClickHouse user cannot read system.query_log",
+        ),
+    ],
+    ids=["a gateway error", "denied system.query_log access"],
+)
+def test_an_async_statement_whose_fenced_attempt_lookup_fails_keeps_async_outcome_unknown(
+    tmp_path: Path, lookup_error: Exception, text: str
+) -> None:
+    """A lookup of a fenced attempt's outcome that fails leaves the outcome
+    unknown, so --json reports async_outcome_unknown, with the request's error
+    as the cause."""
+    statement = "INSERT INTO db.a SELECT 1;"
+    sql = f"-- operation: load_table_data key=table:db.a risk=safe mode=async\n{statement}\n"
+    attempt = op(0, "started", LOAD, query_id="fenced-query-id").model_copy(
+        update={
+            "last_error": "submitted under its own query id; a retry reads its outcome from "
+            "system.query_log",
+            "fingerprint": statement_fingerprint(statement),
+            "attempt_fenced": True,
+        }
+    )
+    store = FakeStore(in_progress([attempt], checksum=checksum_sql(sql)))
+    client = _FailedLookupAsyncClient(lookup_error)
+    with pytest.raises(MigrateError) as info:
+        _apply(_write(tmp_path, sql), cast(Any, client), store)
+    assert info.value.code == "async_outcome_unknown"
+    assert info.value.message.startswith("Migration m.sql failed at statement 1 of 1")
+    assert f"(query_id fenced-query-id): {text}" in info.value.message
+    # The stop's own error, then the request's.
+    stop = info.value.__cause__
+    assert isinstance(stop, MigrateError)
+    assert stop.code == "async_outcome_unknown"
+    assert stop.__cause__ is lookup_error
+    assert client.calls == []
+    assert store.writes == []
+
+
 def _retry_for(sql: str, previous: str = "old") -> RetryResume:
     return RetryResume(
         migration="m.sql",

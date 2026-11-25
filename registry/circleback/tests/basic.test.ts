@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
-import { runIngestion, selectStreams } from '@chkit/plugin-ingest'
-import { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-ingest/testing'
+import { runIngestion, selectStreams } from '@chkit/plugin-sync'
+import { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-sync/testing'
 
 import { createCirclebackPipeline, circlebackPipeline } from '../index.js'
 import { circlebackConfig, type CirclebackReaderConfig } from '../config.js'
