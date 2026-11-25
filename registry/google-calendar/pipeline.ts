@@ -1,4 +1,4 @@
-import { cursorState, definePipeline, defineStream } from '@chkit/plugin-ingest'
+import { cursorState, definePipeline, defineStream } from '@chkit/plugin-sync'
 
 import { googleCalendarConfig, type GoogleCalendarReaderConfig } from './config.js'
 import { google_calendar_eventsRaw, parseCalendarState, readEvents, type CalendarState } from './sources/events.js'

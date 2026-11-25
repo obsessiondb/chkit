@@ -16,7 +16,7 @@ Format version 1 supports self-contained TypeScript templates. It does not resol
 For a minimal example, save this as `registry/demo/index.ts`:
 
 ```ts
-import { definePipeline, defineStream, rawRows, rawTable } from '@chkit/plugin-ingest'
+import { definePipeline, defineStream, rawRows, rawTable } from '@chkit/plugin-sync'
 
 export const demoEventsRaw = rawTable({ database: 'default', name: 'demo_events_raw' })
 
@@ -49,8 +49,8 @@ Save this as `registry/registry.json`:
       "title": "Demo",
       "description": "A local fixture source for testing registry installation.",
       "dependencies": [
-        "@chkit/core@^0.2.0-beta.8",
-        "@chkit/plugin-ingest@^0.2.0-beta.8"
+        "@chkit/core@^0.2.0-beta.19",
+        "@chkit/plugin-sync@^0.2.0-beta.19"
       ],
       "files": [
         {
@@ -65,8 +65,8 @@ Save this as `registry/registry.json`:
           "version": "0.1.0",
           "language": "typescript",
           "license": "MIT",
-          "chkit": "^0.2.0-beta.8",
-          "ingest": "^0.2.0-beta.8",
+          "chkit": "^0.2.0-beta.19",
+          "ingest": "^0.2.0-beta.19",
           "clickhouse": ">=25.3.0",
           "root": "src/integrations/demo",
           "entry": "index.ts",
@@ -102,7 +102,7 @@ The item name `registry` is reserved because `registry.json` contains the catalo
 | `license` | License for the copied source |
 | `documentation` | Optional HTTP(S) URL of the app's integration guide; shown by CLI list and inspect |
 | `logo` | Optional HTTP(S) URL of the app's logo; included in discovery metadata |
-| `chkit`, `ingest`, `clickhouse` | Supported CLI, ingestion package, and ClickHouse version ranges |
+| `chkit`, `ingest`, `clickhouse` | Supported CLI, Sync plugin, and ClickHouse version ranges. Format 1 uses `ingest` for the plugin range |
 | `root`, `entry`, `exports` | Installation directory, provider entry, and explicit public exports |
 | `resources` | Resource names and descriptions, read scopes, sync strategy (`full`, `timestamp`, or `cursor`), optional `title`, default `table`, and `endpoints` with `method`, `path`, and provider `documentation` URL |
 | `authentication` | Authentication `method`, required `env` names, ordered `setup` steps, and the provider's credential setup `documentation` URL |
@@ -133,7 +133,7 @@ Keep a cumulative integration changelog in `meta.chkit.changelog`:
 
 The first entry matches the template version, and subsequent versions descend without duplicates. Retain notes for earlier releases, including migration details users need when upgrading. CLI inspect, integration guides, and agent-readable Markdown display this same history. Historical artifacts without the optional field remain valid. Older strict clients reject unknown metadata fields; current templates using `changelog` require a supporting CLI version.
 
-Declare npm dependencies as `package@semver-range`. Every item must include `@chkit/core` and `@chkit/plugin-ingest`. Git URLs, local dependencies, and package-manager aliases are outside this format.
+Declare npm dependencies as `package@semver-range`. New items use `@chkit/core` and `@chkit/plugin-sync`. Published items that depend on `@chkit/plugin-ingest` stay valid. Git URLs, local dependencies, and package-manager aliases are outside this format.
 
 Use blank values for secrets in `env`. Never include credentials in metadata or source artifacts. State resource limitations in the item's description and copied README, including deletion behavior and inaccessible API families.
 
@@ -179,7 +179,7 @@ From a separate test project with `package.json`, preview installation and then 
 ```sh
 chkit add /absolute/path/to/registry-output/demo/0.1.0.json --dry-run
 chkit add /absolute/path/to/registry-output/demo/0.1.0.json --yes
-chkit ingest list
+chkit sync list
 chkit generate --name add-demo
 ```
 

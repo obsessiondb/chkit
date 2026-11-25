@@ -46,14 +46,14 @@ Pin an item version for a reproducible installation:
 bunx chkit add attio@0.1.2
 ```
 
-Template versions are independent of chkit package versions. Their metadata declares the compatible CLI and ingestion package ranges.
+Template versions are independent of chkit package versions. Their metadata declares the compatible CLI and Sync plugin ranges.
 
 ## First run
 
 Installation prepares source files and project configuration. Set the provider credentials and the existing project's direct ClickHouse connection, then inspect the graph and generate migrations:
 
 ```sh
-bunx chkit ingest list
+bunx chkit sync list
 bunx chkit generate --name add-attio
 bunx chkit migrate --json
 ```
@@ -62,14 +62,14 @@ Review the migration SQL before applying it. For the Attio template, run:
 
 ```sh
 bunx chkit migrate --apply
-bunx chkit ingest run --tag provider:attio
+bunx chkit sync run --tag provider:attio
 ```
 
 `add` does not create tables, call the provider API, start ingestion, or configure a scheduler. See [Scheduling and recovery](/api-sync/operations/) when the first run succeeds.
 
 ## Existing schema and config
 
-The installer preserves the project's discovery mode. With `entry`, it adds explicit re-exports to that module. With `schema`, it adds the provider entry path alongside the existing schema paths. If no config exists, it creates one pointing to the provider entry. Connection settings and existing plugins stay in place, and the installer registers `ingest()` when needed.
+The installer preserves the project's discovery mode. With `entry`, it adds explicit re-exports to that module. With `schema`, it adds the provider entry path alongside the existing schema paths. If no config exists, it creates one pointing to the provider entry. Connection settings and existing plugins stay in place. When a registration is needed, the installer adds `sync()` for new templates or `ingest()` for pinned legacy templates.
 
 Computed configs, ambiguous exports, and other unsupported shapes produce manual integration guidance before any files are written. Review planned changes with `--dry-run`. Existing schema objects must remain discoverable: omitting them changes the desired schema and can produce drop operations during migration generation.
 
@@ -84,6 +84,12 @@ Removing a table or view export changes the desired database schema. Generate an
 The installer records the resolved item version and installed file hashes in the project. Reinstalling the same unmodified template is safe. A file changed locally is a conflict; the installer does not overwrite it to match the registry.
 
 There is no automatic update merge or uninstall command. To review a newer template, install it in a separate checkout and compare it with the owned source. Preserve stable stream IDs when adopting changes so checkpoint ownership stays consistent.
+
+### Existing installs
+
+Upgrade the CLI to use `chkit sync` with already installed templates. Their files and registry lock records stay in place. To switch copied source and fixture imports to the new package, follow the [Sync plugin upgrade guide](/plugins/sync/#upgrade-from-the-ingest-plugin).
+
+The official templates that use `@chkit/plugin-sync` require chkit `0.2.0-beta.19` or a compatible later version. With an older CLI, use the GitHub registry and pin a compatible version, for example `chkit add attio@0.3.1`. When repeating an existing installation, use its original registry and version.
 
 ## Custom registries
 

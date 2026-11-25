@@ -1,4 +1,4 @@
-import { rawTable, type ReadContext, type TimestampRange, type TimestampWindowState } from '@chkit/plugin-ingest'
+import { rawTable, type ReadContext, type TimestampRange, type TimestampWindowState } from '@chkit/plugin-sync'
 import { z } from 'zod'
 
 import { createGitHubClient, githubId, pullNumber, toGitHubRows, updatedItems } from '../client.js'

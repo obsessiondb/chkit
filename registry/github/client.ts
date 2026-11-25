@@ -1,4 +1,4 @@
-import { HttpError, paginate, rawRows, type Page, type RawRow, type SourceContext, type TimestampRange } from '@chkit/plugin-ingest'
+import { HttpError, paginate, rawRows, type Page, type RawRow, type SourceContext, type TimestampRange } from '@chkit/plugin-sync'
 import { z } from 'zod'
 
 import { githubConfigSchema, type GitHubConfig } from './config.js'

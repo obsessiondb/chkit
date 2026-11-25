@@ -1,4 +1,4 @@
-import { rawRows, rawTable, type ReadContext, type SourceChunk } from '@chkit/plugin-ingest'
+import { rawRows, rawTable, type ReadContext, type SourceChunk } from '@chkit/plugin-sync'
 import { z } from 'zod'
 
 import { createGoogleMeetClient, type CollectionCursor, type GoogleMeetClient, type Named } from '../client.js'

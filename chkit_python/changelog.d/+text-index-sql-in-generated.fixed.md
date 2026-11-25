@@ -1,3 +1,1 @@
-Text index SQL in generated migrations, snapshots and `chkit pull` output keeps the space
-between a keyword and `(` (`a OR (b)`, `NOT (x)`), as ClickHouse writes it, instead of
-`OR(` (#586, fixed in TS too). Existing indexes and snapshots plan no migration.
+Text index SQL in migrations, snapshots and `pull` preserves ClickHouse's keyword spacing and tight array subscripts without planning changes to equivalent existing indexes.

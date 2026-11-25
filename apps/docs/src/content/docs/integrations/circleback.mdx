@@ -16,7 +16,7 @@ bunx chkit add circleback
 bunx chkit check
 bunx chkit generate --name add_circleback
 bunx chkit migrate --apply
-bunx chkit ingest run --tag provider:circleback
+bunx chkit sync run --tag provider:circleback
 ```
 
 Set `CIRCLEBACK_API_KEY`, or pass `apiKey` in the configuration. Create a key through Circleback **Settings → API keys**; see the [authentication reference](https://circleback.ai/docs/api). Native JSON requires ClickHouse 25.3 or later.
@@ -36,8 +36,8 @@ Raw provider fields remain under `data` with `source_id` metadata. Provider-retu
 People fetch one [same-person detail](https://circleback.ai/docs/api/people/get-person) per listed profile and validate the native ID, preserving `externalLinks` and all other returned fields. Companies likewise fetch one detail per domain. These same-resource requests add to full-read cost and require matching access.
 
 ```sh
-bunx chkit ingest run --tag provider:circleback --tag resource:meeting_transcripts
-bunx chkit ingest status --tag provider:circleback --json
+bunx chkit sync run --tag provider:circleback --tag resource:meeting_transcripts
+bunx chkit sync status --tag provider:circleback --json
 ```
 
 ## Full sync and recovery
@@ -107,4 +107,4 @@ The installed fixture suite requires no credentials or live database and verifie
 
 - [App registry](/integrations/)
 - [Registry installation](/cli/add/)
-- [Ingestion plugin](/plugins/ingest/)
+- [Sync plugin](/plugins/sync/)

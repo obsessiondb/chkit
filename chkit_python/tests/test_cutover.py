@@ -819,7 +819,7 @@ def test_barrier_sends_settings_with_its_reads_only() -> None:
     settings = {"max_execution_time": "60"}
     wait_for_insert_barrier(client, _BARRIER, settings=settings, sleep=lambda _s: None)
     # The replica probe is chkit's own query; the barrier's reads get the settings.
-    assert client.sent_settings == [None, settings, settings]
+    assert client.sent_settings == [{"default_format": "JSONStrings"}, settings, settings]
 
 
 def test_barrier_times_out_with_the_running_query_ids() -> None:
@@ -899,7 +899,7 @@ def test_wait_for_exchange_waits_for_uuid_agreement(monkeypatch: pytest.MonkeyPa
     polls: list[str] = []
 
     class _Client:
-        def query(self, sql: str) -> _Rows:
+        def query(self, sql: str, settings: object = None) -> _Rows:
             if "system.one" in sql:
                 return _Rows([{"replicas": 2}])
             polls.append(sql)
@@ -919,7 +919,7 @@ def test_wait_for_exchange_waits_for_uuid_agreement(monkeypatch: pytest.MonkeyPa
 
 def test_wait_for_exchange_skips_on_cluster() -> None:
     class _Client:
-        def query(self, _sql: str) -> _Rows:
+        def query(self, _sql: str, settings: object = None) -> _Rows:
             msg = "no query expected"
             raise AssertionError(msg)
 
@@ -1416,12 +1416,15 @@ def test_cutover_chunk_skips_keys_the_shadow_holds() -> None:
         "SELECT `id`, `ts`",
         "FROM db.events__cutover_1_snapshot",
         "WHERE _partition_id = 'all'",
-        "  AND id >= '100'",
-        "  AND id < '200'",
-        "  AND toDate(ts) >= '5'",
-        "  AND (`id`) NOT IN (SELECT `id` FROM db.events__cutover_1 WHERE id >= '100' AND id < '200')",
-        "SETTINGS async_insert=0, asterisk_include_materialized_columns=0, "
-        "asterisk_include_alias_columns=0, insert_deduplicate=0, select_sequential_consistency=1",
+        "  AND id >= CAST('100', 'UInt64')",
+        "  AND id < CAST('200', 'UInt64')",
+        "  AND toDate(ts) >= CAST('5', 'Date')",
+        "  AND (`id`) NOT IN (SELECT `id` FROM db.events__cutover_1 "
+        "WHERE id >= CAST('100', 'UInt64') AND id < CAST('200', 'UInt64'))",
+        "SETTINGS distributed_foreground_insert=1, materialized_views_ignore_errors=0, async_insert=0, asterisk_include_materialized_columns=0, "
+        "asterisk_include_alias_columns=0, insert_deduplicate=0, select_sequential_consistency=1, "
+        "allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, log_queries=1, "
+        "log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0, log_queries_probability=1",
     ]
 
 

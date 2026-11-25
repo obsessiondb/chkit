@@ -125,8 +125,9 @@ def make_fixture() -> Iterator[Fixture]:
             "SETTINGS index_granularity = 1"
         )
         client.execute(f"CREATE TABLE {db}.events (id UInt64) ENGINE = MergeTree ORDER BY id")
-        # A cluster journal is created ON CLUSTER with a replicated engine; the
-        # local stack has no Keeper, so the journal exists before the first run.
+        # A cluster journal is created ON CLUSTER with a replicated engine. The
+        # test creates it first, as a plain table, so it does not depend on ON
+        # CLUSTER DDL and runs the same on the local stack and on ObsessionDB.
         client.execute(
             f"CREATE TABLE {db}.{quote_ident(fixture.journal_table)} (name String, "
             "applied_at DateTime64(3, 'UTC'), checksum String, chkit_version String, "
