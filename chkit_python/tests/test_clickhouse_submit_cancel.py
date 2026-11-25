@@ -27,6 +27,17 @@ from chkit_plugin_obsessiondb.credentials import Credentials
 from chkit_plugin_obsessiondb.remote_executor import RemoteClickHouseClient
 
 
+@pytest.fixture(autouse=True)
+def _async_insert_not_locked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These servers take only the submit: settle the remote writes'
+    settings lookup without a request (#804)."""
+    monkeypatch.setattr(
+        RemoteClickHouseClient,
+        "_write_settings",
+        lambda _self, settings: {"async_insert": 0, "wait_for_async_insert": 1, **(settings or {})},
+    )
+
+
 class _Server:
     """A TCP listener that records every byte a connection sends."""
 

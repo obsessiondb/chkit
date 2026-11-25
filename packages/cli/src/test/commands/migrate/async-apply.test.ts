@@ -2072,17 +2072,20 @@ describe('applyAsyncStatement re-run of a started step', () => {
 
 // #767 (round 7): through the real journal store, a fan-out that answers one
 // server twice, or that a server added since cannot answer, never lets a
-// prepared attempt run again: the run stops with nothing submitted.
+// prepared attempt run again: the run stops with nothing submitted. Nor
+// does one server answering for a journal that is not replicated, without a
+// declared cluster (#802): behind a load balancer it may not be the only one.
 describe('applyAsyncStatement recovery through the journal store', () => {
   const UUID_A = '2dea4dea-c7d6-439c-b8ef-5eaa1d275f14'
   const operations = JSON.stringify([{ operation_index: 0, operation_key: BASE_INPUT.operationKey, operation_type: BASE_INPUT.operationType, query_id: 'prepared-id', status: 'started', started_at: '2026-05-26 10:00:00.000', finished_at: null, last_error: PREPARED_RECORD_MARKER }])
   const copy = { replica: UUID_A, members: JSON.stringify([UUID_A]), present: '1', applied_at: '2026-05-26 10:00:00.000', operations, operation_fingerprints: '[]' }
 
-  for (const [label, everyCopy] of [
-    ['one server answering twice', () => [copy, copy]],
+  for (const [label, everyCopy, cluster] of [
+    ['one server answering twice', () => [copy, copy], 'c'],
     ['a server added since that cannot be reached', () => {
       throw new Error('Code: 279. ALL_CONNECTION_TRIES_FAILED')
-    }],
+    }, 'c'],
+    ['one server answering without a declared cluster', () => [copy], undefined],
   ] as const) {
     test(`${label}: nothing is submitted`, async () => {
       const submits: string[] = []
@@ -2103,7 +2106,7 @@ describe('applyAsyncStatement recovery through the journal store', () => {
       } as unknown as ClickHouseExecutor
 
       await expect(
-        applyAsyncStatement({ ...BASE_INPUT, db, journalStore: createJournalStore(db), log: () => {}, sleep: NO_SLEEP, now: FIXED_NOW }),
+        applyAsyncStatement({ ...BASE_INPUT, db, journalStore: createJournalStore(db, cluster), log: () => {}, sleep: NO_SLEEP, now: FIXED_NOW }),
       ).rejects.toMatchObject({ code: 'async_outcome_unknown', message: expect.stringContaining('query_id prepared-id') })
       expect(submits).toEqual([])
     })
