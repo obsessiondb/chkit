@@ -1871,6 +1871,8 @@ describe('applyAsyncStatement re-run of a started step', () => {
     await expect(run).rejects.toThrow(
       /the ClickHouse user cannot read system\.query_log, which tells whether the previous attempt finished \(Code: 497\..*\)\. Nothing was resubmitted and no before-retry SQL ran\. Grant SELECT ON system\.query_log to the user; until then a re-run of `chkit migrate --apply` stops here too\./,
     )
+    // The attempt's outcome stays unknown (#782).
+    await expect(run).rejects.toMatchObject({ code: 'async_outcome_unknown' })
     expect(submitCalls).toEqual([])
     expect(commandCalls).toEqual([])
     expect(writes).toEqual([])

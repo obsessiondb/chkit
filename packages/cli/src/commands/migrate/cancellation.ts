@@ -441,9 +441,9 @@ async function killRecordedQueries(conn: Control, identity: QueryIdentity, ids: 
 /** The replace needs CREATE TABLE and DROP TABLE on each target, granted directly or through enabled roles. */
 async function assertReplaceGrants(conn: Control, obligations: readonly RecoveryObligation[]): Promise<void> {
   const rows = await conn.query<{ access_type: string; database: string | null; table: string | null; is_partial_revoke: unknown }>(
-    "SELECT access_type, database, table, is_partial_revoke FROM system.grants WHERE (user_name = currentUser() OR role_name IN (SELECT role_name FROM system.enabled_roles)) AND access_type IN ('ALL', 'CREATE', 'CREATE TABLE', 'DROP', 'DROP TABLE') AND column IS NULL",
+    "SELECT access_type, ifNull(database, '') AS database, ifNull(table, '') AS table, is_partial_revoke FROM system.grants WHERE (user_name = currentUser() OR role_name IN (SELECT role_name FROM system.enabled_roles)) AND access_type IN ('ALL', 'CREATE', 'CREATE TABLE', 'DROP', 'DROP TABLE') AND column IS NULL",
   )
-  const covers = (row: (typeof rows)[number], table: QueryTarget) => (row.database === null || row.database === table.database) && (row.table === null || row.table === table.name)
+  const covers = (row: (typeof rows)[number], table: QueryTarget) => (row.database === null || row.database === '' || row.database === table.database) && (row.table === null || row.table === '' || row.table === table.name)
   const allowed = (access: string[], table: QueryTarget) =>
     rows.some((row) => access.includes(row.access_type) && !isTrue(row.is_partial_revoke) && covers(row, table)) &&
     !rows.some((row) => access.includes(row.access_type) && isTrue(row.is_partial_revoke) && covers(row, table))

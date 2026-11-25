@@ -20,8 +20,9 @@ services:
     volumes:
       - ./clickhouse.xml:/etc/clickhouse-server/config.d/chkit-test.xml:ro
       - ./clickhouse-port.xml:/etc/clickhouse-server/config.d/chkit-test-port.xml:ro
+    # Healthy once the embedded Keeper (clickhouse.xml) answers too.
     healthcheck:
-      test: [CMD, clickhouse-client, --password, chkit-ci, --query, SELECT 1]
+      test: [CMD, clickhouse-client, --password, chkit-ci, --query, "SELECT count() FROM system.zookeeper WHERE path = '/'"]
       interval: 500ms
       timeout: 5s
       retries: 120

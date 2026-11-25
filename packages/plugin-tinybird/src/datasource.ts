@@ -147,7 +147,7 @@ function kafkaColumns(columns: ColumnDefinition[], storeHeaders: string | undefi
 }
 
 function kafkaWarning(topic: string | undefined): string {
-  return `Kafka ingestion is not translated: the table keeps Tinybird's Kafka columns, and something must consume topic ${topic ?? '(unset)'} into it. ObsessionDB has no Kafka CDC yet; a ClickHouse Kafka engine table with a materialized view, @chkit/plugin-ingest or your own inserts can fill it.`
+  return `Kafka ingestion is not translated: the table keeps Tinybird's Kafka columns, and something must consume topic ${topic ?? '(unset)'} into it. ObsessionDB has no Kafka CDC yet; a ClickHouse Kafka engine table with a materialized view, @chkit/plugin-sync or your own inserts can fill it.`
 }
 
 function toColumnDefinition(column: TinybirdColumn): ColumnDefinition {

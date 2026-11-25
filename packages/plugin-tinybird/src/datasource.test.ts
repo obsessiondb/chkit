@@ -222,7 +222,7 @@ describe('translateDatasource', () => {
     test('warns that ingestion is not translated', () => {
       const translated = kafka(['    `ts` DateTime'], [])
       expect(translated.ok && translated.warnings).toEqual([
-        "Kafka ingestion is not translated: the table keeps Tinybird's Kafka columns, and something must consume topic events into it. ObsessionDB has no Kafka CDC yet; a ClickHouse Kafka engine table with a materialized view, @chkit/plugin-ingest or your own inserts can fill it.",
+        "Kafka ingestion is not translated: the table keeps Tinybird's Kafka columns, and something must consume topic events into it. ObsessionDB has no Kafka CDC yet; a ClickHouse Kafka engine table with a materialized view, @chkit/plugin-sync or your own inserts can fill it.",
       ])
       expect(translated.ok && translated.notes.join(' ')).not.toContain('connector settings')
     })

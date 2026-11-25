@@ -20,7 +20,7 @@ This example assumes a provider contract: `GET /tickets` accepts `updated_since`
 Create `src/sources/helpdesk-client.ts`:
 
 ```ts
-import { paginate, type SourceContext } from '@chkit/plugin-ingest'
+import { paginate, type SourceContext } from '@chkit/plugin-sync'
 import { z } from 'zod'
 
 export const helpdeskConfig = {

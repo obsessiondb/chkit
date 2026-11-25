@@ -9,8 +9,8 @@ bunx chkit check
 bunx chkit generate --name add_google_calendar
 # Review the migration before applying it.
 bunx chkit migrate --apply
-bunx chkit ingest run --tag provider:google-calendar
-bunx chkit ingest status --tag provider:google-calendar
+bunx chkit sync run --tag provider:google-calendar
+bunx chkit sync status --tag provider:google-calendar
 ```
 
 ## Resources and identities

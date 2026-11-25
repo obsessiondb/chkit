@@ -380,7 +380,13 @@ function rowVersion(appliedAt: string): number {
   return Date.parse(/(Z|[+-]\d{2}:?\d{2})$/.test(iso) ? iso : `${iso}Z`)
 }
 
-export function createJournalStore(db: ClickHouseExecutor, cluster?: string, fanoutOverride?: ReplicaFanout): JournalStore {
+export function createJournalStore(executor: ClickHouseExecutor, cluster?: string, fanoutOverride?: ReplicaFanout): JournalStore {
+  const db: ClickHouseExecutor = {
+    ...executor,
+    query<T>(sql: string, settings?: Parameters<ClickHouseExecutor['query']>[1]) {
+      return executor.query<T>(sql, { ...settings, default_format: 'JSONStrings' })
+    },
+  }
   const journalTable = resolveJournalTableName()
   debug('journal', `journal table: ${journalTable}${process.env.CHKIT_JOURNAL_TABLE ? ' (from CHKIT_JOURNAL_TABLE)' : ''}${cluster ? ` (ON CLUSTER ${cluster})` : ''}`)
   // In cluster mode the journal must be consistent across every node, so it uses

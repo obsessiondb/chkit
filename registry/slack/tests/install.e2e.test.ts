@@ -4,9 +4,9 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-import { createStatelessLiveExecutor, createPrefix, getLiveEnv, quoteIdent, waitForTable } from '@chkit/clickhouse/e2e-testkit'
-import { createClickHouseDestination, runIngestion, selectStreams } from '@chkit/plugin-ingest'
-import { createMemoryJournal } from '@chkit/plugin-ingest/testing'
+import { createStatelessLiveExecutor, createPrefix, getLiveEnv, pollUntil, quoteIdent, waitForTable } from '@chkit/clickhouse/e2e-testkit'
+import { createClickHouseDestination, runIngestion, selectStreams } from '@chkit/plugin-sync'
+import { createMemoryJournal } from '@chkit/plugin-sync/testing'
 
 import { buildRegistryCatalog } from '../../../packages/cli/src/registry/build.js'
 import { formatTestDiagnostic, runCli } from '../../../packages/cli/src/test/e2e-testkit.js'
@@ -21,6 +21,7 @@ describe.serial('built Slack template installed into a consumer', () => {
   const prefix = createPrefix('slack_registry')
   const root = resolve(import.meta.dir, '../../..')
   const temporary: string[] = []
+  const readSettings = { select_sequential_consistency: '1', enable_parallel_replicas: 0 } as const
 
   afterAll(async () => {
     const tables = await executor.query<{ name: string }>(
@@ -38,7 +39,7 @@ describe.serial('built Slack template installed into a consumer', () => {
     // Exercise source with workspace packages, retaining the template version and changelog.
     const sourceCatalog = await readRegistrySourceCatalog()
     const catalog = { ...sourceCatalog, items: sourceCatalog.items.map((item) => ({ ...item,
-      dependencies: [`@chkit/core@${CLI_VERSION}`, `@chkit/plugin-ingest@${CLI_VERSION}`, ...item.dependencies.filter((dependency) => !dependency.startsWith('@chkit/'))],
+      dependencies: [`@chkit/core@${CLI_VERSION}`, `@chkit/plugin-sync@${CLI_VERSION}`, ...item.dependencies.filter((dependency) => !dependency.startsWith('@chkit/'))],
       meta: { chkit: { ...item.meta.chkit, chkit: CLI_VERSION, ingest: CLI_VERSION } },
     })) }
     await buildRegistryCatalog({ catalog, sourceRoot: join(root, 'registry'), outputDir })
@@ -71,7 +72,7 @@ describe.serial('built Slack template installed into a consumer', () => {
     const configPath = join(project, 'src/integrations/slack/config.ts')
     const config = await readFile(configPath, 'utf8')
     await writeFile(configPath, config.replace("database: 'default'", `database: ${JSON.stringify(env.clickhouseDatabase)}`).replace("tablePrefix: 'slack'", `tablePrefix: '${prefix}'`))
-    const list = cli(['ingest', 'list', '--tag', 'provider:slack', '--json'])
+    const list = cli(['sync', 'list', '--tag', 'provider:slack', '--json'])
     expect(list.exitCode, formatTestDiagnostic('list without token', list)).toBe(0)
     expect(JSON.parse(list.stdout).streams).toHaveLength(3)
     const generate = cli(['generate', '--name', 'slack_fixture', '--json'])
@@ -98,35 +99,45 @@ describe.serial('built Slack template installed into a consumer', () => {
       expect(result.ok, JSON.stringify(result)).toBe(true)
     }
     const table = (resource: string) => `${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(`${prefix}_${resource}_raw`)}`
-    const rawMessages = await executor.query<{ id: string; text: string; channel_id: string }>(
-      `SELECT id, JSONExtractString(toJSONString(raw), 'data', 'text') AS text, JSONExtractString(toJSONString(raw), 'channel_id') AS channel_id FROM ${table('messages')} FINAL ORDER BY id`,
-    )
-    expect(rawMessages).toEqual([
+    const expectedMessages = [
       { id: JSON.stringify(['slack.primary', 'messages', 'T1', 'C1', parentMessage.ts]), text: 'Edited observation', channel_id: 'C1' },
       { id: JSON.stringify(['slack.primary', 'messages', 'T1', 'C1', replyMessage.ts]), text: replyMessage.text, channel_id: 'C1' },
       { id: JSON.stringify(['slack.primary', 'messages', 'T1', 'C1', standaloneMessage.ts]), text: standaloneMessage.text, channel_id: 'C1' },
-    ])
-    const nested = await executor.query<{ blocks: string; files: string; reactions: string }>(
-      `SELECT JSONExtractRaw(toJSONString(raw), 'data', 'blocks') AS blocks, JSONExtractRaw(toJSONString(raw), 'data', 'files') AS files, JSONExtractRaw(toJSONString(raw), 'data', 'reactions') AS reactions FROM ${table('messages')} FINAL WHERE id = '${JSON.stringify(['slack.primary', 'messages', 'T1', 'C1', parentMessage.ts])}'`,
+    ]
+    const rawMessages = await pollUntil(
+      () => executor.query<{ id: string; text: string; channel_id: string }>(
+        `SELECT id, JSONExtractString(toJSONString(raw), 'data', 'text') AS text, JSONExtractString(toJSONString(raw), 'channel_id') AS channel_id FROM ${table('messages')} FINAL ORDER BY id`, readSettings,
+      ),
+      (rows) => JSON.stringify(rows) === JSON.stringify(expectedMessages),
     )
+    expect(rawMessages).toEqual(expectedMessages)
+    const nested = await pollUntil(() => executor.query<{ blocks: string; files: string; reactions: string }>(
+      `SELECT JSONExtractRaw(toJSONString(raw), 'data', 'blocks') AS blocks, JSONExtractRaw(toJSONString(raw), 'data', 'files') AS files, JSONExtractRaw(toJSONString(raw), 'data', 'reactions') AS reactions FROM ${table('messages')} FINAL WHERE id = '${JSON.stringify(['slack.primary', 'messages', 'T1', 'C1', parentMessage.ts])}'`, readSettings,
+    ), (rows) => rows.length === 1)
     expect(JSON.parse(nested[0]?.blocks ?? 'null')).toEqual(parentMessage.blocks)
     expect(JSON.parse(nested[0]?.files ?? 'null')).toEqual(parentMessage.files)
     expect(JSON.parse(nested[0]?.reactions ?? 'null')).toEqual(parentMessage.reactions)
-    const rawUsers = await executor.query<{ id: string; value: string }>(
-      `SELECT id, JSONExtractString(toJSONString(raw), 'data', 'profile', 'fields', 'custom_field', 'value') AS value FROM ${table('users')} FINAL ORDER BY id`,
+    const rawUsers = await pollUntil(
+      () => executor.query<{ id: string; value: string }>(
+        `SELECT id, JSONExtractString(toJSONString(raw), 'data', 'profile', 'fields', 'custom_field', 'value') AS value FROM ${table('users')} FINAL ORDER BY id`, readSettings,
+      ),
+      (rows) => rows.find((row) => row.id.includes(user.id))?.value === 'retained',
     )
     expect(rawUsers.find((row) => row.id.includes(user.id))?.value).toBe('retained')
-    const rawChannels = await executor.query<{ name: string }>(
-      `SELECT JSONExtractString(toJSONString(raw), 'data', 'name') AS name FROM ${table('channels')} FINAL`,
+    const rawChannels = await pollUntil(
+      () => executor.query<{ name: string }>(
+        `SELECT JSONExtractString(toJSONString(raw), 'data', 'name') AS name FROM ${table('channels')} FINAL`, readSettings,
+      ),
+      (rows) => rows.length === 1 && rows[0]?.name === channel.name,
     )
     expect(rawChannels).toEqual([{ name: channel.name }])
-    const preserved = await executor.query<{ id: string }>(`SELECT id FROM ${existingTable}`)
+    const preserved = await pollUntil(() => executor.query<{ id: string }>(`SELECT id FROM ${existingTable}`, readSettings), (rows) => rows.length === 1)
     expect(Number(preserved[0]?.id)).toBe(7)
 
     const pipelinePath = join(project, 'src/integrations/slack/pipeline.ts')
     const content = await readFile(pipelinePath, 'utf8')
     await writeFile(pipelinePath, content.split('\n').filter((line) => !line.includes("tags: ['resource:messages']")).join('\n'))
-    const narrowed = cli(['ingest', 'list', '--tag', 'provider:slack', '--json'])
+    const narrowed = cli(['sync', 'list', '--tag', 'provider:slack', '--json'])
     expect(narrowed.exitCode, formatTestDiagnostic('removed messages stream', narrowed)).toBe(0)
     expect(JSON.parse(narrowed.stdout).streams).toHaveLength(2)
     await waitForTable(executor, env.clickhouseDatabase, `${prefix}_messages_raw`)
