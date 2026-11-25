@@ -68,6 +68,7 @@ from chkit.cli.plugin_runtime import PluginRuntime
 from chkit.cli.safety_markers import (
     MigrationOperationSummary,
     extract_migration_operation_summaries,
+    extract_statement_operations,
     find_non_select_barriers,
 )
 from chkit.cli.table_scope import TableScope
@@ -132,7 +133,8 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
     journal_store = input_.journal_store
     sql = (input_.migrations_dir / file).read_text(encoding="utf-8")
     parsed_statements = extract_executable_statements(sql)
-    operation_summaries = extract_migration_operation_summaries(sql)
+    # The marker of each statement, by position (#831).
+    operation_summaries = extract_statement_operations(sql)
 
     statements = list(
         input_.plugin_runtime.run_on_before_apply(
@@ -234,7 +236,9 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
             file=file,
             state=initial_state,
             checksum=migration_checksum,
-            identities=statement_identities(operation_summaries, fingerprints),
+            identities=statement_identities(
+                operation_summaries, fingerprints, extract_migration_operation_summaries(sql)
+            ),
             sql_by_fingerprint=sql_by_fingerprint,
             retry=input_.retry,
             journal_store=journal_store,
@@ -484,7 +488,7 @@ def preview_statement(sql: str, max_length: int = 120) -> str:
 def non_select_barriers(
     migration: str,
     statements: Sequence[str],
-    operations: Sequence[MigrationOperationSummary],
+    operations: Sequence[MigrationOperationSummary | None],
 ) -> list[PendingNonSelectBarrier]:
     """A migration's statements marked ``mode=barrier`` that are not a SELECT (#634)."""
     return [

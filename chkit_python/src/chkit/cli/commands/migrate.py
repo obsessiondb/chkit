@@ -128,7 +128,7 @@ from chkit.cli.safety_markers import (
     collect_destructive_operation_markers,
     collect_unmarked_destructive_statements,
     extract_executable_statements,
-    extract_migration_operation_summaries,
+    extract_statement_operations,
 )
 from chkit.cli.shared_engine_flags import ForceSharedEnginesOption, NoSharedEnginesOption
 from chkit.cli.table_scope import (
@@ -1108,7 +1108,7 @@ class _MigrateLockRunner(WithLock):
                             "migrate_cancellation_failed", "Recovery has no migration directory.",
                         )
                     sql = (self._migrations_dir / filename).read_text(encoding="utf-8")
-                    summaries = extract_migration_operation_summaries(sql)
+                    summaries = extract_statement_operations(sql)
                     for index, forward_sql in enumerate(extract_executable_statements(sql)):
                         operation = summaries[index] if index < len(summaries) else None
                         if operation is not None and operation.mode != "sync":

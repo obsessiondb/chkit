@@ -27,6 +27,7 @@ import { checksumSQL, type MigrationJournalEntry } from '../../runtime/migration
 import {
   extractExecutableStatements,
   extractMigrationOperationSummaries,
+  extractStatementOperations,
   findNonSelectBarriers,
   type MigrationOperationSummary,
 } from '../../runtime/safety-markers.js'
@@ -136,7 +137,7 @@ export function previewStatement(sql: string, max = 120): string {
 export function nonSelectBarriers(
   migration: string,
   statements: readonly string[],
-  operations: readonly MigrationOperationSummary[],
+  operations: ReadonlyArray<MigrationOperationSummary | undefined>,
 ): PendingNonSelectBarrier[] {
   return findNonSelectBarriers(statements, operations).map((barrier) => ({
     migration,
@@ -282,8 +283,9 @@ export async function applyMigration(input: {
   debug('migrate', `applying ${file}`)
   const sql = await readFile(join(migrationsDir, file), 'utf8')
   const parsedStatements = extractExecutableStatements(sql)
-  const operationSummaries = extractMigrationOperationSummaries(sql)
-  debug('migrate', `${file}: ${parsedStatements.length} statements, ${operationSummaries.length} operations`)
+  // The marker of each statement, by position (#831).
+  const operationSummaries = extractStatementOperations(sql)
+  debug('migrate', `${file}: ${parsedStatements.length} statements, ${operationSummaries.filter(Boolean).length} operations`)
 
   input.signal?.throwIfAborted()
   const statements = await pluginRuntime.runOnBeforeApply({
@@ -380,7 +382,7 @@ export async function applyMigration(input: {
       file,
       state: initialState,
       checksum: migrationChecksum,
-      identities: statementIdentities(operationSummaries, fingerprints),
+      identities: statementIdentities(operationSummaries, fingerprints, extractMigrationOperationSummaries(sql)),
       sqlByFingerprint,
       retry,
       journalStore,
