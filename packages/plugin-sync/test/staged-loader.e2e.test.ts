@@ -4,7 +4,7 @@ import type { ClickHouseExecutor } from '@chkit/clickhouse'
 import { createPrefix, createStatelessLiveExecutor, LOCAL_STACK_ENV, pollUntil } from '@chkit/clickhouse/e2e-testkit'
 import { type ColumnDefinition, type TableDefinition, quoteIdentifier, table, toCreateSQL } from '@chkit/core'
 
-import { createClickHouseDestination, ingestionColumns, stagedLoader, type Row, type StagedLoaderOptions } from '@chkit/plugin-ingest'
+import { createClickHouseDestination, ingestionColumns, stagedLoader, type Row, type StagedLoaderOptions } from '@chkit/plugin-sync'
 
 describe('stagedLoader local ClickHouse identity and publication', () => {
   const database = createPrefix('staged_values').slice(0, -1)

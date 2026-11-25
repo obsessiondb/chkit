@@ -1,4 +1,4 @@
-import { definePipeline, defineStream, fullSync } from '@chkit/plugin-ingest'
+import { definePipeline, defineStream, fullSync } from '@chkit/plugin-sync'
 
 import { circlebackConfig, type CirclebackReaderConfig } from './config.js'
 import { circleback_meetingsRaw, readMeetings } from './sources/meetings.js'

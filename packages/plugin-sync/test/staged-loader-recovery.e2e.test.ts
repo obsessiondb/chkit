@@ -12,7 +12,7 @@ import {
   createClickHouseDestination, createClickHouseJournal, createStagedLoaderExecutor, cursorState, definePipeline, defineStream,
   ingestionColumns, runIngestion, selectStreams, stagedLoader,
   type ExecutionResult, type LoaderFactory, type Row, type StagedLoaderExecutor,
-} from '@chkit/plugin-ingest'
+} from '@chkit/plugin-sync'
 
 interface Subject {
   destination: TableDefinition

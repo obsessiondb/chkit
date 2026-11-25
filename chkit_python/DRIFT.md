@@ -1926,3 +1926,8 @@ stabilizations (#238/#241/#245/#247/#264), the uncommitted backfill
   returns definitions, not introspected objects. Without `--database`, pull now lists the
   server's objects first, as TS does, so the hook gets the target databases and the
   payload reports them and the skipped objects (#698).
+
+### Sync plugin rename (OBS-31)
+
+The TypeScript-only plugin is now `@chkit/plugin-sync`, with the `chkit sync`
+command and `sync()` registration. chkit-py has no counterpart to rename.

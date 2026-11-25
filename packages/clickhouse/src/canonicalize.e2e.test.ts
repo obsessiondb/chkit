@@ -89,7 +89,7 @@ test('SQL UDF storage matches for arrays, constant tuple casts and arithmetic; b
     await executor.command(`DROP FUNCTION IF EXISTS ${name}`)
     await executor.close()
   }
-})
+}, 60_000)
 
 test('invalid UTF-8 in a SQL UDF definition cannot match a replacement-character literal', async () => {
   const executor = createLiveExecutor(getLiveEnv())

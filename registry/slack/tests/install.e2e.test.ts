@@ -5,8 +5,8 @@ import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { createStatelessLiveExecutor, createPrefix, getLiveEnv, pollUntil, quoteIdent, waitForTable } from '@chkit/clickhouse/e2e-testkit'
-import { createClickHouseDestination, runIngestion, selectStreams } from '@chkit/plugin-ingest'
-import { createMemoryJournal } from '@chkit/plugin-ingest/testing'
+import { createClickHouseDestination, runIngestion, selectStreams } from '@chkit/plugin-sync'
+import { createMemoryJournal } from '@chkit/plugin-sync/testing'
 
 import { buildRegistryCatalog } from '../../../packages/cli/src/registry/build.js'
 import { formatTestDiagnostic, runCli } from '../../../packages/cli/src/test/e2e-testkit.js'
@@ -39,7 +39,7 @@ describe.serial('built Slack template installed into a consumer', () => {
     // Exercise source with workspace packages, retaining the template version and changelog.
     const sourceCatalog = await readRegistrySourceCatalog()
     const catalog = { ...sourceCatalog, items: sourceCatalog.items.map((item) => ({ ...item,
-      dependencies: [`@chkit/core@${CLI_VERSION}`, `@chkit/plugin-ingest@${CLI_VERSION}`, ...item.dependencies.filter((dependency) => !dependency.startsWith('@chkit/'))],
+      dependencies: [`@chkit/core@${CLI_VERSION}`, `@chkit/plugin-sync@${CLI_VERSION}`, ...item.dependencies.filter((dependency) => !dependency.startsWith('@chkit/'))],
       meta: { chkit: { ...item.meta.chkit, chkit: CLI_VERSION, ingest: CLI_VERSION } },
     })) }
     await buildRegistryCatalog({ catalog, sourceRoot: join(root, 'registry'), outputDir })
@@ -72,7 +72,7 @@ describe.serial('built Slack template installed into a consumer', () => {
     const configPath = join(project, 'src/integrations/slack/config.ts')
     const config = await readFile(configPath, 'utf8')
     await writeFile(configPath, config.replace("database: 'default'", `database: ${JSON.stringify(env.clickhouseDatabase)}`).replace("tablePrefix: 'slack'", `tablePrefix: '${prefix}'`))
-    const list = cli(['ingest', 'list', '--tag', 'provider:slack', '--json'])
+    const list = cli(['sync', 'list', '--tag', 'provider:slack', '--json'])
     expect(list.exitCode, formatTestDiagnostic('list without token', list)).toBe(0)
     expect(JSON.parse(list.stdout).streams).toHaveLength(3)
     const generate = cli(['generate', '--name', 'slack_fixture', '--json'])
@@ -137,7 +137,7 @@ describe.serial('built Slack template installed into a consumer', () => {
     const pipelinePath = join(project, 'src/integrations/slack/pipeline.ts')
     const content = await readFile(pipelinePath, 'utf8')
     await writeFile(pipelinePath, content.split('\n').filter((line) => !line.includes("tags: ['resource:messages']")).join('\n'))
-    const narrowed = cli(['ingest', 'list', '--tag', 'provider:slack', '--json'])
+    const narrowed = cli(['sync', 'list', '--tag', 'provider:slack', '--json'])
     expect(narrowed.exitCode, formatTestDiagnostic('removed messages stream', narrowed)).toBe(0)
     expect(JSON.parse(narrowed.stdout).streams).toHaveLength(2)
     await waitForTable(executor, env.clickhouseDatabase, `${prefix}_messages_raw`)

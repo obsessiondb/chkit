@@ -22,7 +22,7 @@ Map before loading into established warehouse tables. Define columns for measure
 
 ```ts
 import { view } from '@chkit/core'
-import { definePipeline, defineStream, rawRows, rawTable } from '@chkit/plugin-ingest'
+import { definePipeline, defineStream, rawRows, rawTable } from '@chkit/plugin-sync'
 
 export const ticketsRaw = rawTable({ database: 'default', name: 'tickets_raw' })
 
@@ -69,7 +69,7 @@ Use a mapping function inside `read` to produce the destination columns. There i
 
 ```ts
 import { table } from '@chkit/core'
-import { definePipeline, defineStream, ingestionColumns } from '@chkit/plugin-ingest'
+import { definePipeline, defineStream, ingestionColumns } from '@chkit/plugin-sync'
 
 type Ticket = { id: string; subject: string; status: string; customer_id: string }
 
@@ -163,7 +163,7 @@ This standalone fixture assumes the provider supplies a monotonically increasing
 
 ```ts
 import { table, view } from '@chkit/core'
-import { definePipeline, defineStream, ingestionColumns } from '@chkit/plugin-ingest'
+import { definePipeline, defineStream, ingestionColumns } from '@chkit/plugin-sync'
 
 export const ticketVersions = table({
   database: 'default', name: 'ticket_versions',

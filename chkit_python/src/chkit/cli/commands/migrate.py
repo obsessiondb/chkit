@@ -67,6 +67,11 @@ from chkit.cli.commands.migrate_errors import (
     journal_changed_error,
     non_select_barrier_error,
 )
+from chkit.cli.commands.migrate_interrupt import (
+    InterruptLock,
+    raise_if_interrupted,
+    with_interrupt,
+)
 from chkit.cli.commands.migrate_lock import (
     GuardedClient,
     LockTarget,
@@ -123,7 +128,7 @@ from chkit.cli.safety_markers import (
     collect_destructive_operation_markers,
     collect_unmarked_destructive_statements,
     extract_executable_statements,
-    extract_migration_operation_summaries,
+    extract_statement_operations,
 )
 from chkit.cli.shared_engine_flags import ForceSharedEnginesOption, NoSharedEnginesOption
 from chkit.cli.table_scope import (
@@ -951,6 +956,8 @@ class _LockHolder:
     def check(self) -> None:
         if self.lock is not None:
             self.lock.assert_held()
+        # After a first Ctrl-C, only cleanup's requests are sent (#816).
+        raise_if_interrupted()
 
 
 class _MigrateLockRunner(WithLock):
@@ -1010,6 +1017,15 @@ class _MigrateLockRunner(WithLock):
         abandon: str | None = None,
     ) -> _T:
         """`abandon` names the migration --abandon resets, which also leaves unfinished recovery."""
+        lock_state = InterruptLock()
+        return with_interrupt(
+            lock_state, lambda: self._call_held(fn, selected_files, abandon, lock_state)
+        )
+
+    def _call_held(
+        self, fn: Callable[[], _T], selected_files: list[str] | None,
+        abandon: str | None, lock_state: InterruptLock,
+    ) -> _T:
         if migrate_lock_disabled():
             typer.echo(
                 "⚠ CHKIT_MIGRATE_LOCK is off: this run takes no migrate lock, so a "
@@ -1092,7 +1108,7 @@ class _MigrateLockRunner(WithLock):
                             "migrate_cancellation_failed", "Recovery has no migration directory.",
                         )
                     sql = (self._migrations_dir / filename).read_text(encoding="utf-8")
-                    summaries = extract_migration_operation_summaries(sql)
+                    summaries = extract_statement_operations(sql)
                     for index, forward_sql in enumerate(extract_executable_statements(sql)):
                         operation = summaries[index] if index < len(summaries) else None
                         if operation is not None and operation.mode != "sync":
@@ -1138,6 +1154,7 @@ class _MigrateLockRunner(WithLock):
                 ),
             )
             self._holder.lock = lock
+            lock_state.claim = lock.claim_id
             try:
                 if abandon is None:
                     self._check_recovery_clear(target, allowed, recovery_identity)
@@ -1181,6 +1198,7 @@ class _MigrateLockRunner(WithLock):
                 self._holder.tracker = None
                 self._holder.completion = None
                 lock.release()
+                lock_state.released = not lock.release_failed
         finally:
             if heartbeat_client is not None:
                 heartbeat_client.close()

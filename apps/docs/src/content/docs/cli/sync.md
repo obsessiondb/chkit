@@ -1,25 +1,27 @@
 ---
-title: "chkit ingest"
+title: "chkit sync"
 description: "Run, inspect, diagnose, or repair streams with chkit Sync (beta)."
 sidebar:
   order: 11
 ---
 
-Runs the TypeScript ingestion streams provided by [`@chkit/plugin-ingest`](/plugins/ingest/) and inspects or repairs their ClickHouse journal history.
+Runs TypeScript sync streams and inspects or repairs their ClickHouse journal history.
 
 This command belongs to [chkit Sync (beta)](/sync/). See the [Sync CLI overview](/sync/cli/) for the template installation and first-run workflow.
 
 ## Synopsis
 
 ```sh
-chkit ingest run [flags]
-chkit ingest list [flags]
-chkit ingest status [flags]
-chkit ingest doctor [flags]
-chkit ingest repair [flags]
+chkit sync run [flags]
+chkit sync list [flags]
+chkit sync status [flags]
+chkit sync doctor [flags]
+chkit sync repair [flags]
 ```
 
-`chkit ingest <subcommand>` is equivalent to `chkit plugin ingest <subcommand>`.
+`chkit sync <subcommand>` is equivalent to `chkit plugin sync <subcommand>`.
+
+See the [upgrade guide](/plugins/sync/#upgrade-from-the-ingest-plugin) for the deprecated command aliases and how to migrate scheduled runs.
 
 ## Flags
 
@@ -41,7 +43,7 @@ chkit ingest repair [flags]
 |------|------|---------|-------------|
 | `--from <timestamp>` | string | — | Backfill lower bound, e.g. `2026-01-01T00:00:00Z` or `2026-01-01T00:00:00+01:00`. Requires `--backfill` |
 | `--to <timestamp>` | string | — | Backfill upper bound, e.g. `2026-02-01T00:00:00Z` or `2026-02-01T00:00:00+01:00`. Requires `--backfill` |
-| `--retries <count>` | string | Plugin option | Non-negative decimal integer (digits only). Overrides `retry.retries` for this run; see the [retry policy](/plugins/ingest/#retry-policy) for defaults, valid values, and provider-directed waits |
+| `--retries <count>` | string | Plugin option | Non-negative decimal integer (digits only). Overrides `retry.retries` for this run; see the [retry policy](/plugins/sync/#retry-policy) for defaults, valid values, and provider-directed waits |
 | `--max-duration <seconds>` | string | `3600` | Execution budget, at most `2147483` seconds (about 24.8 days). Overrides the plugin's `maxDurationSeconds` option |
 
 ### `repair` only
@@ -56,7 +58,7 @@ See the [shared CLI flags](/cli/overview/#global-flags) for `--config`, `--json`
 
 ### Prerequisites
 
-The ingest plugin must be registered in `plugins`, and the modules loaded from `entry` (or from `schema` globs) must export at least one `definePipeline(...)` value. Without an exported pipeline, every subcommand fails with exit code 2.
+Register the Sync plugin in `plugins`. The modules loaded from `entry` or `schema` globs must export at least one `definePipeline(...)` value. Without an exported pipeline, every subcommand fails with exit code 2.
 
 `run`, `status`, `doctor`, and `repair` require a direct `clickhouse` connection in the config. Host-provided executors, including the ObsessionDB workbench executor, are rejected. `list` reads only the definition graph and needs no connection.
 
@@ -104,48 +106,48 @@ Without `--apply`, prints a read-only recovery plan with its fingerprint, select
 
 Applied repair verifies a full archive and a separate replacement journal. The replacement retains the selected namespace's valid facts and copies other targets and namespaces unchanged. The original journal remains intact. A failed verification leaves the active configuration unchanged. Missing source evidence requires restoration before repair.
 
-Keep writers stopped after materialization. Configure `ingest({ journalTable: '<replacementTable>' })` with the returned table, then restart them. `--apply` creates the reviewed artifacts; activation remains this explicit configuration change. Uncertain destination writes may be replayed and duplicated.
+Keep writers stopped after materialization. Configure `sync({ journalTable: '<replacementTable>' })` with the returned table, then restart them. `--apply` creates the reviewed artifacts; activation remains this explicit configuration change. Uncertain destination writes may be replayed and duplicated.
 
 ## Examples
 
 **Run everything on an hourly schedule:**
 
 ```sh
-chkit ingest run --tag schedule:1h
+chkit sync run --tag schedule:1h
 ```
 
 **Run a single stream:**
 
 ```sh
-chkit ingest run --tag stream:helpdesk.tickets
+chkit sync run --tag stream:helpdesk.tickets
 ```
 
 **Backfill January without moving the scheduled checkpoint:**
 
 ```sh
-chkit ingest run --backfill jan --from 2026-01-01 --to 2026-02-01
+chkit sync run --backfill jan --from 2026-01-01 --to 2026-02-01
 ```
 
 **Cap a CI run at ten minutes:**
 
 ```sh
-chkit ingest run --tag pipeline:helpdesk --max-duration 600
+chkit sync run --tag pipeline:helpdesk --max-duration 600
 ```
 
 **Inspect progress or diagnose a backfill:**
 
 ```sh
-chkit ingest status --tag pipeline:helpdesk --json
-chkit ingest doctor --tag stream:helpdesk.tickets --backfill jan --json
+chkit sync status --tag pipeline:helpdesk --json
+chkit sync doctor --tag stream:helpdesk.tickets --backfill jan --json
 ```
 
 **Preview and materialize reviewed recovery:**
 
 ```sh
-chkit ingest repair --tag stream:helpdesk.tickets --json
+chkit sync repair --tag stream:helpdesk.tickets --json
 # Stop all journal writers, review the output, and use the printed fingerprint.
-chkit ingest repair --tag stream:helpdesk.tickets --apply <fingerprint>
-# Keep writers stopped; configure ingest({ journalTable: '<replacementTable>' }).
+chkit sync repair --tag stream:helpdesk.tickets --apply <fingerprint>
+# Keep writers stopped; configure sync({ journalTable: '<replacementTable>' }).
 ```
 
 ## Exit codes
@@ -158,7 +160,7 @@ chkit ingest repair --tag stream:helpdesk.tickets --apply <fingerprint>
 
 ## JSON output
 
-Errors before the ingestion command runs use the CLI envelope with `command: "ingest"`, `schemaVersion: 1`, `ok: false`, and an `error` object containing `code` and `message`. Unknown subcommands use `unknown_subcommand`; unknown flags and missing flag values use `usage`; an unregistered plugin uses `plugin_not_configured`. The forwarded `chkit plugin ingest ...` form retains its existing string-error output for subcommand and flag errors. Use `chkit ingest <command> --help` for command-specific flags; forwarded `chkit plugin ... --help` shows generic plugin help.
+Errors before the command runs use the CLI envelope with `command: "sync"`, `schemaVersion: 1`, `ok: false`, and an `error` object containing `code` and `message`. When invoked as `chkit ingest`, that envelope still uses `command: "ingest"`. Unknown subcommands use `unknown_subcommand`. Unknown flags and missing flag values use `usage`. An unregistered plugin uses `plugin_not_configured`. The forwarded `chkit plugin sync ...` form uses a string error for subcommand and flag errors. Use `chkit sync <command> --help` for command-specific flags. Forwarded `chkit plugin ... --help` shows generic plugin help.
 
 **`run`:**
 
@@ -291,7 +293,7 @@ Materialized output sets `applied` to `true`, keeps `activated` at `false`, and 
 
 ## Related commands
 
-- [Sync plugin reference](/plugins/ingest/) — plugin setup, options, and stream definitions
+- [Sync plugin reference](/plugins/sync/) — plugin setup, options, and stream definitions
 - [Sync quickstart](/api-sync/quickstart/) — define a first stream and run it
 - [Scheduling and recovery](/api-sync/operations/) — tags, retries, budgets, and backfills
 - [`chkit check`](/cli/check/) — verifies that stream destinations carry the ingestion metadata columns

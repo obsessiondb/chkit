@@ -13,7 +13,7 @@ Use fixture responses and the in-memory adapters to test source behavior before 
 | `runIngestion` plus memory adapters | Commit ordering, failures, resumption, and selected stream behavior | Actual ClickHouse encoding, engine merges, or deduplication-window settings |
 | An isolated development database | Schema compatibility, JSON encoding, and query results after replay | Every future provider response or production load profile |
 
-Import the testing adapters from `@chkit/plugin-ingest/testing`. `runIngestion`, `selectStreams`, and the ClickHouse runtime adapters are public APIs; embedding them means the host supplies the journal, destination, cancellation, and other runtime settings normally provided by the CLI.
+Import the testing adapters from `@chkit/plugin-sync/testing`. `runIngestion`, `selectStreams`, and the ClickHouse runtime adapters are public APIs; embedding them means the host supplies the journal, destination, cancellation, and other runtime settings normally provided by the CLI.
 
 ## Fixture responses
 
@@ -32,7 +32,7 @@ const result = await runIngestion({ selected: selectStreams([pipeline], []), bac
 
 Return a `503` to exercise a retried request, and a malformed body to check that validation fails the stream without retries. Pass `retry: { retries: 1, minTimeout: 0 }` to `runIngestion` so a retried request does not wait for the backoff.
 
-To call a client or reader directly, for example to inspect chunks one at a time, build its context with `createSourceContext({ fetch })` or `createReadContext({ fetch, selection })` from `@chkit/plugin-ingest/testing`. Requests behave as they do in a run, including `HttpError` for unsuccessful responses, but are not retried unless the options pass a `retry` policy.
+To call a client or reader directly, for example to inspect chunks one at a time, build its context with `createSourceContext({ fetch })` or `createReadContext({ fetch, selection })` from `@chkit/plugin-sync/testing`. Requests behave as they do in a run, including `HttpError` for unsuccessful responses, but are not retried unless the options pass a `retry` policy.
 
 ## Example: a lost acknowledgement
 
@@ -40,8 +40,8 @@ Save as `src/ingestion.test.ts` and run `bun test src/ingestion.test.ts`. The me
 
 ```ts
 import { expect, test } from 'bun:test'
-import { cursorState, definePipeline, defineStream, rawRows, rawTable, runIngestion, selectStreams } from '@chkit/plugin-ingest'
-import { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-ingest/testing'
+import { cursorState, definePipeline, defineStream, rawRows, rawTable, runIngestion, selectStreams } from '@chkit/plugin-sync'
+import { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-sync/testing'
 
 test('replays an acknowledged write whose response was lost', async () => {
   const source = [{ id: '1' }, { id: '2' }, { id: '3' }]
@@ -101,7 +101,7 @@ The memory destination deduplicates tokens without a time limit. It does not mod
 - Child edits/deletes that do not change the parent timestamp; a failed child fetch must not publish an incomplete root as complete.
 - Deletion discovery and checkpointing; a partial reconciliation scan must not mark unseen records as deleted.
 
-Start with `chkit ingest list` to inspect exported streams without a database connection. Generate migrations to inspect the destination schema, then run `chkit check` after applying them to the development target. `check` has no `--offline` flag and can query ClickHouse. These checks do not prove that a provider reader or live table behaves correctly.
+Start with `chkit sync list` to inspect exported streams without a database connection. Generate migrations to inspect the destination schema, then run `chkit check` after applying them to the development target. `check` has no `--offline` flag and can query ClickHouse. These checks do not prove that a provider reader or live table behaves correctly.
 
 ## Related pages
 
