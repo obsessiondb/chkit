@@ -147,7 +147,9 @@ describe('planCutover', () => {
 
   test('creates the shadow with the new layout and the snapshot AS the table, as the server stores it (#524)', () => {
     // chkit-py's test_cutover.py asserts the same.
-    const [, shadow, , , snapshot] = plan().operations
+    const { operations } = plan()
+    const [, shadow, , , snapshot] = operations
+    expect(operations.map((op) => op.sql).join('\n')).not.toContain('flatten_nested')
     expect(shadow?.sql).toContain('CREATE TABLE IF NOT EXISTS app.events__cutover_20261024120000')
     expect(shadow?.sql).toContain('ORDER BY (`user_id`, `id`)')
     expect(snapshot?.sql).toStartWith(
@@ -173,10 +175,12 @@ describe('planCutover', () => {
 
   test('checks the table stores the columns of the old definition, no more and no fewer, before it creates anything', () => {
     // chkit-py's test_cutover.py asserts the same.
-    const nested = [...columns, { name: 'meta', type: 'String' }, { name: 'n', type: 'Nested(x UInt8)' }] as TableDefinition['columns']
+    const nested = [...columns, { name: 'meta', type: 'String' }, { name: 'n', type: 'Nested\u0085(x UInt8)' }] as TableDefinition['columns']
     const start = plan({ oldDef: events({ columns: nested }), newDef: events({ columns: nested, primaryKey: ['user_id', 'id'], orderBy: ['user_id', 'id'] }) }).operations[0]?.sql ?? ''
     const stored = "FROM system.columns WHERE database = 'app' AND table = 'events' AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')"
-    // ClickHouse stores `n Nested(x UInt8)` as `n.x Array(UInt8)`, or as `n` with flatten_nested = 0.
+    expect(start).toContain(`(SELECT countIf(has(['n'], name)) ${stored}) AS unflattened_nested`)
+    expect(start).toContain("throwIf(max(unflattened_nested) > 0, 'app.events stores a Nested column as one column (created with flatten_nested = 0).")
+    expect(start.indexOf('throwIf(max(unflattened_nested)')).toBeLessThan(start.indexOf('throwIf(max(undeclared_columns)'))
     expect(start).toContain(`(SELECT countIf(NOT has(['id', 'user_id', 'payload', 'meta', 'n.x', 'n'], name)) ${stored}) AS undeclared_columns`)
     expect(start).toContain(
       `((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR (SELECT hasAll(groupArray(name), ['id', 'user_id', 'payload', 'meta']) AND (hasAll(groupArray(name), ['n.x']) OR has(groupArray(name), 'n')) ${stored})) AS declared_columns`
@@ -193,12 +197,53 @@ describe('planCutover', () => {
     const typed = [...columns, { name: 'price', type: 'Decimal64(2)', nullable: true }, { name: 'n', type: 'Nested(x UInt8, `y z` Decimal64(2))' }] as TableDefinition['columns']
     const start = plan({ oldDef: events({ columns: typed }), newDef: events({ columns: typed, primaryKey: ['user_id', 'id'], orderBy: ['user_id', 'id'] }) }).operations[0]?.sql ?? ''
     // The server reads each type from a one-row format() table: defaultValueOfTypeName
-    // fails for some types before ClickHouse 26.4. With flatten_nested = 0, `n` is stored
-    // as one Nested column.
+    // fails for some types before ClickHouse 26.4.
     expect(start).toContain(
-      "(SELECT countIf(has(['id', 'user_id', 'payload', 'price', 'n.x', 'n.y z', 'n'], name) AND NOT has([('id', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c UInt64', '{}') SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0), ',\\n *', ', '), '\\n *', '')), ('user_id', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c UInt64', '{}') SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0), ',\\n *', ', '), '\\n *', '')), ('payload', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c String', '{}') SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0), ',\\n *', ', '), '\\n *', '')), ('price', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c Nullable(Decimal64(2))', '{}') SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0), ',\\n *', ', '), '\\n *', '')), ('n.x', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c Array(UInt8)', '{}') SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0), ',\\n *', ', '), '\\n *', '')), ('n.y z', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c Array(Decimal64(2))', '{}') SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0), ',\\n *', ', '), '\\n *', '')), ('n', concat('Nested(', substring(replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c Tuple(`x` UInt8, `y z` Decimal64(2))', '{}') SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0), ',\\n *', ', '), '\\n *', ''), 7)))], (name, type))) FROM system.columns WHERE database = 'app' AND table = 'events' AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')) AS mistyped_columns"
+      "(SELECT countIf(has(['id', 'user_id', 'payload', 'price', 'n.x', 'n.y z'], name) AND NOT has([('id', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c UInt64', '{}') SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0), ',\\n *', ', '), '\\n *', '')), ('user_id', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c UInt64', '{}') SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0), ',\\n *', ', '), '\\n *', '')), ('payload', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c String', '{}') SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0), ',\\n *', ', '), '\\n *', '')), ('price', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c Nullable(Decimal64(2))', '{}') SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0), ',\\n *', ', '), '\\n *', '')), ('n.x', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c Array(UInt8)', '{}') SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0), ',\\n *', ', '), '\\n *', '')), ('n.y z', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c Array(Decimal64(2))', '{}') SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0), ',\\n *', ', '), '\\n *', ''))], (name, type))) FROM system.columns WHERE database = 'app' AND table = 'events' AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')) AS mistyped_columns"
     )
+    expect(start).not.toContain("concat('Nested('")
     expect(start).toContain("throwIf(max(mistyped_columns) > 0, 'app.events stores a column with another type than the schema declares")
+  })
+
+  for (const cluster of [undefined, 'c2']) {
+    test(`moves flattened Nested leaves ${cluster ? 'on a cluster' : 'locally'}`, () => {
+      const nested = [...columns, { name: 'n', type: 'Nested(x UInt8, `y z` Decimal64(2))' }] as TableDefinition['columns']
+      const engine = cluster ? 'ReplicatedMergeTree' : 'MergeTree'
+      const settings = { index_granularity: 4096 }
+      const cutover = plan({
+        oldDef: events({ columns: nested, engine, settings }),
+        newDef: events({ columns: nested, engine, settings, primaryKey: ['user_id', 'id'], orderBy: ['user_id', 'id'] }),
+        options: { cluster },
+      })
+      const sqlOf = (key: string) => cutover.operations.find((op) => op.key === key)?.sql ?? ''
+      const step = (name: string) => sqlOf(`table:app.events:cutover:${name}`)
+      const mirror = sqlOf(`materialized_view:app.${cutover.names.mirror}`)
+      const verify = step('verify')
+      const snapshot = sqlOf(`table:app.${cutover.names.snapshot}`)
+      for (const sql of [mirror, step('copy'), verify, step('reconcile_unmirrored'), step('reconcile')]) {
+        expect(sql).toContain('`n.x`, `n.y z`')
+        expect(sql).not.toContain('`n`')
+      }
+      expect(verify).toContain('cityHash64(tuple(`id`, `user_id`, `payload`, `n.x`, `n.y z`))')
+      expect(cutover.columns).toEqual(['id', 'user_id', 'payload', 'n.x', 'n.y z'])
+      expect(snapshot).toContain(`"columns":${JSON.stringify(cutover.columns)}`)
+      expect(sqlOf(`table:app.${cutover.names.shadow}`)).toEndWith('SETTINGS index_granularity = 4096, flatten_nested = 1;')
+      expect(sqlOf(`table:app.${cutover.names.reconcile}`)).toEndWith('SETTINGS index_granularity = 4096, flatten_nested = 1;')
+      expect(cutover.retained?.settings).toEqual(settings)
+      if (cluster) {
+        expect(snapshot).toContain('SETTINGS index_granularity = 4096, flatten_nested = 1\nCOMMENT ')
+        expect(step('start')).toContain("clusterAllReplicas('c2', view(")
+        expect(step('start')).toContain('AS unflattened_nested')
+      }
+    })
+  }
+
+  test('refuses a Nested column whose fields cannot be read', () => {
+    const nested = [...columns, { name: 'n', type: 'Nested(1 UInt8)' }] as TableDefinition['columns']
+    expect(messages(() => plan({
+      oldDef: events({ columns: nested }),
+      newDef: events({ columns: nested, primaryKey: ['user_id', 'id'], orderBy: ['user_id', 'id'] }),
+    }))).toEqual(['Cannot cut over app.events: column n is Nested, but chkit cannot read its fields, so the mirror could not list its columns.'])
   })
 
   test('checks on every replica that the table stores {uuid} in its replication path when the snapshot is created AS it', () => {

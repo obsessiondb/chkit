@@ -77,6 +77,18 @@ def test_copies_through_the_backfill_plugin_then_swaps_and_drops_the_old_table(
     run_backfill_scenario(target, "cutover_backfill", tmp_path)
 
 
+def test_keeps_flattened_nested_rows_while_writers_insert(
+    target: CutoverTarget, tmp_path: Path
+) -> None:
+    run_keep_scenario(target, "cutover_keep_nested", tmp_path, nested=True)
+
+
+def test_copies_flattened_nested_rows_through_backfill_while_the_mirror_is_live(
+    target: CutoverTarget, tmp_path: Path
+) -> None:
+    run_backfill_scenario(target, "cutover_backfill_nested", tmp_path, nested=True)
+
+
 def test_resumes_after_a_failure_at_every_step_whose_retry_differs_and_never_replays_the_swap(
     target: CutoverTarget, tmp_path: Path
 ) -> None:
@@ -185,20 +197,18 @@ def test_stops_before_it_creates_anything_on_summing_merge_tree_where_the_schema
     )
 
 
-# With flatten_nested = 0, ClickHouse stores `n Nested(x UInt64)` as one column, not as `n.x`.
-# The first statement accepts it; the mirror then stops on any Nested column, flattened or
-# not (it selects `n`, which the flattened shadow table lacks), a separate limitation.
-def test_accepts_a_nested_column_stored_without_flattening_at_the_first_statement(
+def test_stops_before_it_creates_anything_when_the_table_stores_nested_without_flattening(
     target: CutoverTarget, tmp_path: Path
 ) -> None:
-    run_created_outside_chkit_scenario(
+    run_refused_at_start_scenario(
         target,
         "cutover_nested_whole",
         tmp_path,
         columns="id UInt64, user_id UInt64, payload String, n Nested(x UInt64, `y z` Decimal64(2))",
+        engine=lambda _table: target.engine,
         schema_columns=[*BASE, {"name": "n", "type": "Nested(x UInt64, `y z` Decimal64(2))"}],
         settings={"flatten_nested": 0},
-        stops_later="SELECT query outputs column with name 'n', which is not found in the target table",
+        message="stores a Nested column as one column (created with flatten_nested = 0)",
     )
 
 

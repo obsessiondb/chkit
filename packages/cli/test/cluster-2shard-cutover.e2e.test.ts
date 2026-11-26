@@ -52,6 +52,10 @@ describe('generate --cutover on a 2-shard cluster (#202)', () => {
     await runKeepScenario(clusterTarget(), 'cutover2s_keep')
   }, 900_000)
 
+  test('keeps flattened Nested rows on both shards while writers insert', async () => {
+    await runKeepScenario(clusterTarget(), 'cutover2s_keep_nested', true)
+  }, 900_000)
+
   test('resumes after a failure at every step whose retry differs, and never replays the swap', async () => {
     await runRetryScenario(clusterTarget(), 'cutover2s_retry')
   }, 1_800_000)

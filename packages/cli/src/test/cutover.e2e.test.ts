@@ -26,6 +26,10 @@ describe('generate --cutover e2e (#202)', () => {
     await runKeepScenario(liveCutoverTarget(), 'cutover_keep')
   }, 900_000)
 
+  test('keeps flattened Nested rows while writers insert during the cutover', async () => {
+    await runKeepScenario(liveCutoverTarget(), 'cutover_keep_nested', true)
+  }, 900_000)
+
   test('cuts over a table created with only ORDER BY, without PRIMARY KEY (#524)', async () => {
     await runUndeclaredPrimaryKeyScenario(liveCutoverTarget(), 'cutover_pk')
   }, 300_000)
@@ -75,16 +79,18 @@ describe('generate --cutover e2e (#202)', () => {
     )
   }, 300_000)
 
-  // With flatten_nested = 0, ClickHouse stores `n Nested(x UInt64)` as one column, not as `n.x`.
-  // The first statement accepts it; the mirror then stops on any Nested column, flattened or not
-  // (it selects `n`, which the flattened shadow table lacks), a separate limitation.
-  test('accepts a Nested column stored without flattening at the first statement', async () => {
-    await runCreatedOutsideChkitScenario(
-      liveCutoverTarget(),
+  test('stops before it creates anything when the table stores a Nested column without flattening', async () => {
+    const target = liveCutoverTarget()
+    await runRefusedAtStartScenario(
+      target,
       'cutover_nested_whole',
-      { columns: 'id UInt64, user_id UInt64, payload String, n Nested(x UInt64, `y z` Decimal64(2))', settings: { flatten_nested: 0 } },
+      {
+        columns: 'id UInt64, user_id UInt64, payload String, n Nested(x UInt64, `y z` Decimal64(2))',
+        engine: () => target.engine,
+        settings: { flatten_nested: 0 },
+      },
+      'stores a Nested column as one column (created with flatten_nested = 0)',
       [...BASE, { name: 'n', type: 'Nested(x UInt64, `y z` Decimal64(2))' }],
-      "SELECT query outputs column with name 'n', which is not found in the target table",
     )
   }, 300_000)
 

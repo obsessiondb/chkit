@@ -40,6 +40,15 @@ from tests.e2e_testkit import (
 
 HISTORIC_ROWS = 20_000
 BATCH_ROWS = 200
+NESTED_HISTORIC_ROWS = 2_000
+NESTED_COLUMNS: list[dict[str, Any]] = [
+    {"name": "id", "type": "UInt64"},
+    {"name": "user_id", "type": "UInt64"},
+    {"name": "payload", "type": "String"},
+    {"name": "n", "type": "Nested(x UInt64, `y z` Decimal64(2))"},
+]
+NESTED_X = "arrayMap(i -> toUInt64(i), range(id % 5))"
+NESTED_Y = "arrayMap(i -> toDecimal64(i, 2), range(id % 5))"
 
 
 @dataclass
@@ -82,6 +91,7 @@ class CutoverProject:
 class WriterReport:
     batches: int = 0
     rows: int = 0
+    nested_rows: int = 0
     errors: list[str] = field(default_factory=list)
 
 
@@ -204,9 +214,12 @@ class Writers:
     (741) overlapped the swap and wrote nothing, so it is retried once, as the
     cutover guide tells writers to; any other error fails the scenario."""
 
-    def __init__(self, target: CutoverTarget, project: CutoverProject, parallel: int = 2) -> None:
+    def __init__(
+        self, target: CutoverTarget, project: CutoverProject, parallel: int = 2, *, nested: bool = False
+    ) -> None:
         self._target = target
         self._project = project
+        self._nested = nested
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._next = 0
@@ -231,11 +244,16 @@ class Writers:
         try:
             while not self._stop.is_set():
                 batch = self._take()
-                client = clients[batch % len(clients)]
-                into = self._project.table if batch % 2 == 0 else self._project.ingest
+                writer = batch // 2 if self._nested else batch
+                client = clients[writer % len(clients)]
+                direct = batch % 2 == 0
+                into = self._project.table if direct else self._project.ingest
+                with_nested = self._nested and direct
                 start = 1_000_000_000 + batch * BATCH_ROWS
                 insert = (
-                    f"INSERT INTO {db}.{into} (id, user_id, payload) SELECT {start} + number, "
+                    _insert_nested_sql(f"{db}.{into}", start, BATCH_ROWS, f"live-nested-{worker}")
+                    if with_nested
+                    else f"INSERT INTO {db}.{into} (id, user_id, payload) SELECT {start} + number, "
                     f"number % 97, 'live-{worker}' FROM numbers({BATCH_ROWS})"
                 )
                 try:
@@ -248,6 +266,8 @@ class Writers:
                     with self._lock:
                         self.report.batches += 1
                         self.report.rows += BATCH_ROWS
+                        if with_nested:
+                            self.report.nested_rows += BATCH_ROWS
                 except Exception as error:  # reported, the test fails on it
                     with self._lock:
                         self.report.errors.append(str(error))
@@ -324,6 +344,75 @@ def assert_cutover_rows(target: CutoverTarget, project: CutoverProject, report: 
     assert actual == want, f"cutover rows: got {actual}, want {want} (writer errors: {len(report.errors)})"
 
 
+def _insert_nested_sql(table: str, start: int, count: int, payload: str) -> str:
+    return (
+        f"INSERT INTO {table} (id, user_id, payload, `n.x`, `n.y z`) "
+        f"SELECT {start} + number AS id, number % 97, '{payload}', {NESTED_X}, {NESTED_Y} "
+        f"FROM numbers({count})"
+    )
+
+
+def _stored_columns(target: CutoverTarget, project: CutoverProject) -> list[dict[str, Any]]:
+    return target.admin.query(
+        "SELECT name, type FROM system.columns "
+        f"WHERE database = '{target.database}' AND table = '{project.table}' ORDER BY position"
+    ).rows
+
+
+def _nested_drift(table: str) -> dict[str, Any]:
+    payload = json_of(cli(["drift", "--table", table, "--json"]), "drift")
+    table_drift: list[dict[str, Any]] = payload["tableDrift"]
+    detail = next(item for item in table_drift if item["table"] == table)
+    # Drift reports the declared Nested name as missing and its stored leaves as extra.
+    assert detail["reasonCodes"] == ["missing_column", "extra_column"], detail
+    assert detail["missingColumns"] == ["n"], detail
+    assert detail["extraColumns"] == ["n.x", "n.y z"], detail
+    return detail
+
+
+def _seed_nested(
+    target: CutoverTarget, project: CutoverProject
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    table = f"{target.database}.{project.table}"
+    columns = _stored_columns(target, project)
+    drift = _nested_drift(table)
+    half = NESTED_HISTORIC_ROWS // 2
+    for config, start in (
+        (target.writer_configs[0], project.historic),
+        (target.writer_configs[-1], project.historic + half),
+    ):
+        client = ClickHouseClient.connect(config)
+        try:
+            client.execute(_insert_nested_sql(table, start, half, "nested-historic"))
+        finally:
+            client.close()
+    project.historic += NESTED_HISTORIC_ROWS
+    return columns, drift
+
+
+def _assert_nested_rows(
+    target: CutoverTarget,
+    project: CutoverProject,
+    before: tuple[list[dict[str, Any]], dict[str, Any]],
+    expected: int,
+) -> None:
+    counts = rows(
+        target,
+        "WITH (payload LIKE 'nested-%' OR payload LIKE 'live-nested-%') AS is_nested "
+        "SELECT countIf(is_nested) AS nested, "
+        f"countIf(is_nested AND (`n.x` != {NESTED_X} OR `n.y z` != {NESTED_Y})) AS wrong_values, "
+        "countIf(NOT is_nested AND (notEmpty(`n.x`) OR notEmpty(`n.y z`))) AS nonempty, "
+        "countIf(length(`n.x`) != length(`n.y z`)) AS unaligned "
+        f"FROM {target.rows_of(project.table)}",
+    )[0]
+    assert {key: int(value) for key, value in counts.items()} == {
+        "nested": expected, "wrong_values": 0, "nonempty": 0, "unaligned": 0,
+    }
+    columns, drift = before
+    assert _stored_columns(target, project) == columns
+    assert _nested_drift(f"{target.database}.{project.table}") == drift
+
+
 @dataclass(frozen=True)
 class CutoverChange:
     """A cutover's change: the new sort key and settings, and the layout
@@ -364,7 +453,7 @@ def sorting_keys(target: CutoverTarget, project: CutoverProject) -> dict[str, st
     return {str(row["name"]): str(row["sorting_key"]).strip("()") for row in result}
 
 
-def assert_chkit_clean() -> None:
+def assert_chkit_clean(*, nested: bool = False) -> None:
     """check (no pending migration, no drift) and generate --dryrun report nothing to do."""
     check = cli(["check", "--json"])
     plan = json_of(cli(["generate", "--dryrun", "--json"]), "generate --dryrun")
@@ -374,13 +463,15 @@ def assert_chkit_clean() -> None:
         "pending": payload["pendingCount"],
         "drift_evaluated": payload["driftEvaluated"],
         "drifted": payload["drifted"],
+        "failed_checks": payload["failedChecks"],
         "operations": plan["operationCount"],
     }
     assert summary == {
-        "check": 0,
+        "check": 1 if nested else 0,
         "pending": 0,
         "drift_evaluated": True,
-        "drifted": False,
+        "drifted": nested,
+        "failed_checks": ["schema_drift"] if nested else [],
         "operations": 0,
     }, f"chkit not clean after the cutover: {summary}\n{check.output}"
 
@@ -437,16 +528,19 @@ def _generate_cutover(
     )
 
 
-def run_keep_scenario(target: CutoverTarget, label: str, directory: Path) -> None:
+def run_keep_scenario(
+    target: CutoverTarget, label: str, directory: Path, *, nested: bool = False
+) -> None:
     """The default cutover: copy inside the migration, old table kept as
     ``<table>_previous``, while writers insert the whole time."""
-    project = create_cutover_project(target, label, directory)
+    project = create_cutover_project(target, label, directory, NESTED_COLUMNS if nested else None)
     try:
+        before = _seed_nested(target, project) if nested else None
         generated = _generate_cutover(target, project)
         assert generated["riskSummary"]["danger"] == 0
         assert generated["cutovers"][0]["retainedAs"] == f"{target.database}.{project.previous}"
 
-        writers = Writers(target, project)
+        writers = Writers(target, project, nested=nested)
         migrate = cli(["migrate", "--apply", "--json"])
         report = writers.stop()
         expect_ok(migrate, "migrate --apply (cutover)")
@@ -468,24 +562,34 @@ def run_keep_scenario(target: CutoverTarget, label: str, directory: Path) -> Non
             f"SELECT count() AS total, uniqExact(id) AS ids FROM {target.rows_of(project.previous)}",
         )[0]
         assert int(previous["total"]) >= int(previous["ids"]) >= project.historic, previous
-        assert_chkit_clean()
+        if before is not None:
+            _assert_nested_rows(
+                target, project, before, NESTED_HISTORIC_ROWS + report.nested_rows
+            )
+        assert_chkit_clean(nested=nested)
     finally:
         drop_cutover_project(target, project)
 
 
-def run_backfill_scenario(target: CutoverTarget, label: str, directory: Path) -> None:
+def run_backfill_scenario(
+    target: CutoverTarget, label: str, directory: Path, *, nested: bool = False
+) -> None:
     """The backfill copy: migrate stops at the copy check, the backfill plugin
     copies the snapshot, and the next apply verifies and swaps. The old table
     is dropped."""
-    project = create_cutover_project(target, label, directory)
+    project = create_cutover_project(target, label, directory, NESTED_COLUMNS if nested else None)
     fqn = f"{target.database}.{project.table}"
     try:
+        before = _seed_nested(target, project) if nested else None
         _generate_cutover(target, project, "--cutover-copy", "backfill", "--cutover-old", "drop")
-        writers = Writers(target, project)
+        writers = Writers(target, project, nested=nested)
         try:
             stopped = cli(["migrate", "--apply", "--allow-destructive", "--json"])
             assert stopped.exit_code == 1, stopped.output
             assert f"chkit plugin backfill plan --cutover {fqn}" in stopped.output, stopped.output
+            if nested:
+                target.admin.execute(_insert_nested_sql(fqn, project.historic, BATCH_ROWS, "nested-paused"))
+                project.historic += BATCH_ROWS
             plan = json_of(
                 cli(["plugin", "backfill", "plan", "--cutover", fqn, "--json"]), "backfill plan"
             )
@@ -509,7 +613,11 @@ def run_backfill_scenario(target: CutoverTarget, label: str, directory: Path) ->
         assert not report.errors, report.errors[0]
         assert_cutover_rows(target, project, report)
         assert sorting_keys(target, project) == {project.table: "user_id, id"}
-        assert_chkit_clean()
+        if before is not None:
+            _assert_nested_rows(
+                target, project, before, NESTED_HISTORIC_ROWS + report.nested_rows + BATCH_ROWS
+            )
+        assert_chkit_clean(nested=nested)
     finally:
         drop_cutover_project(target, project)
 
@@ -674,6 +782,7 @@ def run_refused_at_start_scenario(
     message: str,
     order_by: str = "id",
     clauses: str = "",
+    settings: dict[str, Any] | None = None,
     schema_columns: list[dict[str, Any]] | None = None,
 ) -> None:
     """The table is created outside chkit with ``columns`` and the engine that
@@ -690,7 +799,8 @@ def run_refused_at_start_scenario(
         target.admin.execute(
             f"CREATE TABLE {fqn}{on_cluster} ({columns}) "
             f"ENGINE = {engine(project.table)} ORDER BY {order_by}"
-            + (f" {clauses}" if clauses else "")
+            + (f" {clauses}" if clauses else ""),
+            settings,
         )
         created = poll_until(
             lambda: target.admin.query(
@@ -706,6 +816,7 @@ def run_refused_at_start_scenario(
         diagnostic = format_test_diagnostic(f'migrate --apply must stop with "{message}"', refused)
         assert refused.exit_code != 0, diagnostic
         assert message in refused.output, diagnostic
+        assert "failed at statement 1 of" in refused.output, diagnostic
         tables = (
             f"clusterAllReplicas('{target.cluster}', system.tables)"
             if target.cluster
@@ -730,14 +841,11 @@ def run_created_outside_chkit_scenario(
     order_by: str = "id",
     clauses: str = "",
     settings: dict[str, Any] | None = None,
-    stops_later: str | None = None,
 ) -> None:
     """The table is created outside chkit with ``columns``, ``clauses`` after
     its ORDER BY and the query ``settings``, in a form the schema
     (``schema_columns``) describes but chkit would not write: the cutover must
-    accept it. With ``stops_later``, the cutover passes its first statement,
-    creates its tables and stops later with that message. TS
-    ``runCreatedOutsideChkitScenario``."""
+    accept it. TS ``runCreatedOutsideChkitScenario``."""
     project = create_cutover_project(target, label, directory, schema_columns)
     try:
         fqn = f"{target.database}.{project.table}"
@@ -761,20 +869,10 @@ def run_created_outside_chkit_scenario(
         )
 
         _generate_cutover(target, project)
-        if stops_later is not None:
-            stopped = cli(["migrate", "--apply", "--json"])
-            diagnostic = format_test_diagnostic(
-                f'migrate --apply must pass the first statement and stop with "{stops_later}"',
-                stopped,
-            )
-            assert stopped.exit_code != 0, diagnostic
-            assert stops_later in stopped.output, diagnostic
-            assert "failed at statement 1 of" not in stopped.output, diagnostic
-        else:
-            expect_ok(cli(["migrate", "--apply", "--json"]), "migrate --apply (cutover)")
-            assert sorting_keys(target, project)[project.table] == "user_id, id"
-            total = rows(target, f"SELECT count() AS total FROM {target.rows_of(project.table)}")
-            assert int(total[0]["total"]) == 1000
+        expect_ok(cli(["migrate", "--apply", "--json"]), "migrate --apply (cutover)")
+        assert sorting_keys(target, project)[project.table] == "user_id, id"
+        total = rows(target, f"SELECT count() AS total FROM {target.rows_of(project.table)}")
+        assert int(total[0]["total"]) == 1000
     finally:
         drop_cutover_project(target, project)
 
