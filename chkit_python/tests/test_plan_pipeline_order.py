@@ -464,3 +464,45 @@ def test_ttl_change_keeps_its_order_with_a_table_rename() -> None:
         "ALTER TABLE app.t MODIFY TTL y + INTERVAL 1 DAY;",
         "ALTER TABLE app.t DROP COLUMN IF EXISTS `x`;",
     ]
+
+
+# ---------- a cycle breaker runs first only in tables without a column rename (#775) ----------
+
+
+def _named(name: str, columns: list[dict[str, Any]]) -> TableDefinition:
+    return table(
+        database="app",
+        name=name,
+        engine="MergeTree()",
+        primary_key=["id"],
+        order_by=["id"],
+        columns=[{"name": "id", "type": "UInt64"}, *columns],
+    )
+
+
+def _u(name: str, expression: str | None = None) -> dict[str, Any]:
+    column: dict[str, Any] = {"name": name, "type": "UInt64"}
+    if expression is not None:
+        column["default"] = _expr(expression)
+    return column
+
+
+def test_cycle_breaker_runs_first_only_in_the_table_without_a_column_rename() -> None:
+    # The cycle repair does not model RENAME COLUMN, so a table with a column
+    # rename keeps the sorted order; another table in the plan is still repaired.
+    before = [_u("a"), _u("b", "c"), _u("c", "a")]
+    after = [_u("a", "b"), _u("b", "id"), _u("c", "id")]
+    assert _renamed(
+        [_named("t", [*before, _u("x")]), _named("v", before)],
+        [_named("t", [*after, _u("y")]), _named("v", after)],
+        "x",
+        "y",
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;",
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT id;",
+        "ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;",
+        "ALTER TABLE app.t RENAME COLUMN IF EXISTS `x` TO `y`;",
+        "ALTER TABLE app.v MODIFY COLUMN `b` UInt64 DEFAULT id;",
+        "ALTER TABLE app.v MODIFY COLUMN `a` UInt64 DEFAULT b;",
+        "ALTER TABLE app.v MODIFY COLUMN `c` UInt64 DEFAULT id;",
+    ]
