@@ -1229,6 +1229,145 @@ describe('planDiff orders MODIFY read releases and table TTL changes (#769)', ()
   })
 })
 
+// Each expected read below is what ClickHouse 26.3 reads: a DROP COLUMN of a
+// column it reads is refused (#805).
+describe('columnDefaultReads skips keywords and alias names (#805)', () => {
+  const columns = ['and', 'as', 'c', 'else', 'end', 'from', 'id', 'interval', 'is', 'like', 'nan', 'not', 'null', 'NULL', 's', 'then', 'true', 'ts', 'when', 'x']
+  const readsOf = (expression: string, extra: string[] = []) => {
+    const definition = table({
+      database: 'app',
+      name: 't',
+      columns: [
+        ...[...columns, ...extra].map((name) => ({ name, type: 'UInt64' })),
+        { name: 'v', type: 'UInt64', default: { expression } },
+      ],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+    const reads = columnDefaultReads([definition]).get('table:app.t:column:v') ?? new Set<string>()
+    return [...reads].map((key) => key.slice('table:app.t:column:'.length)).sort()
+  }
+
+  test.each<[string, string[]]>([
+    ['case when x = 1 then 2 else 3 end', ['x']],
+    ['case x when 1 then 2 end', ['when', 'x']],
+    ['CASE x WHEN 1 THEN 2 END + 0', ['x']],
+    ['if(x is null, 1, 2)', ['x']],
+    ['if(x is not null, 1, 2)', ['x']],
+    ['not x', ['x']],
+    ['toUInt64(not (x = 1))', ['x']],
+    ['x not in (1, 2)', ['x']],
+    ['ifNull(null, 1) + ifNull(NULL, 1)', []],
+    ['if(true, 1, 2) + toUInt64(isNaN(nan))', []],
+    ['length(substring(toString(s) from 1 for 2))', ['s']],
+    ['toUInt64(extract(day from ts))', ['ts']],
+    ["length(trim(both ' ' from toString(s)))", ['s']],
+    ['x and 1', ['x']],
+    ['x between 1 and 2', ['x']],
+    ['toUInt64(x as c)', ['x']],
+    ['toUInt64(x AS `c`)', ['x']],
+    ['(x + 1 as c) * 2', ['x']],
+  ])('keyword: %s reads %p', (expression, expected) => {
+    expect(readsOf(expression)).toEqual(expected)
+  })
+
+  test.each<[string, string[]]>([
+    ['end + 1', ['end']],
+    ['toUInt64(when)', ['when']],
+    ['is + 1', ['is']],
+    ['x and and', ['and', 'x']],
+    ['toUInt64(as)', ['as']],
+    ['case when end = 1 then 2 end', ['end']],
+    ['case when x = 1 then end else 3 end', ['end', 'x']],
+    ['case when x = 1 then then else else end', ['else', 'then', 'x']],
+    ['case when x = 1 then 2 else 3 end + end', ['end', 'x']],
+    ['toUInt64(substring(toString(s) from from))', ['from', 's']],
+    ['ifNull(`null`, 1)', ['null']],
+    ['toUInt64(`true`)', ['true']],
+    ['toUInt64(`not`)', ['not']],
+    ['toUInt64(c as c)', ['c']],
+    ['(x + 1 as c) * c', ['c', 'x']],
+    // A column named like a prefix keyword may be that keyword: the name after it is still read.
+    ['toUInt64(toDateTime(0) + interval end day)', ['end', 'interval']],
+    ['arraySum(arrayMap(interval -> toUInt64(toDateTime(0) + interval end day), [1]))', ['end']],
+    ["length(extract(interval end day > interval 0 day ? 'a' : 'b', '.'))", ['end', 'interval']],
+    ['arraySum(arrayMap(and -> 1 and end, [1]))', ['end']],
+    ["arraySum(arrayMap(both -> both not like end, ['x']))", ['end', 'like']],
+    ['toUInt8(t.x and end)', ['and', 'end', 'x']],
+    // Unclear positions keep the read: after a lambda parameter, and before a single `=`.
+    ['arraySum(arrayMap(i -> i is null, [x]))', ['is', 'x']],
+    ['toUInt8(null = 1)', ['null']],
+    // An alias named `case` (`s AS case`) is no CASE keyword.
+    ['length(concat(toString(s) AS case, substring(case from then)))', ['from', 's', 'then']],
+    ["length(extract(interval from day > interval 0 day ? 'a' : 'b', '.'))", ['from', 'interval']],
+  ])('column: %s reads %p', (expression, expected) => {
+    expect(readsOf(expression)).toEqual(expected)
+  })
+
+  // With a column named `case`, a bare `case` keeps its read: ClickHouse reads
+  // the column wherever CASE does not parse (`INTERVAL case DAY`, `case when`
+  // with the alias `when`), and chkit does not tell the two apart.
+  test.each<[string, string[]]>([
+    ['case', ['case']],
+    ['case + 1', ['case']],
+    ['case when case = 1 then 2 end', ['case', 'when']],
+    ['case global in (1, 2)', ['case']],
+    ["case regexp 'x'", ['case']],
+    ['toUInt64(toDateTime(0) + interval case day)', ['case', 'interval']],
+    ['length(substring(case c, 1))', ['c', 'case']],
+    ['length(substring(case when, 1))', ['case', 'when']],
+    ['toUInt64(toDateTime(0) + interval case when day)', ['case', 'interval', 'when']],
+    ['case when x = 1 then 2 else 3 end', ['case', 'when', 'x']],
+    ['length(substring(case when from then))', ['case', 'from', 'then', 'when']],
+  ])('column case: %s reads %p', (expression, expected) => {
+    expect(readsOf(expression, ['case'])).toEqual(expected)
+  })
+
+  test('a DROP COLUMN runs after the dropped column that reads it when a CASE names that column', () => {
+    const before = appTable('t', [
+      { name: 'id', type: 'UInt64' },
+      { name: 'a', type: 'UInt64', default: { expression: 'case when id = 1 then 2 else 3 end' } },
+      { name: 'end', type: 'UInt64', default: { expression: 'a + 1' } },
+    ])
+    expect(objectOps([before], [appTable('t')])).toEqual([
+      'alter_table_drop_column table:app.t:column:end',
+      'alter_table_drop_column table:app.t:column:a',
+    ])
+  })
+
+  test.each<[string, string, string]>([
+    ['case', "case TO DISK 'default'", "ts TO DISK 'default'"],
+    ['case', 'case DELETE', 'ts DELETE'],
+    ['null', 'ts GROUP BY id SET null = max(x)', 'ts GROUP BY id SET x = max(x)'],
+  ])('a TTL that reads the column %s changes before it is dropped: %s', (column, before, after) => {
+    const columns: ColumnDefinition[] = [
+      { name: 'id', type: 'UInt64' },
+      { name: 'ts', type: 'DateTime' },
+      { name: 'x', type: 'UInt64' },
+    ]
+    const withTtl = (extra: ColumnDefinition[], ttl: string) =>
+      table({ database: 'app', name: 't', columns: [...columns, ...extra], engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'], ttl })
+    expect(objectOps([withTtl([{ name: column, type: 'DateTime' }], before)], [withTtl([], after)])).toEqual([
+      'alter_table_modify_ttl table:app.t:ttl',
+      `alter_table_drop_column table:app.t:column:${column}`,
+    ])
+  })
+
+  test('a TTL that reads a column after a column named INTERVAL changes before that column is dropped', () => {
+    const columns = [
+      { name: 'id', type: 'UInt64' },
+      { name: 'ts', type: 'DateTime' },
+      { name: 'interval', type: 'UInt64' },
+    ]
+    const withTtl = (extra: ColumnDefinition[], ttl: string) =>
+      table({ database: 'app', name: 't', columns: [...columns, ...extra], engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'], ttl })
+    expect(
+      objectOps([withTtl([{ name: 'end', type: 'UInt64' }], 'ts + interval end day')], [withTtl([], 'ts + interval 1 day')])
+    ).toEqual(['alter_table_modify_ttl table:app.t:ttl', 'alter_table_drop_column table:app.t:column:end'])
+  })
+})
+
 describe('columnDefaultReads skips lambda parameters and CAST types (#768)', () => {
   const columns = ['a', 'arr', 'c', 'id', 'n.x', 'threshold', 'UInt64', 'x', 'y']
   const readsOf = (expression: string) => {
@@ -2021,10 +2160,10 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
     ]
   }
   test.each<[string, () => [ColumnDefinition[], ColumnDefinition[]], number, string, string]>([
-    ['nine cycles through 449 links', () => nineCycles(449), 1292, 'c', '7ec17a4b49e8dcdf3beceb5adb5914cee3504df90dd047e9d72b95808538147a'],
-    ['nine cycles through 85 links', () => nineCycles(85), 564, 'c', '7ec17a4b49e8dcdf3beceb5adb5914cee3504df90dd047e9d72b95808538147a'],
-    ['nine cycles through 86 links', () => nineCycles(86), 566, 'c', '7ec17a4b49e8dcdf3beceb5adb5914cee3504df90dd047e9d72b95808538147a'],
-    ['a chain and a fan-in', chainAndFanIn, 1816, 'm', 'f0ea844653d573b9fd93c11b98a1cf6f6e2f31d10c03d08aa9ee0572f4d8fd36'],
+    ['nine cycles through 449 links', () => nineCycles(449), 1291, 'c', '7fc14481e96d7b6347bd4aabe0c280403a5d8ed4e4da69854070032d1b5dc098'],
+    ['nine cycles through 85 links', () => nineCycles(85), 563, 'c', '7fc14481e96d7b6347bd4aabe0c280403a5d8ed4e4da69854070032d1b5dc098'],
+    ['nine cycles through 86 links', () => nineCycles(86), 565, 'c', '7fc14481e96d7b6347bd4aabe0c280403a5d8ed4e4da69854070032d1b5dc098'],
+    ['a chain and a fan-in', chainAndFanIn, 1808, 'm', 'f0ea844653d573b9fd93c11b98a1cf6f6e2f31d10c03d08aa9ee0572f4d8fd36'],
     ['30 cycles through 30 links', () => fanIn(30), 1807, 'b000', 'c9b8ec508f9b1e19693d8da1e7138fd8055abfd4a2ce8d638c8e7093d593879e'],
     ['50 cycles through 30 links', () => fanIn(50), 3967, 'b000', '734d0b6c25b51d293c74327216b4fea5a1c11fe13660488ec1f084c3bbfde145'],
     ['60 cycles through 30 links', () => fanIn(60), 4648, 'a000', 'ee8a4528f50e4af7107b205dbfc26ae7b2dd7bd945d8654f3f2074c9603f2cad'],
