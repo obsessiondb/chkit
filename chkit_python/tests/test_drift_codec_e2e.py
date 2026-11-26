@@ -1,4 +1,4 @@
-"""Port of the codec test in ``packages/cli/src/test/drift.e2e.test.ts`` (#383).
+"""Port of ``packages/cli/src/test/drift-codec.e2e.test.ts`` (#383).
 
 Every codec form migrates without drift, the same codecs respelled on the
 server stay clean, and a codec changed, added or removed on the server reports

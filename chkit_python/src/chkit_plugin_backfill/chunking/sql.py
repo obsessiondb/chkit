@@ -22,6 +22,7 @@ from chkit_plugin_backfill.chunking.types import (
     TableProfile,
 )
 from chkit_plugin_backfill.chunking.utils.binary_string import latin1_bytes
+from chkit_plugin_backfill.errors import BackfillConfigError
 
 # Top-level clause keywords, in the order they may legally follow a
 # projection. `inject_where_condition` uses this both to detect an existing
@@ -37,12 +38,27 @@ _TRAILING_CLAUSE_KEYWORDS = (
     "SETTINGS",
 )
 
-# Pinned in every chunk INSERT so ``SELECT *`` expands to the insertable columns
-# regardless of the user's profile (see ``_build_settings_clause``).
-_ASTERISK_SETTINGS = (
-    "asterisk_include_materialized_columns=0",
-    "asterisk_include_alias_columns=0",
-)
+# Written first in every chunk INSERT: a synchronous insert, and ``SELECT *``
+# expanded to the insertable columns regardless of the user's profile (see
+# ``_build_settings_clause``). ``insertSettings`` cannot change them.
+_FIXED_INSERT_SETTINGS: dict[str, str] = {
+    "async_insert": "0",
+    "asterisk_include_materialized_columns": "0",
+    "asterisk_include_alias_columns": "0",
+}
+
+# Written by a cutover copy after ``_FIXED_INSERT_SETTINGS`` (see
+# ``_build_cutover_chunk_sql``).
+_CUTOVER_INSERT_SETTINGS: dict[str, str] = {
+    "insert_deduplicate": "0",
+    "select_sequential_consistency": "1",
+}
+
+# Each chunk's own dedup token, which chkit writes when the plan requires one.
+_TOKEN_SETTING = "insert_deduplication_token"
+
+#: The dedup token a preflight tries in place of a chunk's (TS ``PREFLIGHT_TOKEN``).
+PREFLIGHT_TOKEN = "chkit_preflight"
 
 _JS_WS_CLASS = (
     "\\t\\n\\v\\f\\r \\u00a0\\u1680\\u2000-\\u200a"
@@ -70,6 +86,224 @@ def _js_trim(value: str) -> str:
 
 
 # ── Chunk execution SQL ──────────────────────────────────────────────────────
+
+
+#: Settings every chunk INSERT runs with, in its own SETTINGS so they win over
+#: profile defaults (#765, TS ``PINNED_INSERT_SETTINGS``). The INSERT never runs
+#: as secondary queries on other replicas or shards (parallel replicas, a
+#: Distributed INSERT SELECT), whose writes its own written_rows may not count
+#: and whose query_log rows can flush late, and it is always logged, its start
+#: included: a resume proves a failure from that log alone.
+#:
+#: An INSERT into a Distributed table (the target, or a materialized view's)
+#: also returns only once its rows reached the shards (#821): by default it
+#: returns once they are queued on the initiator, and the chunk would be done
+#: before they are delivered. A materialized view's write that fails fails the
+#: INSERT: with materialized_views_ignore_errors = 1 a shard that cannot be
+#: reached would drop the view's rows and the chunk would still be done. These
+#: two are pinned for delivery, not for proof (``DELIVERY_PINS``): writing to a
+#: remote shard runs a secondary query there, so the failure of such a chunk is
+#: never proven, as for any Distributed target (``unprovable_target_failures``).
+#: They are defaults that ``insertSettings`` can override.
+PINNED_INSERT_SETTINGS: dict[str, str] = {
+    "allow_experimental_parallel_reading_from_replicas": "0",
+    "parallel_distributed_insert_select": "0",
+    "distributed_foreground_insert": "1",
+    "materialized_views_ignore_errors": "0",
+    "log_queries": "1",
+    "log_queries_min_type": "'QUERY_START'",
+    "log_queries_min_query_duration_ms": "0",
+    "log_queries_probability": "1",
+}
+
+PINNED_INSERT_SETTINGS_SQL = ", ".join(
+    f"{name}={value}" for name, value in PINNED_INSERT_SETTINGS.items()
+)
+
+#: The pinned settings ``insertSettings`` may override, each with the guarantee
+#: an override turns off (TS ``DELIVERY_PINS``). The others are proof pins:
+#: with another value a failure could not be proven, and a replay could write
+#: a chunk's rows twice.
+DELIVERY_PINS: dict[str, str] = {
+    "distributed_foreground_insert": (
+        "a chunk can be recorded done before its rows reach a Distributed table's shards"
+    ),
+    "materialized_views_ignore_errors": (
+        "a materialized view's failed write is dropped and the chunk is still recorded done"
+    ),
+}
+
+_PROOF_PINS_SQL = ", ".join(
+    f"{name}={value}"
+    for name, value in PINNED_INSERT_SETTINGS.items()
+    if name not in DELIVERY_PINS
+)
+
+
+#: Other names of the pinned settings (``system.settings.alias_for``), for a
+#: server that does not list them: ``enable_parallel_replicas`` is an alias of
+#: ``allow_experimental_parallel_reading_from_replicas`` from 24.10 on, and
+#: ``insert_distributed_sync`` one of ``distributed_foreground_insert``.
+PINNED_SETTING_ALIASES: dict[str, str] = {
+    "enable_parallel_replicas": "allow_experimental_parallel_reading_from_replicas",
+    "insert_distributed_sync": "distributed_foreground_insert",
+}
+
+
+# A setting name; any other key could smuggle text into the SETTINGS clause.
+_SETTING_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _fixed_settings(*, cutover: bool) -> dict[str, str]:
+    """The settings chkit writes itself on a chunk INSERT before the user's,
+    besides the dedup token (``_TOKEN_SETTING``)."""
+    return {**_FIXED_INSERT_SETTINGS, **(_CUTOVER_INSERT_SETTINGS if cutover else {})}
+
+
+def _compulsory_name(
+    key: str, aliases: Mapping[str, str] | None, *, cutover: bool
+) -> str | None:
+    """The pinned or fixed setting ``key`` names, itself or through an alias."""
+    names = {*PINNED_INSERT_SETTINGS, *_fixed_settings(cutover=cutover), _TOKEN_SETTING}
+    name = key if key in names else {**PINNED_SETTING_ALIASES, **(aliases or {})}.get(key)
+    return name if name in names else None
+
+
+def compulsory_setting_names() -> list[str]:
+    """Every setting chkit writes on a chunk INSERT in any mode, for reading
+    the server's aliases of them (``read_pinned_setting_aliases``)."""
+    return [
+        *PINNED_INSERT_SETTINGS,
+        *_FIXED_INSERT_SETTINGS,
+        *_CUTOVER_INSERT_SETTINGS,
+        _TOKEN_SETTING,
+    ]
+
+
+def assert_insert_settings_keep_pinned(
+    insert_settings: Mapping[str, str | int | float | bool] | None,
+    aliases: Mapping[str, str] | None = None,
+    *,
+    cutover: bool = False,
+) -> None:
+    """Refuse ``insertSettings`` that name a setting chkit writes itself, or
+    an alias of one, whatever the value (TS ``assertInsertSettingsKeepPinned``):
+    the proof pins, the fixed settings, a cutover copy's, and the dedup token.
+    chkit's own are written last and would win anyway; naming one is a
+    mistake. Only the delivery pins (``DELIVERY_PINS``) may be set, and each
+    only once, not also through an alias. ``aliases`` adds the server's own
+    (``system.settings.alias_for``) to ``PINNED_SETTING_ALIASES``."""
+    invalid = [key for key in insert_settings or {} if not _SETTING_NAME.fullmatch(key)]
+    if invalid:
+        names = ", ".join(f"'{key}'" for key in invalid)
+        msg = (
+            f"insertSettings has a key that is not a setting name: {names}. A setting name "
+            "is letters, digits and underscores, not starting with a digit."
+        )
+        raise BackfillConfigError(msg)
+    named: list[str] = []
+    delivery: dict[str, list[str]] = {}
+    for key in insert_settings or {}:
+        name = _compulsory_name(key, aliases, cutover=cutover)
+        if name is None:
+            continue
+        if name in DELIVERY_PINS:
+            delivery.setdefault(name, []).append(key)
+        else:
+            named.append(key if name == key else f"{key} (an alias of {name})")
+    if named:
+        written = ", ".join(
+            [
+                *(f"{name}={value}" for name, value in _fixed_settings(cutover=cutover).items()),
+                f"{_TOKEN_SETTING} per chunk",
+                _PROOF_PINS_SQL,
+            ]
+        )
+        msg = (
+            f"insertSettings sets {', '.join(named)}, which chkit sets itself on every "
+            f"backfill chunk INSERT ({written}): remove it from insertSettings."
+        )
+        raise BackfillConfigError(msg)
+    for name, keys in delivery.items():
+        if len(keys) > 1:
+            msg = (
+                f"insertSettings sets {name} more than once ({', '.join(keys)}). "
+                "Keep one of them."
+            )
+            raise BackfillConfigError(msg)
+
+
+def effective_insert_settings(
+    insert_settings: Mapping[str, str | int | float | bool] | None,
+    aliases: Mapping[str, str] | None = None,
+) -> dict[str, str | int | float | bool]:
+    """``insert_settings`` with a delivery pin named through an alias under
+    its own name, so it appears once in the INSERT's SETTINGS."""
+    effective: dict[str, str | int | float | bool] = {}
+    for key, value in (insert_settings or {}).items():
+        name = {**PINNED_SETTING_ALIASES, **(aliases or {})}.get(key, key)
+        effective[name if name in DELIVERY_PINS else key] = value
+    return effective
+
+
+# chkit's default of each delivery pin, as the user may also write it.
+_DELIVERY_DEFAULTS: dict[str, tuple[str, ...]] = {
+    "distributed_foreground_insert": ("1", "true"),
+    "materialized_views_ignore_errors": ("0", "false"),
+}
+
+
+def _is_delivery_default(name: str, value: str | int | float | bool) -> bool:
+    text = value.lower() if isinstance(value, str) else _render_insert_setting_value(value)
+    return text in _DELIVERY_DEFAULTS[name]
+
+
+def chunk_insert_settings_sql(
+    insert_settings: Mapping[str, str | int | float | bool] | None = None,
+    *,
+    token: str = "",
+    cutover: bool = False,
+) -> str:
+    """The settings of a chunk INSERT (TS ``chunkInsertSettingsSql``), in one
+    list, each later one winning over the earlier: the user's own settings (a
+    settings profile included), then the delivery pins, the user's value as
+    written or chkit's default, then everything chkit requires, the fixed
+    settings, a cutover's, the dedup token and the proof pins."""
+    assert_insert_settings_keep_pinned(insert_settings, cutover=cutover)
+    effective = effective_insert_settings(insert_settings)
+    parts = [
+        f"{key}={_render_insert_setting_value(value)}"
+        for key, value in effective.items()
+        if key not in DELIVERY_PINS
+    ]
+    parts.extend(
+        f"{name}={_render_insert_setting_value(effective[name]) if name in effective else value}"
+        for name, value in PINNED_INSERT_SETTINGS.items()
+        if name in DELIVERY_PINS
+    )
+    parts.extend(f"{name}={value}" for name, value in _fixed_settings(cutover=cutover).items())
+    if token:
+        parts.append(f"{_TOKEN_SETTING}='{token}'")
+    parts.append(_PROOF_PINS_SQL)
+    return ", ".join(parts)
+
+
+def delivery_override_warning(
+    insert_settings: Mapping[str, str | int | float | bool] | None,
+) -> str | None:
+    """The one warning line a run or submit prints when ``insert_settings``
+    sets a delivery pin to anything but chkit's default, or None."""
+    overridden = [
+        f"{name}={_render_insert_setting_value(value)} ({DELIVERY_PINS[name]})"
+        for name, value in effective_insert_settings(insert_settings).items()
+        if name in DELIVERY_PINS and not _is_delivery_default(name, value)
+    ]
+    if not overridden:
+        return None
+    return (
+        "Warning: insertSettings overrides what every backfill chunk INSERT sets by "
+        f"default: {'; '.join(overridden)}."
+    )
 
 
 def build_chunk_execution_sql(
@@ -168,14 +402,6 @@ def _build_cutover_chunk_sql(
             continue
         shadow_conditions.extend(_build_range_bound_conditions(range_, sort_key))
     narrowed = f" WHERE {' AND '.join(shadow_conditions)}" if shadow_conditions else ""
-    parts = [
-        "async_insert=0",
-        *_ASTERISK_SETTINGS,
-        "insert_deduplicate=0",
-        "select_sequential_consistency=1",
-    ]
-    for setting, value in (insert_settings or {}).items():
-        parts.append(f"{setting}={_render_insert_setting_value(value)}")
     lines = [
         header,
         f"INSERT INTO {target} ({columns})",
@@ -184,7 +410,7 @@ def _build_cutover_chunk_sql(
         f"WHERE _partition_id = {_quote_sql_string(chunk.partition_id)}",
         *(f"  AND {condition}" for condition in chunk_conditions),
         f"  AND ({key}) NOT IN (SELECT {key} FROM {target}{narrowed})",
-        f"SETTINGS {', '.join(parts)}",
+        f"SETTINGS {chunk_insert_settings_sql(insert_settings, cutover=True)}",
     ]
     return "\n".join(lines)
 
@@ -606,7 +832,13 @@ def _format_bound(value: str, sort_key: SortKey) -> str:
     if sort_key.category == "string":
         return f"unhex('{latin1_bytes(value).hex()}')"
 
-    return _quote_sql_string(value)
+    # A bare string literal is converted to the column type, but the analyzer
+    # also treats it as the same constant as an equal ``_partition_id`` literal:
+    # from ``_partition_id = '3' AND id >= '3' AND id < '133334'`` it derives
+    # ``_partition_id < '133334'``, a string comparison that is false, and the
+    # filter matches nothing (chkit#826). A typed constant keeps the conversion
+    # and never equals the String partition id.
+    return f"CAST({_quote_sql_string(value)}, {_quote_sql_string(sort_key.type)})"
 
 
 def _build_range_bound_conditions(range_: ChunkRange, sort_key: SortKey) -> list[str]:
@@ -632,22 +864,17 @@ def _build_settings_clause(
     # column-count mismatch and an mv_replay ``SELECT *`` can shift values into
     # the wrong target columns. Query-level SETTINGS override the profile and
     # cover every ``*`` in the query, including each UNION ALL branch.
-    parts = ["async_insert=0", *_ASTERISK_SETTINGS]
-    if token:
-        parts.append(f"insert_deduplication_token='{token}'")
     # Per-chunk insert settings from the plugin config (e.g. max_insert_threads,
-    # min_insert_block_size_rows). Rendered into the single SETTINGS clause because
-    # ClickHouse rejects a second SETTINGS clause on INSERT ... SELECT.
-    for key, value in (insert_settings or {}).items():
-        parts.append(f"{key}={_render_insert_setting_value(value)}")
-    return f"SETTINGS {', '.join(parts)}"
+    # min_insert_block_size_rows) follow what chkit writes itself.
+    return f"SETTINGS {chunk_insert_settings_sql(insert_settings, token=token)}"
 
 
 def _render_insert_setting_value(value: str | int | float | bool) -> str:
-    """JS template rendering: strings single-quoted (``'`` escaped as ``\\'``),
-    booleans as ``true``/``false``, numbers via ``String(number)``."""
+    """JS template rendering: strings single-quoted (``\\`` escaped as
+    ``\\\\`` and ``'`` as ``\\'``, so a value cannot close its quote), booleans
+    as ``true``/``false``, numbers via ``String(number)``."""
     if isinstance(value, str):
-        escaped = value.replace("'", "\\'")
+        escaped = value.replace("\\", "\\\\").replace("'", "\\'")
         return f"'{escaped}'"
     if isinstance(value, bool):
         return "true" if value else "false"

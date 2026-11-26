@@ -101,8 +101,9 @@ async function createFixture(label: string): Promise<Fixture> {
   const { executor } = fixture
   await executor.command(`CREATE DATABASE ${quoteIdent(fixture.database)}`)
   await executor.command(`CREATE TABLE ${table(fixture, 'events')} (id UInt64) ENGINE = MergeTree ORDER BY id SETTINGS index_granularity = 1`)
-  // A cluster journal is created ON CLUSTER with a replicated engine; the
-  // local stack has no Keeper, so the journal exists before the first run.
+  // A cluster journal is created ON CLUSTER with a replicated engine. The
+  // test creates it first, as a plain table, so it does not depend on ON
+  // CLUSTER DDL and runs the same on the local stack and on ObsessionDB.
   await executor.command(
     `CREATE TABLE ${table(fixture, fixture.journalTable)} (name String, applied_at DateTime64(3, 'UTC'), checksum String, ` +
       "chkit_version String, migration_completed Bool DEFAULT true, operations Array(Tuple(operation_index Int32, operation_key String, operation_type String, query_id String, status LowCardinality(String), started_at DateTime64(3, 'UTC'), finished_at Nullable(DateTime64(3, 'UTC')), last_error String)) DEFAULT [], " +

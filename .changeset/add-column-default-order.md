@@ -2,4 +2,4 @@
 "chkit": patch
 ---
 
-`generate` now adds a column before a new column whose DEFAULT, MATERIALIZED or ALIAS expression reads it, so `migrate` no longer fails with an unknown identifier (#681).
+`generate` orders column additions, renames, modifications, removals and their dependent indexes, constraints, projections and TTL changes so migrations avoid unknown columns and default-expression cycles, including dotted names, lambdas and casts. Long expression chains plan efficiently without stack overflows, and comment-only column changes use `COMMENT COLUMN`.

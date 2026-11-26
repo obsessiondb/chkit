@@ -1,4 +1,4 @@
-import { definePipeline, defineStream, timestampWindow } from '@chkit/plugin-ingest'
+import { definePipeline, defineStream, timestampWindow } from '@chkit/plugin-sync'
 
 import { githubConfig, type GitHubConfig } from './config.js'
 import { github_issuesRaw, readIssues } from './sources/issues.js'

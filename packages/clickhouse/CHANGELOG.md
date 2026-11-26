@@ -1,5 +1,24 @@
 # @chkit/clickhouse
 
+## 0.2.0-beta.19
+
+### Patch Changes
+
+- Updated dependencies: `@chkit/core@0.2.0-beta.19`
+
+## 0.2.0-beta.18
+
+### Patch Changes
+
+- Updated dependencies: `@chkit/core@0.2.0-beta.18`
+
+## 0.2.0-beta.17
+
+### Patch Changes
+
+- 03a9e9f: Migration journal and query-status reads reject missing or truncated responses instead of treating recorded work as absent, while valid empty results still succeed.
+- Updated dependencies: `@chkit/core@0.2.0-beta.17`
+
 ## 0.2.0-beta.16
 
 ### Patch Changes

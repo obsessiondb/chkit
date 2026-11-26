@@ -1,4 +1,4 @@
-import { rawRows, rawTable, type SourceContext } from '@chkit/plugin-ingest'
+import { rawRows, rawTable, type SourceContext } from '@chkit/plugin-sync'
 
 import { createLemlistClient } from '../client.js'
 import { lemlistConfig, type LemlistReaderConfig } from '../config.js'

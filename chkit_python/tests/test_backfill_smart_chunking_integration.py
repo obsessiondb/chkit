@@ -240,11 +240,11 @@ def _evaluate_clause(clause: str, row: FixtureRow) -> bool:  # noqa: PLR0911
         bound = latin1_str(bytes.fromhex(match.group(2)))
         return _compare_latin1(_string_or_empty(row.get(match.group(1))), bound) < 0
 
-    match = re.fullmatch(r"(\w+) >= '([^']+)'", clause)
+    match = re.fullmatch(r"(\w+) >= CAST\('([^']+)', '[^']+'\)", clause)
     if match is not None:
         return _compare_primitive(row.get(match.group(1)), match.group(2)) >= 0
 
-    match = re.fullmatch(r"(\w+) < '([^']+)'", clause)
+    match = re.fullmatch(r"(\w+) < CAST\('([^']+)', '[^']+'\)", clause)
     if match is not None:
         return _compare_primitive(row.get(match.group(1)), match.group(2)) < 0
 
@@ -574,4 +574,4 @@ def test_combines_string_prefix_and_quantile_splitting_on_secondary_numeric_dime
         plan, _require_chunk(combo_chunks[0], "numeric combo chunk")
     )
     assert "account >=" in sql
-    assert "seq >= '" in sql
+    assert "seq >= CAST('" in sql

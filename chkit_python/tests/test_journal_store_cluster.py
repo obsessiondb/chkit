@@ -23,6 +23,7 @@ _REPLICATED_ENGINE = (
 
 def _stub_store(cluster: str | None) -> tuple[JournalStore, MagicMock]:
     fake = MagicMock()
+    fake.raw_query.return_value = b'{"meta":[],"data":[],"rows":0}'
     cfg = ChxResolvedClickHouseConfig(
         url="http://localhost:8123",
         username="default",

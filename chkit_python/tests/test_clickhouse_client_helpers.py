@@ -8,17 +8,28 @@ branching, ``wrap_connection_error``).
 
 from __future__ import annotations
 
+import socket
 import threading
 import time
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
+from urllib.parse import urlparse
 
 import clickhouse_connect  # type: ignore[import-untyped]
 import pytest
+import urllib3
+from clickhouse_connect import common
+from clickhouse_connect.driver import client as driver_client  # type: ignore[import-untyped]
+from clickhouse_connect.driver import (
+    httpclient,
+    httputil,
+)
 from clickhouse_connect.driver.exceptions import DatabaseError  # type: ignore[import-untyped]
 from clickhouse_connect.driver.httpclient import HttpClient  # type: ignore[import-untyped]
 from pytest_httpx import HTTPXMock
 from urllib3 import Timeout
+from urllib3.connection import HTTPConnection
 from urllib3.exceptions import ProtocolError
 
 from chkit.clickhouse import (
@@ -28,9 +39,22 @@ from chkit.clickhouse import (
     is_unknown_database_error,
     wrap_connection_error,
 )
-from chkit.clickhouse.client import SUBMIT_CONNECT_TIMEOUT_SECONDS, clickhouse_error_message
+from chkit.clickhouse.client import (
+    _CURRENT_SEND,
+    SEND_ADMISSION,
+    SUBMIT_CONNECT_TIMEOUT_SECONDS,
+    SendAbandonedError,
+    SendNotAdmittedError,
+    _dispose_pool,
+    _own_pool_manager,
+    _Send,
+    _SendHTTPSConnectionPool,
+    clickhouse_error_message,
+    install_send_hook,
+)
 from chkit.clickhouse.control import run_control_request
 from chkit.core.model import ChxResolvedClickHouseConfig
+from chkit_plugin_backfill.plugin import _ThreadLocalExecutor
 
 
 def _stub_client() -> tuple[ClickHouseClient, MagicMock]:
@@ -55,6 +79,7 @@ def test_insert_with_list_of_dicts_infers_columns() -> None:
     assert args[0] == "events"
     assert args[1] == [[1, "a"], [2, "b"]]
     assert kwargs["column_names"] == ["id", "name"]
+    assert "transport_settings" not in kwargs
 
 
 def test_insert_with_list_of_lists_requires_column_names() -> None:
@@ -116,6 +141,7 @@ def test_execute_retries_unknown_database_without_the_database() -> None:
     client.execute("CREATE DATABASE IF NOT EXISTS x")
 
     assert fake.command.call_count == 2
+    assert all(call.kwargs["transport_settings"] == {"X-DDL": "1"} for call in fake.command.call_args_list)
     assert "use_database" not in fake.command.call_args_list[0].kwargs
     assert fake.command.call_args_list[1].kwargs["use_database"] is False
 
@@ -228,29 +254,200 @@ def test_tracked_execute_blocks_the_pinned_drivers_remote_close_retry() -> None:
     assert pool.request.call_args.kwargs["retries"] is False
 
 
+# #765: a backfill chunk resent under its attempt id after a connection reset
+
+def _write_body(body: object) -> None:
+    """Read the body as urllib3 does once the headers are written."""
+    if body is not None and not isinstance(body, (bytes, str)):
+        for _chunk in body:  # type: ignore[attr-defined]
+            pass
+
+class _FakePoolManager:
+    """A urllib3 PoolManager stand-in: ``request`` enters ``urlopen``, as the
+    real one does; ``urlopen`` records each request, optionally failing or
+    pausing first."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.urlopened: list[str] = []
+        self.gates: dict[str, threading.Event] = {}
+
+    def request(self, method: str, url: str, **kwargs: object) -> object:
+        gate = self.gates.get(url)
+        if gate is not None:
+            gate.wait(5)
+        return self.urlopen(method, url, **kwargs)
+
+    def clear(self) -> None:
+        pass
+
+    def urlopen(self, method: str, url: str, **kwargs: object) -> object:
+        _write_body(kwargs.get("body"))
+        self.urlopened.append(url)
+        if self.error is not None:
+            raise self.error
+        return MagicMock(status=200)
+
+
+def _send_once_client(
+    pool: _FakePoolManager, *, hook: bool = True
+) -> tuple[ClickHouseClient, MagicMock]:
+    client, _fake = _stub_client()
+    if hook:
+        install_send_hook(pool)
+    driver = MagicMock()
+    driver.headers = {}
+    driver.params = {}
+    driver._send_progress = False
+    driver._progress_interval = None
+    driver._autogenerate_query_id = False
+    driver.url = "http://localhost:8123"
+    driver.server_host_name = None
+    driver.http = pool
+    client._send_once_client = driver
+    return client, driver
+
+
+# #765: a backfill chunk resent under its attempt id after a connection reset
+# could run twice before any read sees either run.
+def test_submit_once_blocks_the_pinned_drivers_remote_close_retry() -> None:
+    error = ProtocolError("remote closed")
+    error.__context__ = ConnectionResetError("reset")
+    pool = _FakePoolManager(error)
+    client, driver = _send_once_client(pool)
+    driver.command.side_effect = lambda statement, **_kw: HttpClient._raw_request(driver, statement, {})
+
+    with pytest.raises(RuntimeError, match="cannot be resent after a connection failure"):
+        client.submit_once("INSERT INTO t SELECT 1", "backfill-plan-c1")
+    assert len(pool.urlopened) == 1
+
+
+# #765 round 3: a backfill that stopped asks again at the transport, after
+# any lazy connection setup, so no request starts once it returned.
+def test_submit_once_sends_nothing_when_the_send_admission_refuses() -> None:
+    pool = _FakePoolManager()
+    client, driver = _send_once_client(pool)
+    driver.command.side_effect = lambda statement, **_kw: pool.request("POST", "http://ch/")
+
+    class Refuse:
+        def admit(self) -> bool:
+            return False
+
+        def handed_off(self) -> None:
+            raise AssertionError("nothing was sent")
+
+    token = SEND_ADMISSION.set(Refuse())
+    try:
+        with pytest.raises(SendNotAdmittedError):
+            client.submit_once("INSERT INTO t SELECT 1", "backfill-plan-c1")
+    finally:
+        SEND_ADMISSION.reset(token)
+
+    assert pool.urlopened == []
+
+
+class _Counting:
+    def __init__(self) -> None:
+        self.handed_off_count = 0
+
+    def admit(self) -> bool:
+        return True
+
+    def handed_off(self) -> None:
+        self.handed_off_count += 1
+
+
+# #765 round 5: the hook answers for the request that enters it only. Two
+# workers, and an unrelated request, share one pool here (the worst case).
+def test_a_send_hands_off_only_when_its_own_request_enters_the_transport() -> None:
+    pool = _FakePoolManager()
+    pool.gates["http://ch/a"] = threading.Event()
+    client_a, driver_a = _send_once_client(pool)
+    client_b, driver_b = _send_once_client(pool, hook=False)
+    driver_a.command.side_effect = lambda statement, **_kw: pool.request("POST", "http://ch/a")
+    driver_b.command.side_effect = lambda statement, **_kw: pool.request("POST", "http://ch/b")
+    a, b = _Counting(), _Counting()
+
+    def send(client: ClickHouseClient, admission: _Counting, query_id: str) -> None:
+        token = SEND_ADMISSION.set(admission)
+        try:
+            client.submit_once("INSERT INTO t SELECT 1", query_id)
+        finally:
+            SEND_ADMISSION.reset(token)
+
+    worker_a = threading.Thread(target=send, args=(client_a, a, "a"))
+    worker_a.start()
+    time.sleep(0.05)
+    # A waits before urlopen. B's INSERT and an unrelated request enter it.
+    send(client_b, b, "b")
+    pool.request("GET", "http://ch/unrelated")
+    assert (a.handed_off_count, b.handed_off_count) == (0, 1)
+
+    pool.gates["http://ch/a"].set()
+    worker_a.join(5)
+    assert (a.handed_off_count, b.handed_off_count) == (1, 1)
+    assert pool.urlopened == ["http://ch/b", "http://ch/unrelated", "http://ch/a"]
+
+
+# connection settings (TLS included) as the client's other drivers.
+def test_submit_once_opens_its_driver_with_the_clients_tls_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened: list[dict[str, object]] = []
+    drivers: list[MagicMock] = []
+
+    def get_client(**kwargs: object) -> MagicMock:
+        opened.append(kwargs)
+        driver = MagicMock()
+        driver.command.return_value = None
+        drivers.append(driver)
+        return driver
+
+    monkeypatch.setattr("chkit.clickhouse.client.clickhouse_connect.get_client", get_client)
+    config = ChxResolvedClickHouseConfig(
+        url="https://ch.example.com:8443", username="u", password="p", database="d", secure=True
+    )
+    client = ClickHouseClient.connect(config)
+
+    client.submit_once("INSERT INTO t SELECT 1", "backfill-plan-c1")
+
+    assert len(opened) == 2
+    main, submit = opened
+    assert "headers" not in main
+    assert "headers" not in submit
+    assert "transport_settings" not in drivers[1].command.call_args.kwargs
+    assert submit["secure"] is True
+    assert {key: submit[key] for key in ("host", "port", "secure", "username", "password")} == {
+        key: main[key] for key in ("host", "port", "secure", "username", "password")
+    }
+
+
 def test_native_control_uses_a_separate_bounded_session_free_request(httpx_mock: HTTPXMock) -> None:
     client, fake = _stub_client()
-    httpx_mock.add_response(text='{"query_id":"old-query","kill_status":"finished"}\n')
+    httpx_mock.add_response(text='{"meta":[],"data":[{"query_id":"old-query","kill_status":"finished"}],"rows":1}')
     result = client.query_control("KILL QUERY WHERE query_id = 'old-query' SYNC", 5000, query_id="receipt-control", settings={"log_queries": 1, "query_id": "ignored", "result_overflow_mode": "break", "max_result_rows": 1, "use_query_cache": 1, "enable_reads_from_query_cache": 1, "enable_writes_to_query_cache": 1})
     assert result.rows == [{"query_id": "old-query", "kill_status": "finished"}]
     request = httpx_mock.get_request()
     assert request is not None
     assert request.url.params["database"] == "default"
-    assert request.url.params["default_format"] == "JSONEachRow"
+    assert "default_format" not in request.url.params
+    assert request.content.decode().endswith("FORMAT JSONStrings")
     assert request.url.params["query_id"] == "receipt-control"
     assert request.url.params["log_queries"] == "1"
     assert request.url.params["max_result_rows"] == "1"
     for name in ("result_overflow_mode", "group_by_overflow_mode", "set_overflow_mode", "timeout_overflow_mode", "read_overflow_mode"):
         assert request.url.params[name] == "throw"
     assert "session_id" not in request.url.params
-    assert request.content == b"KILL QUERY WHERE query_id = 'old-query' SYNC"
+    assert "X-DDL" not in request.headers
+    assert request.content == b"KILL QUERY WHERE query_id = 'old-query' SYNC\nFORMAT JSONStrings"
     fake.query.assert_not_called()
     fake.command.assert_not_called()
     cache_settings = {"use_query_cache": 1, "enable_reads_from_query_cache": 1, "enable_writes_to_query_cache": 1}
     for name in cache_settings:
         assert request.url.params[name] == "0"
     client.query("SELECT 1", settings=cache_settings)
-    fake.query.assert_called_once_with("SELECT 1", settings=cache_settings)
+    fake.query.assert_called_once_with("SELECT 1", settings=cache_settings,
+                                       transport_settings={"X-DDL": "1"})
 
 
 def test_control_request_deadline_bounds_a_stuck_body() -> None:
@@ -311,6 +508,8 @@ def test_submit_runs_on_its_own_driver_without_a_session(
     main.command.assert_not_called()
     assert submit_driver.database == "analytics"
     assert submit_kwargs == {**main_kwargs, "autogenerate_session_id": False}
+    assert "headers" not in main_kwargs
+    assert "headers" not in submit_kwargs
     assert [call.args for call in submit_driver.command.call_args_list] == [
         ("INSERT INTO t SELECT 1",),
         ("INSERT INTO t SELECT 2",),
@@ -580,5 +779,413 @@ def test_native_control_accepts_zero_exception_header(
     httpx_mock: HTTPXMock, code: str | None,
 ) -> None:
     client, _fake = _stub_client()
-    httpx_mock.add_response(text='{"n":0}\n', headers={"X-ClickHouse-Exception-Code": code} if code else {})
+    httpx_mock.add_response(text='{"meta":[],"data":[{"n":0}],"rows":1}', headers={"X-ClickHouse-Exception-Code": code} if code else {})
     assert client.query_control("SELECT 0 AS n", 1000).rows == [{"n": 0}]
+
+
+# #765 round 6: submit_once's private pools never stay in clickhouse-connect's
+# process-wide registry: not after close, a failed open, or a lost race.
+def test_submit_once_pools_leave_the_driver_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    before = len(httputil.all_managers)
+    calls = {"n": 0}
+
+    def get_client(**kwargs: object) -> MagicMock:
+        calls["n"] += 1
+        if kwargs.get("pool_mgr") is not None and calls["n"] == 2:
+            msg = "Code: 210. NETWORK_ERROR"
+            raise ConnectionError(msg)
+        return MagicMock()
+
+    monkeypatch.setattr("chkit.clickhouse.client.clickhouse_connect.get_client", get_client)
+    config = ChxResolvedClickHouseConfig(
+        url="http://localhost:8123", username="u", password="p", database="d", secure=False
+    )
+    client = ClickHouseClient.connect(config)
+    with pytest.raises(Exception, match=r"NETWORK_ERROR|Could not connect"):
+        client.prepare_submit_once()
+    assert len(httputil.all_managers) == before
+    client.prepare_submit_once()
+    assert len(httputil.all_managers) == before + 1
+    client.close()
+    assert len(httputil.all_managers) == before
+
+
+# #765 round 6: submit_once routes as the driver routes its other requests:
+# an HTTPS URL falls back to HTTP_PROXY, and NO_PROXY exempts the host.
+@pytest.mark.parametrize(
+    ("env", "url"),
+    [
+        ({"HTTP_PROXY": "http://proxy.internal:3128"}, "https://ch.example.com:8443"),
+        ({"HTTPS_PROXY": "http://secure-proxy.internal:3128"}, "https://ch.example.com:8443"),
+        ({"HTTP_PROXY": "http://proxy.internal:3128", "NO_PROXY": "example.com"}, "https://ch.example.com:8443"),
+        ({"HTTP_PROXY": "http://proxy.internal:3128"}, "http://ch.example.com:8123"),
+        ({}, "https://ch.example.com:8443"),
+    ],
+)
+def test_submit_once_routes_through_the_same_proxy_as_the_driver(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, str], url: str
+) -> None:
+
+
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    # The driver picks its pool before its connect-time queries, which stop
+    # here, carrying the half-built driver out.
+    class Built(Exception):  # noqa: N818 — a carrier, not an error
+        def __init__(self, driver: Any) -> None:
+            super().__init__()
+            self.driver = driver
+
+    def stop(self: object, *_args: object, **_kwargs: object) -> None:
+        raise Built(self)
+
+    monkeypatch.setattr(driver_client.Client, "__init__", stop)
+    parsed = urlparse(url)
+    with pytest.raises(Built) as built:
+        HttpClient(
+            interface=parsed.scheme, host=parsed.hostname, port=parsed.port, username="u",
+            password="p", database="d",
+        )
+    driver = built.value.driver
+
+    def route(manager: object) -> str | None:
+        proxy = getattr(manager, "proxy", None)
+        return None if proxy is None else str(proxy.url)
+
+    own = _own_pool_manager(url)
+    try:
+        assert route(own) == route(driver.http)
+    finally:
+        _dispose_pool(own)
+
+
+# #765 round 7: the driver's connection-expiry check can register the private
+# pool again after close() dropped it; the call that ends last drops it again.
+def test_a_submit_in_flight_across_close_leaves_the_pool_out_of_the_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The request fails once it is sent (a reset): the error path counts too.
+    error = ProtocolError("remote closed")
+    error.__context__ = ConnectionResetError("reset")
+    pool = _FakePoolManager(error)
+    client, driver = _send_once_client(pool)
+    client._send_once_pool = pool
+    driver.command.side_effect = lambda statement, **_kw: HttpClient._raw_request(driver, statement, {})
+    common.set_setting("max_connection_age", 1)
+    outcome: list[BaseException] = []
+
+    def send() -> None:
+        try:
+            client.submit_once("INSERT INTO t SELECT 1", "backfill-plan-c1")
+        except BaseException as caught:
+            outcome.append(caught)
+
+    in_expiry = threading.Event()
+    resume = threading.Event()
+    real_expiry = httpclient.check_conn_expiration
+
+    def paused_expiry(manager: object) -> None:
+        in_expiry.set()
+        resume.wait(5)
+        real_expiry(manager)  # registers the (expired) pool again
+
+    monkeypatch.setattr(httpclient, "check_conn_expiration", paused_expiry)
+    try:
+        worker = threading.Thread(target=send)
+        worker.start()
+        assert in_expiry.wait(5)
+        client.close()
+        assert pool not in httputil.all_managers
+        resume.set()
+        worker.join(5)
+    finally:
+        common.set_setting("max_connection_age", 0)
+
+    assert len(pool.urlopened) == 1
+    assert len(outcome) == 1
+    assert "cannot be resent" in str(outcome[0])
+    assert pool not in httputil.all_managers
+
+
+# #765 whole-branch review and Opus critic item 3: the handoff comes only once
+# the whole request (request line, headers and body) is on the socket, as TS
+# reports it on the request's finish, through the real urllib3 pool and
+# connection against a local socket.
+def test_the_handoff_follows_the_written_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[str] = []
+    real_endheaders = HTTPConnection.endheaders
+    real_send = HTTPConnection.send
+
+    def endheaders(self: HTTPConnection, *args: Any, **kwargs: Any) -> None:
+        real_endheaders(self, *args, **kwargs)
+        events.append("headers written")
+
+    def send(self: HTTPConnection, data: Any) -> None:
+        real_send(self, data)
+        if data == b"SELECT 1":
+            events.append("body written")
+
+    monkeypatch.setattr(HTTPConnection, "endheaders", endheaders)
+    monkeypatch.setattr(HTTPConnection, "send", send)
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+
+    received: list[bytes] = []
+
+    def serve() -> None:
+        conn, _ = listener.accept()
+        data = b""
+        while b"SELECT 1" not in data:
+            data += conn.recv(4096)
+        received.append(data)
+        conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        conn.close()
+
+    server = threading.Thread(target=serve, daemon=True)
+    server.start()
+
+    class Recording:
+        def admit(self) -> bool:
+            events.append("admitted")
+            return True
+
+        def handed_off(self) -> None:
+            events.append("handed off")
+
+    pool = urllib3.PoolManager()
+    install_send_hook(pool)
+    token = _CURRENT_SEND.set(_Send(Recording()))
+    try:
+        response = pool.request("POST", f"http://127.0.0.1:{port}/", body=b"SELECT 1")
+    finally:
+        _CURRENT_SEND.reset(token)
+        listener.close()
+        pool.clear()
+
+    assert response.status == 200
+    assert events == ["admitted", "headers written", "body written", "handed off"]
+    # Sent with its length, not chunked: some proxies reject chunked POSTs.
+    head = received[0].split(b"\r\n\r\n", 1)[0].lower()
+    assert b"content-length: 8" in head
+    assert b"transfer-encoding" not in head
+    assert received[0].endswith(b"\r\n\r\nSELECT 1")
+
+
+class _Admitting:
+    def __init__(self) -> None:
+        self.handed_off_count = 0
+
+    def admit(self) -> bool:
+        return True
+
+    def handed_off(self) -> None:
+        self.handed_off_count += 1
+
+
+def _silent_listener() -> tuple[socket.socket, list[bytes]]:
+    """Accepts one TCP connection and never answers: no TLS ServerHello."""
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    received: list[bytes] = []
+
+    def serve() -> None:
+        try:
+            conn, _ = listener.accept()
+        except OSError:
+            return
+        conn.settimeout(5)
+        data = b""
+        try:
+            while chunk := conn.recv(4096):
+                data += chunk
+        except OSError:
+            pass
+        received.append(data)
+        conn.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return listener, received
+
+
+# Opus critic, item 1: over HTTPS, the send's connections connect (TCP and
+# TLS) under the connect timeout, so a TLS handshake that never completes
+# ends at it, and nothing of the request is written.
+def test_an_https_send_whose_handshake_never_completes_ends_at_the_connect_timeout() -> None:
+    listener, received = _silent_listener()
+    port = listener.getsockname()[1]
+    pool = urllib3.PoolManager()
+    install_send_hook(pool)
+    admission = _Admitting()
+    token = _CURRENT_SEND.set(_Send(admission))
+    started = time.monotonic()
+    try:
+        with pytest.raises(urllib3.exceptions.TimeoutError) as raised:
+            pool.request(
+                "POST",
+                f"https://127.0.0.1:{port}/",
+                body=b"SELECT 1",
+                timeout=Timeout(connect=0.3, read=None),
+            )
+    finally:
+        _CURRENT_SEND.reset(token)
+        elapsed = time.monotonic() - started
+        pool.clear()
+        listener.close()
+
+    assert elapsed < 3
+    assert "timed out" in str(raised.value).lower()
+    assert admission.handed_off_count == 0
+    # The HTTPS pool and connection are the send's own.
+    assert pool.pool_classes_by_scheme["https"] is _SendHTTPSConnectionPool
+    deadline = time.monotonic() + 5
+    while not received and time.monotonic() < deadline:
+        time.sleep(0.01)
+    # A TLS ClientHello (record type 0x16), and nothing of the request.
+    assert received
+    assert received[0][:1] == b"\x16"
+    assert b"SELECT 1" not in received[0]
+
+
+# Opus critic, item 1: once abandoned, a send writes nothing, even when its
+# connection completes afterwards.
+def test_an_abandoned_send_writes_nothing_after_it_connects() -> None:
+    listener, received = _silent_listener()
+    port = listener.getsockname()[1]
+    pool = urllib3.PoolManager()
+    install_send_hook(pool)
+    admission = _Admitting()
+    send = _Send(admission)
+    send.abandon()
+    token = _CURRENT_SEND.set(send)
+    try:
+        with pytest.raises(SendAbandonedError):
+            pool.request("POST", f"http://127.0.0.1:{port}/", body=b"SELECT 1")
+    finally:
+        _CURRENT_SEND.reset(token)
+        pool.clear()
+    deadline = time.monotonic() + 5
+    while not received and time.monotonic() < deadline:
+        time.sleep(0.01)
+    listener.close()
+
+    assert received == [b""]
+    assert admission.handed_off_count == 0
+
+
+# Opus re-review, item 3: a stalled name lookup ends at the connect timeout
+# too, as TS's timer covers its lookup.
+def test_a_send_whose_name_lookup_stalls_ends_at_the_connect_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_getaddrinfo = socket.getaddrinfo
+    release = threading.Event()
+
+    def getaddrinfo(host: Any, *args: Any, **kwargs: Any) -> Any:
+        if host == "stalled.chkit.invalid":
+            release.wait(10)
+        return real_getaddrinfo(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    pool = urllib3.PoolManager()
+    install_send_hook(pool)
+    admission = _Admitting()
+    token = _CURRENT_SEND.set(_Send(admission))
+    started = time.monotonic()
+    try:
+        with pytest.raises(urllib3.exceptions.TimeoutError) as raised:
+            pool.request(
+                "POST",
+                "http://stalled.chkit.invalid:8123/",
+                body=b"SELECT 1",
+                timeout=Timeout(connect=0.3, read=None),
+            )
+    finally:
+        _CURRENT_SEND.reset(token)
+        elapsed = time.monotonic() - started
+        release.set()
+        pool.clear()
+
+    assert elapsed < 2
+    assert "Resolving stalled.chkit.invalid timed out" in str(raised.value)
+    assert admission.handed_off_count == 0
+
+
+@pytest.mark.parametrize("body", [b"", b" \n", b'{"meta":[],"data":['])
+def test_official_json_parser_rejects_missing_journal_response(body: bytes) -> None:
+    client, fake = _stub_client()
+    fake.raw_query.return_value = body
+    with pytest.raises(ValueError, match=r"Expecting"):
+        client.query("SELECT name FROM journal", {"default_format": "JSONStrings"})
+
+
+def test_framed_read_accepts_genuine_zero_rows_without_precision_settings() -> None:
+    client, fake = _stub_client()
+    fake.raw_query.return_value = b'{"meta":[],"data":[],"rows":0}'
+    assert client.query("SELECT name FROM journal", {"default_format": "JSONStrings"}).rows == []
+    assert fake.raw_query.call_args.kwargs == {"settings": {}, "fmt": "JSONStrings", "transport_settings": {"X-DDL": "1"}}
+
+
+def test_readonly_framed_read_uses_builtin_jsonstrings_without_changing_settings() -> None:
+    client, fake = _stub_client()
+    fake.raw_query.return_value = b'{"meta":[{"name":"n","type":"UInt64"}],"data":[{"n":"18446744073709551615"}],"rows":1}'
+    assert client.query("SELECT n FROM journal", {"default_format": "JSONStrings"}).rows == [{"n": "18446744073709551615"}]
+    assert fake.raw_query.call_args.kwargs == {"settings": {}, "fmt": "JSONStrings", "transport_settings": {"X-DDL": "1"}}
+
+
+@pytest.mark.parametrize("mode", ["execute", "tracked", "query", "strings", "json"])
+def test_synchronous_requests_pin_to_ddl_node_like_typescript(mode: str) -> None:
+    client, driver = _stub_client()
+    driver.query.return_value = SimpleNamespace(column_names=[], result_rows=[])
+    driver.raw_query.return_value = b'{"meta":[],"data":[],"rows":0}'
+    if mode == "execute":
+        client.execute("CREATE FUNCTION f AS x -> x")
+        call = driver.command.call_args
+    elif mode == "tracked":
+        client.execute_tracked("CREATE FUNCTION f AS x -> x", lambda: None, lambda: "tracked")
+        call = driver.command.call_args
+    elif mode == "query":
+        client.query("SELECT * FROM system.functions")
+        call = driver.query.call_args
+    elif mode == "strings":
+        client.query("SELECT name FROM journal", settings={"default_format": "JSONStrings"})
+        call = driver.raw_query.call_args
+    else:
+        client.query_json("SELECT * FROM system.functions")
+        call = driver.raw_query.call_args
+    assert call.kwargs["transport_settings"] == {"X-DDL": "1"}
+
+
+@pytest.mark.parametrize("sql", ["SELECT 1", "KILL QUERY WHERE query_id='old' ASYNC", "INSERT INTO journal SELECT 1"])
+def test_control_requests_remain_unpinned_like_typescript(sql: str, httpx_mock: HTTPXMock) -> None:
+    client, _driver = _stub_client()
+    httpx_mock.add_response(text='{"meta":[],"data":[],"rows":0}')
+    assert client.query_control(sql, 1000).rows == []
+    request = httpx_mock.get_request()
+    assert request is not None
+    assert "X-DDL" not in request.headers
+    assert "session_id" not in request.url.params
+
+
+def test_status_reads_use_pinned_framed_queries(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, driver = _stub_client()
+    driver.raw_query.return_value = b'{"meta":[],"data":[],"rows":0}'
+    monkeypatch.setattr("chkit.clickhouse.client.resolve_replica_fanout", lambda *_args: None)
+    assert client.query_status("own-query", running_only=True).status == "unknown"
+    assert driver.raw_query.call_args.kwargs["transport_settings"] == {"X-DDL": "1"}
+
+
+def test_plugin_row_reads_use_pinned_client_queries(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, driver = _stub_client()
+    driver.query.return_value = SimpleNamespace(column_names=["name"], result_rows=[["entry"]])
+    monkeypatch.setattr(ClickHouseClient, "connect", lambda _config: client)
+    executor = _ThreadLocalExecutor(ChxResolvedClickHouseConfig(
+        url="http://localhost:8123", username="default", password="", database="default", secure=False
+    ))
+    assert executor.query_rows("SELECT name FROM journal") == [{"name": "entry"}]
+    assert driver.query.call_args.kwargs["transport_settings"] == {"X-DDL": "1"}
+    executor.close()

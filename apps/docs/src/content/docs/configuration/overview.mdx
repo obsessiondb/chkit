@@ -142,7 +142,7 @@ When `cluster` is set, chkit:
 
 - emits every generated DDL statement with an `ON CLUSTER <name>` clause, so `generate` bakes it into the migration files and `migrate` propagates each change to all nodes via ClickHouse's distributed DDL queue,
 - creates its migration journal (`_chkit_migrations`) as a `ReplicatedReplacingMergeTree`, keeping applied-migration history consistent across every node — so running `migrate` against a load-balanced endpoint never re-applies migrations, and
-- creates the [ingest journal](/plugins/ingest/#journal-and-overlapping-runs) as one `ReplicatedMergeTree` shared by every node, so ingestion runs through a load balancer continue one checkpoint.
+- creates the [ingest journal](/plugins/sync/#journal-and-overlapping-runs) as one `ReplicatedMergeTree` shared by every node, so ingestion runs through a load balancer continue one checkpoint.
 
 chkit does **not** rewrite your table engines: declare `ReplicatedMergeTree` (or another `Replicated*`/`Shared*` variant) yourself for tables whose data should replicate. Empty-argument engines (e.g. `ENGINE = ReplicatedMergeTree`) are recommended so the server's `default_replica_path` supplies a collision-free Keeper path, which also keeps drop-and-recreate safe.
 
@@ -154,7 +154,7 @@ Leave `cluster` unset for single-node servers, ClickHouse Cloud, or ObsessionDB,
 
 The TypeScript CLI reads a user-profile config at `~/.config/chkit/config.ts` (honoring `XDG_CONFIG_HOME`). When that file is missing but ObsessionDB credentials are present (`~/.config/chkit/credentials.json`, written by `chkit obsessiondb login`), chkit synthesizes a profile that registers only the ObsessionDB plugin.
 
-Project-scoped commands (`generate`, `migrate`, `status`, `drift`, `check`, `snapshot`, `codegen`, `pull`) always require a project config in the working directory. The other commands, [`chkit query`](/cli/query/), `chkit plugin` and `chkit obsessiondb`, fall back to the profile when no project config is found, so ad-hoc queries run from any directory, including right after `chkit obsessiondb login` without a local config file at all. `chkit obsessiondb` and `chkit plugin obsessiondb` load the ObsessionDB plugin even without credentials, so `chkit obsessiondb login` itself runs from any directory.
+Project-scoped commands (`generate`, `migrate`, `status`, `drift`, `check`, `snapshot`, `codegen`, `pull`) always require a project config in the working directory. The other commands, [`chkit query`](/cli/query/), `chkit plugin` and `chkit obsessiondb`, fall back to the profile when no project config is found, so ad-hoc queries run from any directory, including right after `chkit obsessiondb login` without a local config file at all. `chkit obsessiondb` and `chkit plugin obsessiondb` load the ObsessionDB plugin even without credentials, so `chkit obsessiondb login` itself runs from any directory. A profile file whose `plugins` leaves out `obsessiondb()` turns the plugin off: `chkit obsessiondb <command>` then fails with exit code 1 and _"ObsessionDB plugin is not configured. Add it to config.plugins first."_ (code `plugin_not_configured` under `--json`), and `chkit obsessiondb --help` still prints the help.
 
 When a project config is found, chkit layers the profile under it for every command. Project values win, and the profile's plugins are added unless the project registers a plugin with the same name. On a logged-in machine the ObsessionDB plugin is therefore loaded even when `clickhouse.config.ts` does not register it.
 

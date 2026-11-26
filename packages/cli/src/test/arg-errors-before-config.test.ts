@@ -278,6 +278,51 @@ describe('argument errors come before a missing config, as in chkit-py (#687)', 
     }
   }, 60_000)
 
+  test('obsessiondb in a user profile that lists no plugins reports the missing plugin, as in chkit-py (#776)', async () => {
+    const { dir, run } = await createEmptyDir({ profile: 'export default { schema: [], plugins: [] }\n' })
+    try {
+      const message = 'ObsessionDB plugin is not configured. Add it to config.plugins first.'
+      for (const args of [
+        ['obsessiondb'],
+        ['obsessiondb', 'login'],
+        ['obsessiondb', 'service', 'list'],
+        ['obsessiondb', '--bogus'],
+        ['obsessiondb', '--', 'x'],
+      ]) {
+        expect([args, ...usageResult(run(args))]).toEqual([args, 1, '', message])
+        const jsonArgs = [...args.slice(0, 1), '--json', ...args.slice(1)]
+        const json = run(jsonArgs)
+        expect([jsonArgs, json.exitCode, json.stderr.trim()]).toEqual([jsonArgs, 1, message])
+        expect(JSON.parse(json.stdout)).toEqual({
+          command: 'obsessiondb',
+          schemaVersion: 1,
+          ok: false,
+          error: { code: 'plugin_not_configured', message },
+        })
+      }
+      // Its help still prints, as `codegen --help` does without the codegen plugin.
+      for (const [args, usage] of [
+        [['obsessiondb', '--help'], 'chkit obsessiondb <command> [options]'],
+        [['obsessiondb', '--help', '--json'], 'chkit obsessiondb <command> [options]'],
+        [['obsessiondb', '-h'], 'chkit obsessiondb <command> [options]'],
+        [['obsessiondb', '--help-plugins'], 'chkit obsessiondb <command> [options]'],
+        [['obsessiondb', 'login', '--help'], 'chkit obsessiondb login [options]'],
+      ] as const) {
+        const help = run(args)
+        expect([args, help.exitCode, help.stderr]).toEqual([args, 0, ''])
+        expect(help.stdout).toContain(usage)
+      }
+      // Guard: `chkit plugin obsessiondb` keeps its own error.
+      expect(usageResult(run(['plugin', 'obsessiondb', 'login']))).toEqual([
+        1,
+        '',
+        'No plugins configured. Add entries to config.plugins first.',
+      ])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  }, 60_000)
+
   test('a flag that only a plugin adds is unknown without a config', async () => {
     const { dir, run } = await createEmptyDir()
     try {

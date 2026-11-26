@@ -1376,7 +1376,8 @@ describe('readOperationOnEveryCopy topology', () => {
   const prepared = JSON.stringify([{ operation_index: 0, operation_key: 'k', operation_type: 'load_table_data', query_id: 'qid', status: 'started', started_at: '2026-11-18 10:00:00.000', finished_at: null, last_error: 'prepared under its own query id; not submitted yet' }])
   // As the Workbench API returns it: every cell a string.
   const copy = (replica: string) => ({ replica, members: JSON.stringify([replica]), present: '1', applied_at: '2026-11-18 10:00:00.000', operations: prepared, operation_fingerprints: '[]' })
-  function storeAnswering(engine: string, everyCopy: () => unknown[]) {
+  // A journal that is not replicated is read as one copy only on a declared cluster (#802).
+  function storeAnswering(engine: string, everyCopy: () => unknown[], { cluster }: { cluster?: string } = { cluster: engine.startsWith('Replicated') ? undefined : 'c' }) {
     const reads: Array<{ sql: string; settings: unknown }> = []
     const db = {
       async command() {},
@@ -1390,16 +1391,40 @@ describe('readOperationOnEveryCopy topology', () => {
         return []
       },
     } as unknown as ClickHouseExecutor
-    return { store: createJournalStore(db), reads }
+    return { store: createJournalStore(db, cluster), reads }
   }
 
   test('one server answers, every cell a string: covered, with its prepared record', async () => {
     const { store, reads } = storeAnswering('ReplacingMergeTree', () => [copy(UUID_A)])
     const read = await store.readOperationOnEveryCopy('m.sql', 0)
     expect(read).toMatchObject({ covered: true, op: { queryId: 'qid', status: 'started', lastError: 'prepared under its own query id; not submitted yet' } })
-    expect(reads[0]?.sql).toContain("clusterAllReplicas('default', view(SELECT toString(serverUUID())")
+    expect(reads[0]?.sql).toContain("clusterAllReplicas('c', view(SELECT toString(serverUUID())")
     // An unavailable server fails the read; no limit cuts the reply short.
     expect(reads[0]?.settings).toMatchObject({ skip_unavailable_shards: 0, result_overflow_mode: 'throw', read_overflow_mode: 'throw' })
+  })
+
+  // #802: behind a load balancer over independent servers, each lists only
+  // itself in its own clusters, so the one that answers proves nothing about
+  // the copies on the others.
+  test('a journal that is not replicated, without a declared cluster: not covered, and nothing is read', async () => {
+    const { store, reads } = storeAnswering('ReplacingMergeTree', () => [copy(UUID_A)], {})
+    expect(await store.readOperationOnEveryCopy('m.sql', 0)).toEqual({ covered: false })
+    expect(reads).toHaveLength(0)
+  })
+
+  test('a declared cluster is read as declared, even when empty', async () => {
+    const reads: string[] = []
+    const db = {
+      async command() {},
+      async query<T>(sql: string): Promise<T[]> {
+        if (sql.includes('SELECT engine FROM system.tables')) return [{ engine: 'ReplacingMergeTree' }] as T[]
+        if (sql.includes('currentDatabase() AS database')) return [{ database: 'db' }] as T[]
+        if (sql.includes('view(')) reads.push(sql)
+        return (sql.includes('view(') ? [copy(UUID_A)] : []) as T[]
+      },
+    } as unknown as ClickHouseExecutor
+    await createJournalStore(db, undefined, { cluster: '', replicas: 1 }).readOperationOnEveryCopy('m.sql', 0)
+    expect(reads[0]).toContain("clusterAllReplicas('', view(")
   })
 
   test('a replicated journal read whose cells are strings: covered, with its record', async () => {

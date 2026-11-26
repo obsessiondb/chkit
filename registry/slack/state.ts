@@ -1,4 +1,4 @@
-import type { IncrementalStrategy } from '@chkit/plugin-ingest'
+import type { IncrementalStrategy } from '@chkit/plugin-sync'
 import { z } from 'zod'
 
 import type { SlackReaderConfig } from './config.js'

@@ -16,7 +16,7 @@ bunx chkit add github --with-tests
 bunx chkit check
 bunx chkit generate --name add_github
 bunx chkit migrate --apply
-bunx chkit ingest run --tag provider:github
+bunx chkit sync run --tag provider:github
 ```
 
 Set `GITHUB_TOKEN` before the ingestion run, or pass `token` in the configuration. For private repositories, the supported setup grants repository access with **Issues: read**, **Pull requests: read**, and **Contents: read**, including GraphQL commit reads. A field-level permission minimum has not been verified. Edit `githubConfig.repositories`, source identity, and reader settings in `src/integrations/github/config.ts`. Raw tables are declared in their `sources/` modules before schema discovery and migration. Native JSON requires ClickHouse 25.3 or later. Each stream checks its configuration and token when it runs, before any request; schema commands never depend on them, and schema imports do not call GitHub.
@@ -30,8 +30,8 @@ Each configured repository contributes independent streams for issues, issue com
 Child-resource streams discover their own parents through the API. Selecting PR comments or commits works even when the pull-requests stream has never run. Individual PRs and issues remain records within those resource streams.
 
 ```sh
-bunx chkit ingest run --tag provider:github --tag repository:obsessiondb/chkit --tag resource:pull_requests
-bunx chkit ingest run --tag provider:github --tag repository:obsessiondb/chkit --tag resource:pull_request_commits
+bunx chkit sync run --tag provider:github --tag repository:obsessiondb/chkit --tag resource:pull_requests
+bunx chkit sync run --tag provider:github --tag repository:obsessiondb/chkit --tag resource:pull_request_commits
 ```
 
 Repeated tags use AND matching. The default pipeline runs streams sequentially with `maxStreams: 1`; filtered runs give each resource its own schedule and execution budget. `createGitHubPipeline(config)` snapshots the configuration, including `token`. Changing `sourceId` creates new stream identities; runtime reader settings do not redefine the exported raw tables.
@@ -53,8 +53,8 @@ Pull requests, reviews, commits, and stargazers use `fullSync()`. Each invocatio
 Deleted records, removed stars, and commits removed from PRs remain stored. Live pagination does not guarantee a source snapshot. Historical replay refreshes current observations outside the timestamp overlap:
 
 ```sh
-bunx chkit ingest run --tag provider:github --tag resource:issue_comments --backfill reconcile-2026-10-05 --from 2008-01-01
-bunx chkit ingest status --tag provider:github --json
+bunx chkit sync run --tag provider:github --tag resource:issue_comments --backfill reconcile-2026-10-05 --from 2008-01-01
+bunx chkit sync status --tag provider:github --json
 ```
 
 Use a new backfill ID for each reconciliation. Full-sync resources ignore date bounds. A failed stream does not advance another stream's progress. Schedule finite ingestion runs externally; [overlapping processes](/api-sync/operations/#overlapping-runs-and-checkpoint-recovery) retain independent journal histories. Scheduler concurrency limits control provider requests and resource use.
@@ -80,5 +80,5 @@ Fixtures cover isolated resource selection, join keys, narrow commit data, recen
 ## Related pages
 
 - [App registry](/integrations/)
-- [Ingestion plugin](/plugins/ingest/)
-- [Sync CLI](/cli/ingest/)
+- [Sync plugin](/plugins/sync/)
+- [Sync CLI](/cli/sync/)

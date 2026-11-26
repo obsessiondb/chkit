@@ -333,35 +333,51 @@ export function stronglyConnectedComponents(edges: number[][]): number[][] {
   const onStack = new Set<number>()
   const stack: number[] = []
   const components: number[][] = []
+  // The depth-first search keeps its own stack of { node, next edge position },
+  // so a long chain (thousands of columns) can't overflow the call stack.
+  const frames: { v: number; next: number }[] = []
 
-  const visit = (v: number): void => {
+  const enter = (v: number): void => {
     index.set(v, counter)
     lowLink.set(v, counter)
     counter += 1
     stack.push(v)
     onStack.add(v)
-    for (const w of edges[v] ?? []) {
-      if (!index.has(w)) {
-        visit(w)
-        lowLink.set(v, Math.min(lowLink.get(v) ?? 0, lowLink.get(w) ?? 0))
-      } else if (onStack.has(w)) {
-        lowLink.set(v, Math.min(lowLink.get(v) ?? 0, index.get(w) ?? 0))
-      }
-    }
-    if (lowLink.get(v) !== index.get(v)) return
-    const component: number[] = []
-    for (;;) {
-      const w = stack.pop()
-      if (w === undefined) break
-      onStack.delete(w)
-      component.push(w)
-      if (w === v) break
-    }
-    components.push(component)
+    frames.push({ v, next: 0 })
   }
 
-  for (let v = 0; v < edges.length; v += 1) {
-    if (!index.has(v)) visit(v)
+  for (let root = 0; root < edges.length; root += 1) {
+    if (index.has(root)) continue
+    enter(root)
+    for (let frame = frames.at(-1); frame !== undefined; frame = frames.at(-1)) {
+      const { v } = frame
+      const out = edges[v] ?? []
+      if (frame.next < out.length) {
+        const w = out[frame.next] as number
+        frame.next += 1
+        if (!index.has(w)) {
+          enter(w)
+        } else if (onStack.has(w)) {
+          lowLink.set(v, Math.min(lowLink.get(v) ?? 0, index.get(w) ?? 0))
+        }
+        continue
+      }
+      frames.pop()
+      const parent = frames.at(-1)
+      if (parent !== undefined) {
+        lowLink.set(parent.v, Math.min(lowLink.get(parent.v) ?? 0, lowLink.get(v) ?? 0))
+      }
+      if (lowLink.get(v) !== index.get(v)) continue
+      const component: number[] = []
+      for (;;) {
+        const w = stack.pop()
+        if (w === undefined) break
+        onStack.delete(w)
+        component.push(w)
+        if (w === v) break
+      }
+      components.push(component)
+    }
   }
   return components
 }

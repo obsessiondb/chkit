@@ -1,4 +1,4 @@
-import { definePipeline, defineStream } from '@chkit/plugin-ingest'
+import { definePipeline, defineStream } from '@chkit/plugin-sync'
 
 import { slackConfig, type SlackReaderConfig } from './config.js'
 import { readChannels, slackChannelsRaw } from './sources/channels.js'

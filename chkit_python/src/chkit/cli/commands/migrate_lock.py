@@ -140,6 +140,13 @@ def migrate_lock_disabled() -> bool:
     return value in ("off", "0", "false")
 
 
+def async_without_lock_accepted() -> bool:
+    """Whether CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK lets a run with the lock off
+    submit async statements (#810)."""
+    value = (os.environ.get("CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK") or "").strip().lower()
+    return value in ("1", "true", "on")
+
+
 def _escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "\\'")
 
@@ -426,6 +433,8 @@ class MigrateLock:
         self._beat = 0
         self._deps = deps
         self._log = log
+        # Set when release() could not write the release.
+        self.release_failed = False
         self._lost: str | None = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="chkit-migrate-lock", daemon=True)
@@ -554,6 +563,7 @@ class MigrateLock:
                 released=True,
             )
         except Exception as error:
+            self.release_failed = True
             self._log(
                 f"⚠ Could not release the migrate lock ({error}); other runs can take it "
                 f"{_seconds(self._deps.timings.lease_ms)}s after this run's last heartbeat."
@@ -746,6 +756,7 @@ __all__ = [
     "LockTimings",
     "MigrateLock",
     "acquire_migrate_lock",
+    "async_without_lock_accepted",
     "claim_insert_sql",
     "claims_select_sql",
     "migrate_lock_disabled",
