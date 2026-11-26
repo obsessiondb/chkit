@@ -545,10 +545,13 @@ function createCutoverSql(input: {
     return fields ? [{ name: column.name, fields, stored: isStored(column) }] : []
   })
   const stored = leaves.filter((leaf) => leaf.stored)
-  const known = [...leaves.map((leaf) => leaf.name), ...nested.map((column) => column.name)]
+  const leafNameMatch = `has(${literals(leaves.map((leaf) => leaf.name))}, name)`
+  const declaredColumn = nested.length > 0
+    ? `(${leafNameMatch} OR (has(${literals(nested.map((column) => column.name))}, name) AND startsWith(type, 'Nested(')))`
+    : leafNameMatch
   const liveColumns = `FROM system.columns WHERE database = ${stringLiteral(database)} AND table = ${stringLiteral(table)}`
   const storedColumns = `${liveColumns} AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')`
-  const undeclaredColumns = `(SELECT countIf(NOT has(${literals(known)}, name)) ${storedColumns}) AS undeclared_columns`
+  const undeclaredColumns = `(SELECT countIf(NOT ${declaredColumn}) ${storedColumns}) AS undeclared_columns`
   const storedNested = nested.filter((column) => column.stored)
   const copiedNested = storedNested.filter((column) => copiedColumns.includes(column.name))
   const unflattenedNested = storedNested.length > 0
@@ -563,7 +566,7 @@ function createCutoverSql(input: {
   // ALIAS or EPHEMERAL. If the table stores that column, its values would not
   // reach the new table, so the kinds must match too.
   const kindPairs = `[${[...leaves, ...nested].map((leaf) => `(${stringLiteral(leaf.name)}, ${leaf.stored ? 1 : 0})`).join(', ')}]`
-  const columnKinds = `(SELECT countIf(has(${literals(known)}, name) AND NOT has(${kindPairs}, (name, toUInt8(default_kind NOT IN ('ALIAS', 'EPHEMERAL'))))) ${liveColumns}) AS column_kinds`
+  const columnKinds = `(SELECT countIf(${declaredColumn} AND NOT has(${kindPairs}, (name, toUInt8(default_kind NOT IN ('ALIAS', 'EPHEMERAL'))))) ${liveColumns}) AS column_kinds`
   // The snapshot takes the column types the server stores, and the copy then
   // converts each value to the new type. The verify hash does not see every
   // change: cityHash64 is the same for UInt32 and UInt64. ClickHouse stores

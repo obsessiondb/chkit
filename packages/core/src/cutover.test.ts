@@ -181,13 +181,29 @@ describe('planCutover', () => {
     expect(start).toContain(`(SELECT countIf(has(['n'], name) AND startsWith(type, 'Nested(')) ${stored}) AS unflattened_nested`)
     expect(start).toContain("throwIf(max(unflattened_nested) > 0, 'app.events stores a Nested column as one column (created with flatten_nested = 0).")
     expect(start.indexOf('throwIf(max(unflattened_nested)')).toBeLessThan(start.indexOf('throwIf(max(undeclared_columns)'))
-    expect(start).toContain(`(SELECT countIf(NOT has(['id', 'user_id', 'payload', 'meta', 'n.x', 'n'], name)) ${stored}) AS undeclared_columns`)
+    expect(start).toContain(`(SELECT countIf(NOT (has(['id', 'user_id', 'payload', 'meta', 'n.x'], name) OR (has(['n'], name) AND startsWith(type, 'Nested(')))) ${stored}) AS undeclared_columns`)
     expect(start).toContain(
       `((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR (SELECT hasAll(groupArray(name), ['id', 'user_id', 'payload', 'meta']) AND (hasAll(groupArray(name), ['n.x']) OR countIf(name = 'n' AND startsWith(type, 'Nested(')) > 0) ${stored})) AS declared_columns`
     )
     expect(start).toContain("throwIf(max(undeclared_columns) > 0, 'app.events stores a column that the schema does not declare")
     expect(start).toContain("throwIf(min(declared_columns) = 0, 'app.events lacks a column that the schema declares")
     expect(start).not.toContain('declared_key')
+  })
+
+  test('recognizes the Nested parent name only for an unflattened Nested type', () => {
+    // chkit-py's test_cutover.py asserts the same.
+    const nested = [...columns, { name: 'n', type: 'Nested(x UInt64)' }]
+    const start = plan({
+      oldDef: events({ columns: nested }),
+      newDef: events({ columns: nested, primaryKey: ['user_id', 'id'], orderBy: ['user_id', 'id'] }),
+      options: { oldTable: 'drop' },
+    }).operations[0]?.sql ?? ''
+    const declared = "(has(['id', 'user_id', 'payload', 'n.x'], name) OR (has(['n'], name) AND startsWith(type, 'Nested(')))"
+    const live = "FROM system.columns WHERE database = 'app' AND table = 'events'"
+    expect(start).toContain(`(SELECT countIf(NOT ${declared}) ${live} AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')) AS undeclared_columns`)
+    expect(start).toContain(
+      `(SELECT countIf(${declared} AND NOT has([('id', 1), ('user_id', 1), ('payload', 1), ('n.x', 1), ('n', 1)], (name, toUInt8(default_kind NOT IN ('ALIAS', 'EPHEMERAL'))))) ${live}) AS column_kinds`
+    )
   })
 
   test('checks the table stores the column types of the old definition, before it creates anything', () => {

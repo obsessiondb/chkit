@@ -440,7 +440,8 @@ def test_checks_the_table_stores_the_old_columns_no_more_and_no_fewer() -> None:
         "throwIf(max(undeclared_columns)"
     )
     assert (
-        "(SELECT countIf(NOT has(['id', 'user_id', 'payload', 'meta', 'n.x', 'n'], name)) "
+        "(SELECT countIf(NOT (has(['id', 'user_id', 'payload', 'meta', 'n.x'], name) "
+        "OR (has(['n'], name) AND startsWith(type, 'Nested(')))) "
         f"{stored}) AS undeclared_columns"
     ) in start
     assert (
@@ -457,6 +458,31 @@ def test_checks_the_table_stores_the_old_columns_no_more_and_no_fewer() -> None:
         "throwIf(min(declared_columns) = 0, 'app.events lacks a column that the schema declares"
     ) in start
     assert "declared_key" not in start
+
+
+def test_recognizes_the_nested_parent_name_only_for_an_unflattened_nested_type() -> None:
+    # TS cutover.test.ts asserts the same.
+    nested = [*COLUMNS, {"name": "n", "type": "Nested(x UInt64)"}]
+    start = plan(
+        old_def=events(["id"], columns=nested),
+        new_def=events(["user_id", "id"], columns=nested),
+        old_table="drop",
+    ).operations[0].sql
+    declared = (
+        "(has(['id', 'user_id', 'payload', 'n.x'], name) "
+        "OR (has(['n'], name) AND startsWith(type, 'Nested(')))"
+    )
+    live = "FROM system.columns WHERE database = 'app' AND table = 'events'"
+    assert (
+        f"(SELECT countIf(NOT {declared}) {live} AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')) "
+        "AS undeclared_columns"
+    ) in start
+    assert (
+        f"(SELECT countIf({declared} "
+        "AND NOT has([('id', 1), ('user_id', 1), ('payload', 1), ('n.x', 1), ('n', 1)], "
+        "(name, toUInt8(default_kind NOT IN ('ALIAS', 'EPHEMERAL'))))) "
+        f"{live}) AS column_kinds"
+    ) in start
 
 
 def test_checks_the_table_stores_the_old_column_types() -> None:

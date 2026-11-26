@@ -1487,14 +1487,20 @@ def _column_checks(
         if (fields := _nested_fields(column)) is not None
     ]
     stored = [leaf for leaf in leaves if leaf[3]]
-    known = [leaf[0] for leaf in leaves] + [column[0] for column in nested]
+    leaf_name_match = f"has({literals([leaf[0] for leaf in leaves])}, name)"
+    declared_column = (
+        f"({leaf_name_match} OR (has({literals([column[0] for column in nested])}, name) "
+        "AND startsWith(type, 'Nested(')))"
+        if nested
+        else leaf_name_match
+    )
     live_columns = (
         f"FROM system.columns WHERE database = {_string_literal(database)} "
         f"AND table = {_string_literal(table)}"
     )
     stored_columns = f"{live_columns} AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')"
     undeclared_columns = (
-        f"(SELECT countIf(NOT has({literals(known)}, name)) "
+        f"(SELECT countIf(NOT {declared_column}) "
         f"{stored_columns}) AS undeclared_columns"
     )
     stored_nested = [column for column in nested if column[2]]
@@ -1534,7 +1540,7 @@ def _column_checks(
         + "]"
     )
     column_kinds = (
-        f"(SELECT countIf(has({literals(known)}, name) AND NOT "
+        f"(SELECT countIf({declared_column} AND NOT "
         f"has({kind_pairs}, (name, toUInt8(default_kind NOT IN ('ALIAS', 'EPHEMERAL'))))) "
         f"{live_columns}) AS column_kinds"
     )
