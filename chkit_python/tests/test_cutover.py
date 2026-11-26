@@ -465,7 +465,8 @@ def test_checks_the_table_stores_the_old_column_types() -> None:
     def server(type_: str) -> str:
         return (
             "replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, "
-            f"'c {type_}', '{{}}') SETTINGS input_format_force_null_for_omitted_fields = 0), "
+            f"'c {type_}', '{{}}') SETTINGS input_format_force_null_for_omitted_fields = 0, "
+            "data_type_default_nullable = 0), "
             "',\\n *', ', '), '\\n *', '')"
         )
 

@@ -556,12 +556,13 @@ function createCutoverSql(input: {
   // defaultValueOfTypeName fails for some types before ClickHouse 26.4, such
   // as AggregateFunction(argMax, LowCardinality(String), DateTime). The row
   // omits the column, which input_format_force_null_for_omitted_fields would
-  // refuse for a type that is not Nullable.
+  // refuse for a type that is not Nullable, and data_type_default_nullable
+  // would make the type Nullable.
   // toTypeName prints a named Tuple over several lines, and system.columns
   // on one: the line breaks go. A newline in an Enum label is escaped, so no
   // label changes.
   const storedType = (type: string) =>
-    `replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, ${stringLiteral(`c ${type}`)}, '{}') SETTINGS input_format_force_null_for_omitted_fields = 0), ',\\n *', ', '), '\\n *', '')`
+    `replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, ${stringLiteral(`c ${type}`)}, '{}') SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0), ',\\n *', ', '), '\\n *', '')`
   // An unflattened Nested column is stored as `Nested(...)` with the fields a
   // Tuple of them prints, names quoted as ClickHouse quotes them.
   const nestedType = (fields: Array<{ name: string; type: string }>) =>
