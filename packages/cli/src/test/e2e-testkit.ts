@@ -30,6 +30,7 @@ export {
   waitForRows,
   pollUntil,
   runOnceVisible,
+  runOnEveryReplica,
 } from '@chkit/clickhouse/e2e-testkit'
 
 const WORKSPACE_ROOT = resolve(import.meta.dir, '../../../..')

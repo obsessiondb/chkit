@@ -15,6 +15,7 @@ import {
   getLiveEnv,
   pollUntil,
   quoteIdent,
+  runOnEveryReplica,
   startCli,
   waitForRows,
   waitForTable,
@@ -52,9 +53,13 @@ describe('async mutations', () => {
     async ({ label, statement, args, sum }) => {
       const fixture = await createFixture(label, statement)
       const db = quoteIdent(fixture.database)
+      // SYSTEM STOP MERGES acts on one replica, and any replica may run the
+      // mutation, so merges stop on every replica.
+      let mergesStopped = false
       try {
         // The mutation stays queued until merges start again.
-        await fixture.executor.command(`SYSTEM STOP MERGES ${db}.t`)
+        mergesStopped = true
+        await runOnEveryReplica(fixture.executor, getLiveEnv(), `SYSTEM STOP MERGES ${db}.t`)
         const run = migrate(fixture, args)
         const queryId = await waitForStartedQueryId(fixture)
         await pollUntil(
@@ -70,14 +75,19 @@ describe('async mutations', () => {
         )
         // Polls run every 5 s: across two of them, the statement stays started.
         expect(await statusesDuring(fixture, 11_000)).toEqual(['started'])
-        await fixture.executor.command(`SYSTEM START MERGES ${db}.t`)
+        await runOnEveryReplica(fixture.executor, getLiveEnv(), `SYSTEM START MERGES ${db}.t`)
+        mergesStopped = false
 
         const result = await run.result
         expect(result.exitCode, formatTestDiagnostic('migrate', result)).toBe(0)
         const seen = await fixture.executor.query<{ s: number | string }>(`SELECT s FROM ${db}.seen`)
         expect(seen.map((row) => Number(row.s))).toEqual([sum])
       } finally {
-        await dropFixture(fixture)
+        try {
+          if (mergesStopped) await runOnEveryReplica(fixture.executor, getLiveEnv(), `SYSTEM START MERGES ${db}.t`)
+        } finally {
+          await dropFixture(fixture)
+        }
       }
     },
     TIMEOUT_MS,
