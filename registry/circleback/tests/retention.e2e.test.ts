@@ -1,8 +1,8 @@
 import { afterAll, expect, test } from 'bun:test'
 import { createLiveExecutor, createPrefix, getLiveEnv, pollUntil, quoteIdent, waitForTable } from '@chkit/clickhouse/e2e-testkit'
 import { toCreateSQL } from '@chkit/core'
-import { createClickHouseDestination, rawTable, runIngestion, selectStreams } from '@chkit/plugin-ingest'
-import { createMemoryJournal } from '@chkit/plugin-ingest/testing'
+import { createClickHouseDestination, rawTable, runIngestion, selectStreams } from '@chkit/plugin-sync'
+import { createMemoryJournal } from '@chkit/plugin-sync/testing'
 
 import { circlebackConfig } from '../config.js'
 import { createCirclebackPipeline } from '../pipeline.js'
@@ -17,7 +17,7 @@ const qualified = `${quoteIdent(destination.database)}.${quoteIdent(destination.
 async function settledRaw(transcript: unknown, status: string): Promise<Array<{ kind: string; data?: unknown; status?: string }>> {
   return pollUntil(
     async () => {
-      const rows = await executor.query<{ payload: string }>(`SELECT toJSONString(raw) AS payload FROM ${qualified} FINAL`)
+      const rows = await executor.query<{ payload: string }>(`SELECT toJSONString(raw) AS payload FROM ${qualified} FINAL SETTINGS select_sequential_consistency = 1, enable_parallel_replicas = 0`)
       return rows.map(({ payload }) => JSON.parse(payload))
     },
     (raw) =>
@@ -30,7 +30,7 @@ async function settledRaw(transcript: unknown, status: string): Promise<Array<{ 
 afterAll(async () => {
   await executor.command(`DROP TABLE IF EXISTS ${qualified}`)
   await executor.close()
-})
+}, 60_000)
 
 test('ClickHouse retains successful transcript content through permission loss and replaces it after a successful empty read', async () => {
   await executor.command(toCreateSQL(destination))
@@ -47,7 +47,6 @@ test('ClickHouse retains successful transcript content through permission loss a
   for (const [httpStatus, status] of [[200, 'available'], [403, 'forbidden'], [404, 'not_found']] as const) {
     responseStatus = httpStatus
     expect((await runIngestion(request, { fetch, journal, destination: createClickHouseDestination(executor), retry: { retries: 0 } })).ok).toBe(true)
-    await executor.command(`OPTIMIZE TABLE ${qualified} FINAL`)
     const raw = await settledRaw(segments, status)
     expect(raw).toHaveLength(2)
     expect(raw.find((item) => item.kind === 'transcript')?.data).toEqual(segments)
@@ -56,7 +55,6 @@ test('ClickHouse retains successful transcript content through permission loss a
   responseStatus = 200
   segments = []
   expect((await runIngestion(request, { fetch, journal, destination: createClickHouseDestination(executor), retry: { retries: 0 } })).ok).toBe(true)
-  await executor.command(`OPTIMIZE TABLE ${qualified} FINAL`)
   const raw = await settledRaw([], 'available')
   expect(raw).toHaveLength(2)
   expect(raw.find((item) => item.kind === 'transcript')?.data).toEqual([])
@@ -69,6 +67,7 @@ test('ClickHouse retains successful transcript content through permission loss a
       ON snapshot.raw.source_id::String = outcome.raw.source_id::String
       AND snapshot.raw.meeting_id::String = outcome.raw.meeting_id::String
     WHERE snapshot.raw.kind::String = 'transcript' AND outcome.raw.kind::String = 'availability'
+    SETTINGS select_sequential_consistency = 1, enable_parallel_replicas = 0
   `), (rows) => JSON.stringify(rows) === JSON.stringify(expectedJoin))
   expect(joined).toEqual(expectedJoin)
 })

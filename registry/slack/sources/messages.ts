@@ -1,4 +1,4 @@
-import { rawRows, rawTable, type ReadContext, type SourceChunk, type RawRow } from '@chkit/plugin-ingest'
+import { rawRows, rawTable, type ReadContext, type SourceChunk, type RawRow } from '@chkit/plugin-sync'
 
 import { createSlackClient, type MessageMethod, type SlackClient, type SlackMessage } from '../client.js'
 import { slackConfig, type SlackReaderConfig } from '../config.js'

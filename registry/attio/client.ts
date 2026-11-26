@@ -1,5 +1,5 @@
 
-import { HttpError, paginate, type Page, type SourceContext } from '@chkit/plugin-ingest'
+import { HttpError, paginate, type Page, type SourceContext } from '@chkit/plugin-sync'
 import { z } from 'zod'
 
 import { attioReaderConfigSchema, type AttioReaderConfig } from './config.js'

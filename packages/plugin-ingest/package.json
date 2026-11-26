@@ -1,7 +1,7 @@
 {
   "name": "@chkit/plugin-ingest",
-  "version": "0.2.0-beta.16",
-  "description": "Scheduled pull ingestion into ClickHouse with journaled checkpoints for chkit",
+  "version": "0.2.0-beta.19",
+  "description": "Compatibility package for @chkit/plugin-sync",
   "license": "MIT",
   "author": "ObsessionDB",
   "keywords": [
@@ -39,18 +39,10 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "dev": "tsc -p tsconfig.json --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "biome lint src test",
-    "test": "env -u CLICKHOUSE_URL -u CLICKHOUSE_HOST bun run ../../scripts/infra-up.ts && bun test src test --parallel",
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@chkit/clickhouse": "workspace:*",
-    "@chkit/core": "workspace:*",
-    "@opentelemetry/api": "^1.9.1",
-    "p-limit": "^7.2.0",
-    "p-retry": "^7.1.1",
-    "zod": "^4.3.6"
+    "@chkit/plugin-sync": "workspace:*"
   }
 }

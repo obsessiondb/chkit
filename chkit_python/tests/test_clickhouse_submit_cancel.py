@@ -27,6 +27,17 @@ from chkit_plugin_obsessiondb.credentials import Credentials
 from chkit_plugin_obsessiondb.remote_executor import RemoteClickHouseClient
 
 
+@pytest.fixture(autouse=True)
+def _async_insert_not_locked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These servers take only the submit: settle the remote writes'
+    settings lookup without a request (#804)."""
+    monkeypatch.setattr(
+        RemoteClickHouseClient,
+        "_write_settings",
+        lambda _self, settings: {"async_insert": 0, "wait_for_async_insert": 1, **(settings or {})},
+    )
+
+
 class _Server:
     """A TCP listener that records every byte a connection sends."""
 
@@ -86,6 +97,7 @@ def test_a_submit_given_up_while_it_connects_never_writes_its_request() -> None:
             client_module._SUBMIT_SEND.before_send = None
 
     submission = _Submission(submit)
+    submission.start()
     assert _SlowConnection.connecting.wait(timeout=5)
     excluded: list[bool] = []
     abandoning = threading.Thread(target=lambda: excluded.append(submission.abandon()))
@@ -121,6 +133,7 @@ def test_a_submit_that_connected_before_the_run_gave_up_is_sent() -> None:
             client_module._SUBMIT_SEND.before_send = None
 
     submission = _Submission(submit)
+    submission.start()
     assert committed.wait(timeout=5)
     assert submission.abandon() is True
     submission.wait()
@@ -152,6 +165,7 @@ def test_a_remote_submit_given_up_while_it_connects_never_writes_its_request(
     submission = _Submission(
         lambda guard: remote.submit("INSERT INTO t SELECT 1", "qid", before_send=guard)
     )
+    submission.start()
     assert connecting.wait(timeout=5)
     excluded: list[bool] = []
     abandoning = threading.Thread(target=lambda: excluded.append(submission.abandon()))
@@ -223,6 +237,7 @@ def test_a_submit_paused_before_its_first_write_never_sends_after_the_run_stoppe
             client_module._SUBMIT_SEND.before_send = None
 
     submission = _Submission(submit)
+    submission.start()
     deadline = threading.Event()
     while not paused and not deadline.wait(0.01):
         pass
@@ -285,6 +300,7 @@ def test_the_run_keeps_its_lock_while_the_submit_writes_its_request(
         _submit_through(transport, server.port, pausing, b"INSERT INTO t SELECT 1")
 
     submission = _Submission(submit)
+    submission.start()
     deadline = threading.Event()
     while not paused and not deadline.wait(0.01):
         pass
@@ -362,6 +378,7 @@ def test_a_request_write_that_stalls_ends_at_the_write_timeout(
     submission = _Submission(
         lambda guard: _submit_through(transport, server.port, _Started(guard), body)
     )
+    submission.start()
     assert started.wait(timeout=5)
     began = time.monotonic()
     submission.abandon()
@@ -429,6 +446,7 @@ def test_a_remote_submit_given_up_during_its_proxy_tunnel_never_sends_its_reques
     submission = _Submission(
         lambda guard: remote.submit("INSERT INTO t SELECT 1", "qid", before_send=guard)
     )
+    submission.start()
     assert state["connect"].wait(timeout=5)
     submission.abandon()
     state["release"].set()
@@ -492,6 +510,7 @@ def test_ctrl_c_while_the_submit_connects_never_lets_it_send(
         _submit_through(transport, server.port, pausing, b"INSERT INTO t SELECT 1")
 
     submission = _Submission(submit)
+    submission.start()
     deadline = threading.Event()
     while not paused and not deadline.wait(0.01):
         pass
@@ -523,6 +542,7 @@ def test_ctrl_c_while_the_submit_writes_waits_for_the_write(
         _submit_through(transport, server.port, pausing, b"INSERT INTO t SELECT 1")
 
     submission = _Submission(submit)
+    submission.start()
     deadline = threading.Event()
     while not paused and not deadline.wait(0.01):
         pass
