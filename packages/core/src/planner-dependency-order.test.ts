@@ -11,7 +11,8 @@ import {
 } from './index'
 import type { ColumnDefinition, SchemaDefinition } from './index'
 import { buildDependencyGraph, orderByDependencies } from './object-dependencies.js'
-import { columnDefaultReads, cycleRepairWork } from './planner.js'
+import { cycleRepairWork } from './column-cycle-repair.js'
+import { columnDefaultReads } from './column-reads.js'
 
 const appTable = (name: string, columns: ColumnDefinition[] = [{ name: 'id', type: 'UInt64' }]) =>
   table({ database: 'app', name, columns, engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'] })

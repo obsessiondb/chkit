@@ -131,6 +131,9 @@ ignore = [
 "src/chkit/core/text_index.py" = ["PLR0912", "PLR2004"]
 "src/chkit/core/codec.py" = ["PLR0911", "PLR0912", "PLR2004", "E501"]
 "src/chkit/core/planner.py" = ["PLR0911", "PLR0912", "PERF401"]
+"src/chkit/core/column_order.py" = ["PLR0912"]
+"src/chkit/core/column_cycle_repair.py" = ["PLR0911", "PLR0912"]
+"src/chkit/core/column_reads.py" = ["PLR0911", "PLR0912"]
 "src/chkit/core/model.py" = ["E501", "PLC0415"]
 "src/chkit/core/flags.py" = ["PLR0912"]
 # CLI commands necessarily branch on flag combinations + output mode.
