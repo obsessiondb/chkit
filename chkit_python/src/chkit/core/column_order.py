@@ -147,6 +147,7 @@ def order_column_statements(
     _add_type_change_order(
         prerequisites,
         statements,
+        ids,
         operations,
         modifies,
         previous=previous,
@@ -242,6 +243,7 @@ _Reads = dict[str, set[str]]
 def _add_type_change_order(
     prerequisites: list[list[int]],
     statements: Sequence[MigrationOperation],
+    ids: Sequence[str],
     operations: Sequence[MigrationOperation],
     modifies: dict[str, list[int]],
     *,
@@ -271,8 +273,10 @@ def _add_type_change_order(
     statement past an operation of ``operations`` that is not a column statement,
     changes the order of the ADD and DROP COLUMNs among themselves or of the type
     changes, or closes a cycle of column expressions at some statement
-    (``_closes_expression_cycle``), when an operation key names two objects, or
-    when a table has a RENAME COLUMN in ``renames``. The cycle repair
+    (``_closes_expression_cycle``), when an ADD or MODIFY COLUMN is not one
+    column's (``ids``, #801), or when a table has a RENAME COLUMN in
+    ``renames``. Statements, reads and type changes are matched by object id,
+    so two tables whose operation keys are the same keep their own. The cycle repair
     (``_repaired_order``) runs after this, and its breaker edges come on top of
     these prerequisites, so they hold in its order too. A temporary cycle the
     repair would break also closes in the order with them, in any table, so in
@@ -282,13 +286,13 @@ def _add_type_change_order(
     changes: dict[str, int] = {}
     # The type changes of each table, in key order.
     tables: list[list[int]] = []
-    for keys in _type_changed_columns(previous, next_, renames):
+    for columns in _type_changed_columns(previous, next_, renames):
         tables.append([])
-        for key in keys:
-            if modifies.get(key):
-                changes[key] = modifies[key][-1]
-                tables[-1].append(changes[key])
-    if not changes or _has_ambiguous_key(previous, next_, renames):
+        for id_ in columns:
+            if modifies.get(id_):
+                changes[id_] = modifies[id_][-1]
+                tables[-1].append(changes[id_])
+    if not changes or _has_unresolved_column_statement(statements, ids, previous, next_):
         return
     # [statement, prerequisite] pairs, and [statement, MODIFY] pairs that read X before and after.
     edges: list[tuple[int, int]] = []
@@ -297,8 +301,8 @@ def _add_type_change_order(
         if op.type == "alter_table_rename_column":
             continue
         ttl = op.type == "alter_table_modify_ttl"
-        before = (old_ttl_reads if ttl else old_reads).get(op.key, set())
-        after = (ttl_reads if ttl else reads).get(op.key, set())
+        before = (old_ttl_reads if ttl else old_reads).get(ids[index], set())
+        after = (ttl_reads if ttl else reads).get(ids[index], set())
         for read in before | after:
             change = changes.get(read)
             if change is None:
@@ -352,7 +356,7 @@ def _add_type_change_order(
 
     moved = _moves_past_other_operations(order, position, operations) or fixed(order) != fixed(base)
     # ALTER's check for cyclic defaults also reads lambda parameters (#799).
-    if moved or _closes_expression_cycle(order, statements, cycle_graphs):
+    if moved or _closes_expression_cycle(order, statements, ids, cycle_graphs):
         for index, length in enumerate(lengths):
             del prerequisites[index][length:]
 
@@ -411,39 +415,34 @@ def _moves_past_other_operations(
     return any(runs[slot] != runs[position[index]] for slot, index in enumerate(order))
 
 
-def _has_ambiguous_key(
+def _has_unresolved_column_statement(
+    statements: Sequence[MigrationOperation],
+    ids: Sequence[str],
     previous: Sequence[SchemaDefinition],
     next_: Sequence[SchemaDefinition],
-    renames: Sequence[ColumnRenameSuggestion],
 ) -> bool:
-    """Whether an operation key of the definitions or ``renames`` names two objects.
+    """Whether an ADD or MODIFY COLUMN has no column's id (TS ``hasUnresolvedColumnStatement``).
 
-    TS ``hasAmbiguousKey``.
+    ``_statement_object_ids`` left its key (#801): its new expression would not be
+    replayed in ``_closes_expression_cycle``, which then could see fewer reads than
+    ClickHouse.
     """
-    owners: dict[str, tuple[str, ...]] = {}
-
-    def claimed(key: str, owner: tuple[str, ...]) -> bool:
-        return owners.setdefault(key, owner) != owner
-
-    for definition in [*previous, *next_]:
-        if not isinstance(definition, TableDefinition):
-            continue
-        table_key = f"table:{definition.database}.{definition.name}:ttl"
-        if claimed(table_key, (definition.database, definition.name)):
-            return True
-        for column in definition.columns:
-            key = _column_key(definition.database, definition.name, column.name)
-            if claimed(key, (definition.database, definition.name, column.name)):
-                return True
+    columns = {
+        _column_object_id(definition.database, definition.name, column.name)
+        for definition in [*previous, *next_]
+        if isinstance(definition, TableDefinition)
+        for column in definition.columns
+    }
     return any(
-        claimed(column_rename_key(r), ("rename", r.database, r.table, r.from_, r.to))
-        for r in renames
+        op.type in ("alter_table_add_column", "alter_table_modify_column") and id_ not in columns
+        for op, id_ in zip(statements, ids, strict=True)
     )
 
 
 def _closes_expression_cycle(
     order: Sequence[int],
     statements: Sequence[MigrationOperation],
+    ids: Sequence[str],
     graphs: tuple[dict[str, set[str]], dict[str, set[str]]],
 ) -> bool:
     """Whether running the column statements in ``order`` gives some column an expression
@@ -456,20 +455,23 @@ def _closes_expression_cycle(
     """
     reads, old_reads = graphs
     current: dict[str, set[str]] = dict(old_reads)
+    last = {id_: index for index, id_ in enumerate(ids)}
     for index in order:
         op = statements[index]
+        id_ = ids[index]
         if op.type == "alter_table_drop_column":
-            current.pop(op.key, None)
+            current.pop(id_, None)
         if op.type not in ("alter_table_add_column", "alter_table_modify_column"):
             continue
-        if index + 1 < len(statements) and statements[index + 1].key == op.key:
+        # An object's new expression is set at its last statement.
+        if last[id_] != index:
             continue
-        current[op.key] = reads.get(op.key, set())
+        current[id_] = reads.get(id_, set())
         seen: set[str] = set()
-        pending = list(current[op.key])
+        pending = list(current[id_])
         while pending:
             column = pending.pop()
-            if column == op.key:
+            if column == id_:
                 return True
             if column in seen:
                 continue
@@ -483,7 +485,7 @@ def _type_changed_columns(
     next_: Sequence[SchemaDefinition],
     renames: Sequence[ColumnRenameSuggestion],
 ) -> list[list[str]]:
-    """Keys of the columns whose type changes, per table with no rename in ``renames``."""
+    """Ids of the columns whose type changes, per table with no rename in ``renames``."""
     renamed = {(rename.database, rename.table) for rename in renames}
     old_tables = {(d.database, d.name): d for d in previous if isinstance(d, TableDefinition)}
     changed: list[list[str]] = []
@@ -499,5 +501,5 @@ def _type_changed_columns(
             old_column = old_columns.get(column.name)
             old_type = column_type_fingerprint(old_column) if old_column is not None else None
             if old_type is not None and old_type != column_type_fingerprint(column):
-                keys.append(_column_key(definition.database, definition.name, column.name))
+                keys.append(_column_object_id(definition.database, definition.name, column.name))
     return changed

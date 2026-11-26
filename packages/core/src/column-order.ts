@@ -122,7 +122,7 @@ export function orderColumnStatements(
     found.delete(index)
     return [...found]
   })
-  addTypeChangeOrder(prerequisites, statements, operations, modifies, definitions, renames, {
+  addTypeChangeOrder(prerequisites, statements, ids, operations, modifies, definitions, renames, {
     reads,
     oldReads,
     ttlReads,
@@ -156,8 +156,10 @@ export function orderColumnStatements(
  * order moves a statement past an operation of `operations` that is not a
  * column statement, changes the order of the ADD and DROP COLUMNs among
  * themselves or of the type changes, or closes a cycle of column expressions
- * at some statement (`closesExpressionCycle`), when an operation key names two
- * objects, or when a table has a RENAME COLUMN in `renames`. The cycle repair
+ * at some statement (`closesExpressionCycle`), when an ADD or MODIFY COLUMN
+ * is not one column's (`ids`, #801), or when a table has a RENAME COLUMN in
+ * `renames`. Statements, reads and type changes are matched by object id, so
+ * two tables whose operation keys are the same keep their own. The cycle repair
  * (`repairedOrder`) runs after this, and its breaker edges come on top of
  * these prerequisites, so they hold in its order too. A temporary cycle the
  * repair would break also closes in the order with them, in any table, so in
@@ -166,6 +168,7 @@ export function orderColumnStatements(
 function addTypeChangeOrder(
   prerequisites: number[][],
   statements: MigrationOperation[],
+  ids: readonly string[],
   operations: MigrationOperation[],
   modifies: ReadonlyMap<string, number[]>,
   definitions: ColumnStatementDefinitions,
@@ -181,22 +184,23 @@ function addTypeChangeOrder(
 ): void {
   const changes = new Map<string, number>()
   // The type changes of each table, in key order.
-  const tables = typeChangedColumns(definitions, renames).map((keys) =>
-    keys.flatMap((key) => {
-      const change = modifies.get(key)?.at(-1)
-      if (change !== undefined) changes.set(key, change)
+  const tables = typeChangedColumns(definitions, renames).map((columns) =>
+    columns.flatMap((id) => {
+      const change = modifies.get(id)?.at(-1)
+      if (change !== undefined) changes.set(id, change)
       return change ?? []
     })
   )
-  if (changes.size === 0 || hasAmbiguousKey(definitions, renames)) return
+  if (changes.size === 0 || hasUnresolvedColumnStatement(statements, ids, definitions)) return
   // [statement, prerequisite] pairs, and the [statement, MODIFY] pairs that read X before and after.
   const edges: Array<[number, number]> = []
   const kept: Array<[number, number]> = []
   statements.forEach((op, index) => {
     if (op.type === 'alter_table_rename_column') return
     const ttl = op.type === 'alter_table_modify_ttl'
-    const before = (ttl ? graphs.oldTtlReads : graphs.oldReads).get(op.key) ?? new Set<string>()
-    const after = (ttl ? graphs.ttlReads : graphs.reads).get(op.key) ?? new Set<string>()
+    const id = ids[index] ?? ''
+    const before = (ttl ? graphs.oldTtlReads : graphs.oldReads).get(id) ?? new Set<string>()
+    const after = (ttl ? graphs.ttlReads : graphs.reads).get(id) ?? new Set<string>()
     for (const read of new Set([...before, ...after])) {
       const change = changes.get(read)
       if (change === undefined) continue
@@ -282,31 +286,31 @@ function addTypeChangeOrder(
   const moved = order.some((index, slot) => runs[slot] !== runs[at(index)])
   // ALTER's check for cyclic defaults also reads lambda parameters (#799).
   const cycles = { reads: graphs.cycleReads, oldReads: graphs.oldCycleReads }
-  if (moved || fixed(order) !== fixed(base) || closesExpressionCycle(order, statements, cycles)) {
+  if (moved || fixed(order) !== fixed(base) || closesExpressionCycle(order, statements, ids, cycles)) {
     prerequisites.forEach((before, index) => {
       before.length = lengths[index] ?? before.length
     })
   }
 }
 
-/** Whether an operation key of `definitions` or `renames` names two columns, TTLs or renames. */
-function hasAmbiguousKey(definitions: ColumnStatementDefinitions, renames: readonly ColumnRename[]): boolean {
-  const owners = new Map<string, string>()
-  const claimed = (key: string, owner: string) => {
-    if ((owners.get(key) ?? owner) !== owner) return true
-    owners.set(key, owner)
-    return false
-  }
+/**
+ * Whether an ADD or MODIFY COLUMN has no column's id (`statementObjectIds`
+ * left its key, #801): its new expression would not be replayed in
+ * `closesExpressionCycle`, which then could see fewer reads than ClickHouse.
+ */
+function hasUnresolvedColumnStatement(
+  statements: MigrationOperation[],
+  ids: readonly string[],
+  definitions: ColumnStatementDefinitions
+): boolean {
+  const columns = new Set<string>()
   for (const def of [...definitions.previous, ...definitions.next]) {
     if (def.kind !== 'table') continue
-    if (claimed(`table:${def.database}.${def.name}:ttl`, JSON.stringify([def.database, def.name]))) return true
-    for (const column of def.columns) {
-      const key = columnKey({ database: def.database, table: def.name }, column.name)
-      if (claimed(key, JSON.stringify([def.database, def.name, column.name]))) return true
-    }
+    for (const column of def.columns) columns.add(columnObjectId(def.database, def.name, column.name))
   }
-  return renames.some((rename) =>
-    claimed(columnRenameKey(rename), JSON.stringify(['rename', rename.database, rename.table, rename.from, rename.to]))
+  return statements.some(
+    (op, index) =>
+      (op.type === 'alter_table_add_column' || op.type === 'alter_table_modify_column') && !columns.has(ids[index] ?? '')
   )
 }
 
@@ -321,20 +325,24 @@ function hasAmbiguousKey(definitions: ColumnStatementDefinitions, renames: reado
 function closesExpressionCycle(
   order: number[],
   statements: MigrationOperation[],
+  ids: readonly string[],
   graphs: { reads: DependencyGraph; oldReads: DependencyGraph }
 ): boolean {
   const current = new Map<string, ReadonlySet<string>>(graphs.oldReads)
+  const last = new Map(ids.map((id, index) => [id, index]))
   for (const index of order) {
     const op = statements[index]
-    if (op === undefined) continue
-    if (op.type === 'alter_table_drop_column') current.delete(op.key)
+    const id = ids[index]
+    if (op === undefined || id === undefined) continue
+    if (op.type === 'alter_table_drop_column') current.delete(id)
     if (op.type !== 'alter_table_add_column' && op.type !== 'alter_table_modify_column') continue
-    if (statements[index + 1]?.key === op.key) continue
-    current.set(op.key, graphs.reads.get(op.key) ?? new Set<string>())
+    // An object's new expression is set at its last statement.
+    if (last.get(id) !== index) continue
+    current.set(id, graphs.reads.get(id) ?? new Set<string>())
     const seen = new Set<string>()
-    const pending = [...(current.get(op.key) ?? [])]
+    const pending = [...(current.get(id) ?? [])]
     for (let column = pending.pop(); column !== undefined; column = pending.pop()) {
-      if (column === op.key) return true
+      if (column === id) return true
       if (seen.has(column)) continue
       seen.add(column)
       pending.push(...(current.get(column) ?? []))
@@ -343,7 +351,7 @@ function closesExpressionCycle(
   return false
 }
 
-/** Keys of the columns whose type `definitions` changes, per table with no rename in `renames`. */
+/** Ids of the columns whose type `definitions` changes, per table with no rename in `renames`. */
 function typeChangedColumns(definitions: ColumnStatementDefinitions, renames: readonly ColumnRename[]): string[][] {
   const tableId = (database: string, name: string) => JSON.stringify([database, name])
   const renamed = new Set(renames.map((rename) => tableId(rename.database, rename.table)))
@@ -358,7 +366,7 @@ function typeChangedColumns(definitions: ColumnStatementDefinitions, renames: re
     for (const column of def.columns) {
       const oldColumn = oldColumns.get(column.name)
       if (oldColumn !== undefined && columnTypeFingerprint(oldColumn) !== columnTypeFingerprint(column)) {
-        keys.push(columnKey({ database: def.database, table: def.name }, column.name))
+        keys.push(columnObjectId(def.database, def.name, column.name))
       }
     }
   }

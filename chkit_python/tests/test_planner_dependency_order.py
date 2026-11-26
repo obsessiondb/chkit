@@ -1754,9 +1754,12 @@ def test_does_no_repair_work_on_the_acyclic_groups_fixture() -> None:
 
 def test_a_bare_null_is_no_read_of_a_column_named_null() -> None:
     # A bare NULL is a literal even when a column is named `null`, so these
-    # tables keep their sorted order: the ALIAS `b` runs after `a` changes. Only
-    # a quoted `null` reads the column. In the second plan no column changes
-    # its type, so none is ordered by one (#814).
+    # tables close no cycle: the ALIAS `b` runs after `a` changes. Only a
+    # quoted `null` reads the column. In the first plan `a` changes its type
+    # and the old DEFAULT of `z` reads it, so `z` changes first (#814); read as
+    # a column, `null` would close a temporary cycle, and the plan would keep
+    # its sorted order. In the second plan no column changes its type, so none
+    # is ordered by one.
     assert _order_of(
         [_t([_u("a"), _text("null", "toString(z)"), _u("z", "length(toString(a))")])],
         [_t([
@@ -1765,7 +1768,7 @@ def test_a_bare_null_is_no_read_of_a_column_named_null() -> None:
             _u("null", "id"),
             _u("z", "id"),
         ])],
-    ) == ["t.a", "t.b", "t.null", "t.z"]
+    ) == ["t.z", "t.a", "t.b", "t.null"]
     assert _order_of(
         [_t([
             {"name": "a", "type": "String"},

@@ -2045,16 +2045,19 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
   })
 
   // A bare NULL is a literal even when a column is named `null`, so these
-  // tables keep their sorted order: the ALIAS `b` runs after `a` changes. Only
-  // a quoted `null` reads the column. In the second plan no column changes
-  // its type, so none is ordered by one (#814).
+  // tables close no cycle: the ALIAS `b` runs after `a` changes. Only a
+  // quoted `null` reads the column. In the first plan `a` changes its type
+  // and the old DEFAULT of `z` reads it, so `z` changes first (#814); read as
+  // a column, `null` would close a temporary cycle, and the plan would keep
+  // its sorted order. In the second plan no column changes its type, so none
+  // is ordered by one.
   test('a bare NULL is no read of a column named null', () => {
     expect(
       orderOf(
         [t([u('a'), text('null', 'toString(z)'), u('z', 'length(toString(a))')])],
         [t([text('a', "ifNull(null, '')"), u('b', "match(a, 'x')", { type: 'UInt8', defaultKind: 'ALIAS' }), u('null', 'id'), u('z', 'id')])]
       )
-    ).toEqual(['t.a', 't.b', 't.null', 't.z'])
+    ).toEqual(['t.z', 't.a', 't.b', 't.null'])
     expect(
       orderOf(
         [t([{ name: 'a', type: 'String' }, u('b', 'length(`null`)', { defaultKind: 'ALIAS' }), text('null', 'toString(z)'), u('z', 'length(toString(a))')])],

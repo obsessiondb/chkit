@@ -57,4 +57,30 @@ describe('planDiff orders column statements of tables whose keys collide (#801)'
       'ALTER TABLE app.t MODIFY COLUMN `x:column:a` UInt64 DEFAULT `x:column:b` + 1;',
     ])
   })
+
+  // `a` of `t:column:x` and `x:column:a` of `t` both change from String to
+  // UInt64. In `t:column:x`, `b` stops reading `a`, so its MODIFY runs first;
+  // in `t`, `x:column:b` starts reading `x:column:a`, so its MODIFY runs
+  // after. The colliding keys don't mix the two tables' orders (#814).
+  test('each table orders its own type change', () => {
+    const otherBefore = appTable('t:column:x', [id, { name: 'a', type: 'String' }, { name: 'b', type: 'UInt64', default: 'fn:length(a)' }])
+    const otherAfter = appTable('t:column:x', [id, { name: 'a', type: 'UInt64' }, { name: 'b', type: 'UInt64', default: 'fn:0' }])
+    const ownBefore = appTable('t', [id, { name: 'x:column:a', type: 'String' }, { name: 'x:column:b', type: 'UInt64', default: 'fn:0' }])
+    const ownAfter = appTable('t', [
+      id,
+      { name: 'x:column:a', type: 'UInt64' },
+      { name: 'x:column:b', type: 'UInt64', default: 'fn:`x:column:a` + 1' },
+    ])
+    const other = [
+      'ALTER TABLE app.`t:column:x` MODIFY COLUMN `b` UInt64 DEFAULT 0;',
+      'ALTER TABLE app.`t:column:x` MODIFY COLUMN `a` UInt64;',
+    ]
+    const own = [
+      'ALTER TABLE app.t MODIFY COLUMN `x:column:a` UInt64;',
+      'ALTER TABLE app.t MODIFY COLUMN `x:column:b` UInt64 DEFAULT `x:column:a` + 1;',
+    ]
+    expect(sqlOf([otherBefore], [otherAfter])).toEqual(other)
+    expect(sqlOf([ownBefore], [ownAfter])).toEqual(own)
+    expect(sqlOf([otherBefore, ownBefore], [otherAfter, ownAfter])).toEqual([...own, ...other])
+  })
 })
