@@ -1066,7 +1066,12 @@ function repairedOrder(
     // The budget also covers the prerequisites the breaker checks walk.
     let total = size.get(table) ?? 0
     for (const index of scheduled) total += prerequisites[index]?.length ?? 0
-    const replay = defaultReplay(initial.get(table) ?? [], 8 * total + 1024)
+    // The columns whose reads the replay changes: the others keep their old reads throughout.
+    const changed = new Set<string>()
+    for (const index of list) {
+      if (changes.has(index) || statements[index]?.type === 'alter_table_drop_column') changed.add(ids[index] ?? '')
+    }
+    const replay = defaultReplay(initial.get(table) ?? [], 8 * total + 1024, changed)
     const edges = breakClosedCycles(scheduled, new Set(list), statements, prerequisites, groups, groupOf, ids, changes, replay)
     cycleRepairWork.units += replay.used()
     if (edges !== undefined) added.push(...edges)
@@ -1186,20 +1191,20 @@ function breakClosedCycles(
       const column = columns[target]
       if (column === undefined || !replayed.has(target)) continue
       const change = changes.get(target)
-      const cycle = change === undefined ? new Set<string>() : replay.closedCycle(column, change)
+      const cycle = change === undefined ? NO_CYCLE : replay.closedCycle(column, change)
       if (cycle === undefined) return undefined
-      if (cycle.size > 0) {
-        const candidates = [...cycle]
+      if (cycle.columns.length > 0) {
+        const candidates = cycle.columns
           .filter((other) => other !== column)
           .flatMap((other) => changing.get(other) ?? [])
           .filter((j) => !placed.has(j) && groupOf[j] !== group)
           .sort((a, b) => a - b)
-        if (!replay.spend(cycle.size + candidates.length)) return undefined
+        if (!replay.spend(cycle.columns.length + candidates.length)) return undefined
         let breaker: number | undefined
         for (const j of candidates) {
           const after = changes.get(j) ?? new Set<string>()
           if (!(replay.reads(columns[j] ?? '') ?? []).some((read) => cycle.has(read) && !after.has(read))) continue
-          const waits = waitsFor(prerequisites, extra, j, target, placed, replay)
+          const waits = waitsFor({ prerequisites, extra, dependents, groups, groupOf }, j, target, placed, replay)
           if (waits === undefined) return undefined
           if (!waits) {
             breaker = j
@@ -1280,31 +1285,74 @@ function siftDown(values: number[], start: number): void {
   }
 }
 
+/** The statement graph `waitsFor` searches. */
+interface WaitGraph {
+  prerequisites: number[][]
+  extra: ReadonlyMap<number, number[]>
+  /** The statements that wait for each one, across groups (`extra` included). */
+  dependents: ReadonlyMap<number, number[]>
+  groups: number[][]
+  groupOf: number[]
+}
+
 /**
  * Whether statement `from` runs after statement `target` through
  * `prerequisites` and `extra`, or undefined when `replay` runs out of work.
  * A `placed` statement has run, so it does not wait for `target`, which has
- * not. Each prerequisite it looks at uses one unit of the replay's work.
+ * not. `target` is ready to run, so every statement that waits for it is
+ * still to run. The search runs from both ends, widening the smaller
+ * frontier (in turns on a tie): down the prerequisites of `from`, and up
+ * the statements that wait for `target`, where the members of a group wait
+ * for each other. Many breakers can wait for one long chain of statements
+ * that does not reach `target`; the other end then stops it early. Each
+ * prerequisite, dependent or group member it looks at uses one unit of the
+ * replay's work.
  */
 function waitsFor(
-  prerequisites: number[][],
-  extra: ReadonlyMap<number, number[]>,
+  graph: WaitGraph,
   from: number,
   target: number,
   placed: ReadonlySet<number>,
   replay: DefaultReplay
 ): boolean | undefined {
-  const seen = new Set([from])
-  const pending = [from]
-  for (let index = pending.pop(); index !== undefined; index = pending.pop()) {
-    for (const list of [prerequisites[index], extra.get(index)]) {
-      for (const other of list ?? []) {
-        if (!replay.spend()) return undefined
-        if (other === target) return true
-        if (placed.has(other) || seen.has(other)) continue
-        seen.add(other)
-        pending.push(other)
+  const down = new Set([from])
+  const up = new Set([target])
+  const upGroups = new Set<number>()
+  let downFront = [from]
+  let upFront = [target]
+  let widenDown = false
+  while (downFront.length > 0 && upFront.length > 0) {
+    widenDown = downFront.length === upFront.length ? !widenDown : downFront.length < upFront.length
+    const front: number[] = []
+    if (widenDown) {
+      for (const index of downFront) {
+        for (const list of [graph.prerequisites[index], graph.extra.get(index)]) {
+          for (const other of list ?? []) {
+            if (!replay.spend()) return undefined
+            if (up.has(other)) return true
+            if (placed.has(other) || down.has(other)) continue
+            down.add(other)
+            front.push(other)
+          }
+        }
       }
+      downFront = front
+    } else {
+      for (const index of upFront) {
+        const group = graph.groupOf[index] ?? 0
+        const members = upGroups.has(group) ? [] : (graph.groups[group] ?? [])
+        upGroups.add(group)
+        for (const list of [members, graph.dependents.get(index)]) {
+          for (const other of list ?? []) {
+            if (!replay.spend()) return undefined
+            if (down.has(other)) return true
+            if (up.has(other)) continue
+            up.add(other)
+            front.push(other)
+          }
+        }
+      }
+      upFront = front
     }
   }
   return false
@@ -1454,11 +1502,11 @@ interface DefaultReplay {
   /** The columns `column` reads, in code point order. */
   reads: (column: string) => readonly string[] | undefined
   /**
-   * The columns on a cycle through `column` that giving it `reads` would
-   * close, or none. It changes nothing. It returns undefined when the replay
+   * The cycle through `column` that giving it `reads` would close, or none
+   * (no columns). It changes nothing. It returns undefined when the replay
    * has used up its work.
    */
-  closedCycle: (column: string, reads: ReadonlySet<string>) => Set<string> | undefined
+  closedCycle: (column: string, reads: ReadonlySet<string>) => ClosedCycle | undefined
   /** Gives `column` the `reads` (none removes it); they must close no cycle. */
   assign: (column: string, reads: Iterable<string> | undefined) => void
   /** Uses `units` (one by default) of work; false once the work has run out. */
@@ -1470,6 +1518,19 @@ interface DefaultReplay {
 }
 
 /**
+ * A cycle `closedCycle` found. `columns` holds `column` and every column on
+ * the cycle that a statement changes, among others; it leaves out the links
+ * of a chain of unchanged columns that each read one column.
+ */
+interface ClosedCycle {
+  columns: readonly string[]
+  /** Whether a read of a column of `columns` (other than `column`) is on the cycle. */
+  has: (read: string) => boolean
+}
+
+const NO_CYCLE: ClosedCycle = { columns: [], has: () => false }
+
+/**
  * The replay of one table, from its `initial` (old) expressions. Its state
  * never holds a cycle, so a new read Y of column X closes one exactly when
  * Y reaches X. That search runs from both ends at once, widening the smaller
@@ -1479,17 +1540,32 @@ interface DefaultReplay {
  * order they were added, so every search does the same work in both ports.
  * Each read a search, an update or a copy looks at uses one unit of the
  * `budget`.
+ *
+ * Only the `changed` columns are assigned new reads; the others keep their
+ * old reads. A walk down the reads skips a chain of unchanged columns that
+ * each read one column (`land`) and remembers where it ends, which never
+ * changes. Many cycles can run through one long chain (#829); each cycle
+ * then costs the columns around the chain, not its length.
  */
-function defaultReplay(initial: ReadonlyArray<[string, ReadonlySet<string>]>, budget: number): DefaultReplay {
+function defaultReplay(
+  initial: ReadonlyArray<[string, ReadonlySet<string>]>,
+  budget: number,
+  changed: ReadonlySet<string>
+): DefaultReplay {
   const number = new Map<string, number>()
   const names: string[] = []
   const reads: Array<number[] | undefined> = []
   const readers: Array<Set<number>> = []
+  const fixed: boolean[] = []
+  // Where a walk that reads a column lands (`land`), or -1 until it is known.
+  const landing: number[] = []
   // Marks with an epoch per search, instead of a set per search.
   const down: number[] = []
   const up: number[] = []
+  const seen: number[] = []
   const inside: number[] = []
   let epoch = 0
+  let gather = 0
   let left = budget
   const of = (column: string): number => {
     const known = number.get(column)
@@ -1499,8 +1575,11 @@ function defaultReplay(initial: ReadonlyArray<[string, ReadonlySet<string>]>, bu
     names.push(column)
     reads.push(undefined)
     readers.push(new Set())
+    fixed.push(!changed.has(column))
+    landing.push(-1)
     down.push(0)
     up.push(0)
+    seen.push(0)
     inside.push(0)
     return id
   }
@@ -1523,6 +1602,39 @@ function defaultReplay(initial: ReadonlyArray<[string, ReadonlySet<string>]>, bu
     assignNumbers(id, next === undefined ? undefined : numbered(next))
   }
   for (const [column, columnReads] of initial) assign(column, columnReads)
+  // The column a walk that reads `column` lands on: `column` itself, or,
+  // when no statement changes it and it reads one column, where that read
+  // lands. Those reads never change, so the answer is kept. Each link it
+  // follows the first time uses one unit; the caller checks the budget. A
+  // cycle among those reads (an old schema ClickHouse refuses) uses up the
+  // work, so the table keeps its sorted order.
+  const land = (column: number): number => {
+    const path: number[] = []
+    let at = column
+    for (;;) {
+      const known = landing[at] ?? -1
+      if (known >= 0) {
+        at = known
+        break
+      }
+      if (known === -2) {
+        for (const link of path) landing[link] = -1
+        left = -1
+        return at
+      }
+      const next = reads[at]
+      if (!fixed[at] || next?.length !== 1 || left < 0) {
+        landing[at] = at
+        break
+      }
+      path.push(at)
+      landing[at] = -2
+      left -= 1
+      at = next[0] ?? at
+    }
+    for (const link of path) landing[link] = at
+    return at
+  }
   // Whether `from` reaches `to` through reads, or undefined when the work runs out.
   const reaches = (from: number, to: number): boolean | undefined => {
     epoch += 1
@@ -1537,8 +1649,9 @@ function defaultReplay(initial: ReadonlyArray<[string, ReadonlySet<string>]>, bu
       const front: number[] = []
       if (widenDown) {
         for (const column of downFront) {
-          for (const reached of reads[column] ?? []) {
+          for (const read of reads[column] ?? []) {
             left -= 1
+            const reached = land(read)
             if (left < 0) return undefined
             if (up[reached] === epoch) return true
             if (down[reached] !== epoch) {
@@ -1576,43 +1689,73 @@ function defaultReplay(initial: ReadonlyArray<[string, ReadonlySet<string>]>, bu
       const target = of(column)
       const current = new Set(reads[target] ?? [])
       left -= current.size
-      const cycle = new Set<string>()
       const numberedNext = numbered(next)
       if (left < 0) return undefined
+      gather += 1
+      const mark = gather
+      const columns: string[] = []
       for (const read of numberedNext) {
         if (current.has(read)) continue
         const hit = reaches(read, target)
         if (hit === undefined) return undefined
         if (!hit) continue
-        // This read's cycle: the columns it reaches (`down`) that reach `column`.
-        epoch += 1
-        const below = [read]
-        down[read] = epoch
-        for (let at = below.pop(); at !== undefined; at = below.pop()) {
-          for (const other of reads[at] ?? []) {
-            left -= 1
-            if (left < 0) return undefined
-            if (other === target || down[other] === epoch) continue
-            down[other] = epoch
-            below.push(other)
-          }
+        if (columns.length === 0) {
+          seen[target] = mark
+          inside[target] = mark
+          columns.push(column)
         }
-        down[target] = epoch
-        const back = [target]
-        inside[target] = epoch
-        cycle.add(column)
-        for (let at = back.pop(); at !== undefined; at = back.pop()) {
-          for (const reader of readers[at] ?? []) {
+        // The columns this read reaches (`seen`), walked depth first; one is
+        // on the cycle (`inside`) when one of its reads lands on the cycle.
+        // A column still on the walk is marked `-mark`: meeting it again means
+        // the state holds a cycle (an old schema ClickHouse refuses), so the
+        // table keeps its sorted order.
+        const start = land(read)
+        if (left < 0) return undefined
+        if (seen[start] === mark) continue
+        seen[start] = mark
+        inside[start] = -mark
+        const stack = [start]
+        const position = [0]
+        const onCycle = [false]
+        for (let top = stack.length - 1; top >= 0; top = stack.length - 1) {
+          const at = stack[top] ?? 0
+          const list = reads[at] ?? []
+          const index = position[top] ?? 0
+          if (index < list.length) {
+            position[top] = index + 1
             left -= 1
+            const reached = land(list[index] ?? 0)
             if (left < 0) return undefined
-            if (down[reader] !== epoch || inside[reader] === epoch) continue
-            inside[reader] = epoch
-            cycle.add(names[reader] ?? '')
-            back.push(reader)
+            if (seen[reached] !== mark) {
+              seen[reached] = mark
+              inside[reached] = -mark
+              stack.push(reached)
+              position.push(0)
+              onCycle.push(false)
+            } else if (inside[reached] === mark) onCycle[top] = true
+            else if (inside[reached] === -mark) {
+              left = -1
+              return undefined
+            }
+            continue
           }
+          stack.pop()
+          position.pop()
+          inside[at] = 0
+          if (!onCycle.pop()) continue
+          inside[at] = mark
+          columns.push(names[at] ?? '')
+          if (top > 0) onCycle[top - 1] = true
         }
       }
-      return cycle
+      return {
+        columns,
+        // A read of a column on the cycle is on it when it lands on the cycle.
+        has: (read) => {
+          const id = number.get(read)
+          return id !== undefined && inside[land(id)] === mark
+        },
+      }
     },
     assign,
     spend: (units = 1) => {

@@ -1756,6 +1756,49 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
     expect(order.slice(0, 2)).toEqual(['t.b000', 't.a000'])
   })
 
+  // Every breaker `b_i` waits for the 128 changes of the `p` chain, which do
+  // not wait for `a_i`. The search from `a_i`'s end stops at once, so the
+  // checks do not walk the chain again for each cycle (#829).
+  test('repairs cycles whose breakers wait for one long chain of statements', () => {
+    const pad = (p: string, i: number) => `${p}${String(i).padStart(4, '0')}`
+    const range = Array.from({ length: 128 }, (_, i) => i)
+    const before: ColumnDefinition[] = []
+    const after: ColumnDefinition[] = []
+    for (const i of range) {
+      before.push(u(pad('a', i)), u(pad('b', i), pad('z', i)), u(pad('z', i), pad('a', i)))
+      after.push(u(pad('a', i), pad('b', i)), u(pad('b', i), pad('p', 0)), u(pad('z', i), 'id'))
+    }
+    for (const j of range) {
+      before.push(u(pad('p', j), j === 0 ? range.map((i) => pad('b', i)).join(' + ') : pad('p', j - 1)))
+      after.push(u(pad('p', j), j + 1 < 128 ? pad('p', j + 1) : 'id'))
+    }
+    const order = orderOf([t(before)], [t(after)])
+    expect(order[0]).toBe('t.p0127')
+    for (const i of range) expect(order.indexOf(`t.${pad('b', i)}`)).toBeLessThan(order.indexOf(`t.${pad('a', i)}`))
+    expect(cycleRepairWork.units).toBe(6011)
+  })
+
+  // An old schema whose defaults read each other in a cycle (ClickHouse
+  // refuses one) cannot be replayed, so the table keeps its sorted order: a
+  // cycle among unchanged single reads (`c`, `d`) and one the walk meets
+  // again (`b`, `z`).
+  test.each<[string, ColumnDefinition[], ColumnDefinition[], string[]]>([
+    [
+      'unchanged columns',
+      [u('a'), u('b', 'c + z'), u('c', 'd'), u('d', 'c'), u('z', 'a')],
+      [u('a', 'b'), u('b', 'id'), u('c', 'd'), u('d', 'c'), u('z', 'id')],
+      ['t.a', 't.b', 't.z'],
+    ],
+    [
+      'changed columns',
+      [u('a'), u('b', 'z'), u('c', 'a'), u('z', 'b + c')],
+      [u('a', 'z'), u('b', 'p'), u('c', 'id'), u('p', 'id'), u('z', 'id')],
+      ['t.a', 't.c', 't.p', 't.b', 't.z'],
+    ],
+  ])('keeps the sorted order when the old defaults of %s read each other in a cycle', (_, before, after, order) => {
+    expect(orderOf([t(before)], [t(after)])).toEqual(order)
+  })
+
   // The unit of `date_add`, `dateDiff` and the like, a bare NOT and a bare
   // SELECT are not reads even when a column has that name, so these tables
   // keep their sorted order: the ALIAS `b` runs after `a` changes to String.
@@ -1937,10 +1980,12 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
     expect(cycleRepairWork.units).toBeGreaterThan(256)
   })
 
-  // The work and the plan at the edge of the work budget, the same in
+  // The work and the plan near the edge of the work budget, the same in
   // chkit-py under every hash seed (test_planner_dependency_order.py). Nine
-  // cycles through one long chain of unchanged defaults: with 85 links the
-  // table is repaired, with 86 it runs out of work and keeps the sorted order.
+  // cycles through one long chain of unchanged defaults are repaired whatever
+  // its length: the walks skip the chain (#829). Cycles through one chain
+  // whose end reads every cycle's column still cost the cycles squared: 50
+  // are repaired, 60 run out of work and keep the sorted order.
   const nineCycles = (chain: number): [ColumnDefinition[], ColumnDefinition[]] => {
     const pad = (p: string, i: number) => p + String(i).padStart(3, '0')
     const k = Array.from({ length: 9 }, (_, i) => i)
@@ -1964,11 +2009,24 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
         ...y.map((name) => u(name, 'id')), u('y_c', 'id'), u('y_a', y.join(' + '))],
     ]
   }
+  // `m` cycles `a_i` → `b_i` → `c000` → … → `c029` → `z` → `a_i`.
+  const fanIn = (m: number): [ColumnDefinition[], ColumnDefinition[]] => {
+    const pad = (p: string, i: number) => p + String(i).padStart(3, '0')
+    const k = Array.from({ length: m }, (_, i) => i)
+    const links = Array.from({ length: 30 }, (_, i) => u(pad('c', i), i + 1 < 30 ? pad('c', i + 1) : 'z'))
+    return [
+      [...k.map((i) => u(pad('a', i))), ...k.map((i) => u(pad('b', i), 'c000')), ...links, u('z', `${k.map((i) => pad('a', i)).join(' + ')} + id`)],
+      [...k.map((i) => u(pad('a', i), pad('b', i))), ...k.map((i) => u(pad('b', i), 'id')), ...links, u('z', 'id')],
+    ]
+  }
   test.each<[string, () => [ColumnDefinition[], ColumnDefinition[]], number, string, string]>([
-    ['nine cycles through 449 links', () => nineCycles(449), 12368, 'a', '5c58cc444894b01d886f233b2aaaec79d85b591ad579b526333465e37d8b8bcd'],
-    ['nine cycles through 85 links', () => nineCycles(85), 3632, 'c', '7ec17a4b49e8dcdf3beceb5adb5914cee3504df90dd047e9d72b95808538147a'],
-    ['nine cycles through 86 links', () => nineCycles(86), 3656, 'a', '5c58cc444894b01d886f233b2aaaec79d85b591ad579b526333465e37d8b8bcd'],
+    ['nine cycles through 449 links', () => nineCycles(449), 1292, 'c', '7ec17a4b49e8dcdf3beceb5adb5914cee3504df90dd047e9d72b95808538147a'],
+    ['nine cycles through 85 links', () => nineCycles(85), 564, 'c', '7ec17a4b49e8dcdf3beceb5adb5914cee3504df90dd047e9d72b95808538147a'],
+    ['nine cycles through 86 links', () => nineCycles(86), 566, 'c', '7ec17a4b49e8dcdf3beceb5adb5914cee3504df90dd047e9d72b95808538147a'],
     ['a chain and a fan-in', chainAndFanIn, 1816, 'm', 'f0ea844653d573b9fd93c11b98a1cf6f6e2f31d10c03d08aa9ee0572f4d8fd36'],
+    ['30 cycles through 30 links', () => fanIn(30), 1807, 'b000', 'c9b8ec508f9b1e19693d8da1e7138fd8055abfd4a2ce8d638c8e7093d593879e'],
+    ['50 cycles through 30 links', () => fanIn(50), 3967, 'b000', '734d0b6c25b51d293c74327216b4fea5a1c11fe13660488ec1f084c3bbfde145'],
+    ['60 cycles through 30 links', () => fanIn(60), 4648, 'a000', 'ee8a4528f50e4af7107b205dbfc26ae7b2dd7bd945d8654f3f2074c9603f2cad'],
   ])('plans %s with the same work and SQL as chkit-py', (_, columns, units, first, digest) => {
     const [before, after] = columns()
     const sql = planDiff([t(before)], [t(after)]).operations.map((op) => op.sql)
