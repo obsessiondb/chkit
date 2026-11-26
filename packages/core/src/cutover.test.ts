@@ -178,12 +178,12 @@ describe('planCutover', () => {
     const nested = [...columns, { name: 'meta', type: 'String' }, { name: 'n', type: 'Nested\u0085(x UInt8)' }] as TableDefinition['columns']
     const start = plan({ oldDef: events({ columns: nested }), newDef: events({ columns: nested, primaryKey: ['user_id', 'id'], orderBy: ['user_id', 'id'] }) }).operations[0]?.sql ?? ''
     const stored = "FROM system.columns WHERE database = 'app' AND table = 'events' AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')"
-    expect(start).toContain(`(SELECT countIf(has(['n'], name)) ${stored}) AS unflattened_nested`)
+    expect(start).toContain(`(SELECT countIf(has(['n'], name) AND startsWith(type, 'Nested(')) ${stored}) AS unflattened_nested`)
     expect(start).toContain("throwIf(max(unflattened_nested) > 0, 'app.events stores a Nested column as one column (created with flatten_nested = 0).")
     expect(start.indexOf('throwIf(max(unflattened_nested)')).toBeLessThan(start.indexOf('throwIf(max(undeclared_columns)'))
     expect(start).toContain(`(SELECT countIf(NOT has(['id', 'user_id', 'payload', 'meta', 'n.x', 'n'], name)) ${stored}) AS undeclared_columns`)
     expect(start).toContain(
-      `((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR (SELECT hasAll(groupArray(name), ['id', 'user_id', 'payload', 'meta']) AND (hasAll(groupArray(name), ['n.x']) OR has(groupArray(name), 'n')) ${stored})) AS declared_columns`
+      `((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR (SELECT hasAll(groupArray(name), ['id', 'user_id', 'payload', 'meta']) AND (hasAll(groupArray(name), ['n.x']) OR countIf(name = 'n' AND startsWith(type, 'Nested(')) > 0) ${stored})) AS declared_columns`
     )
     expect(start).toContain("throwIf(max(undeclared_columns) > 0, 'app.events stores a column that the schema does not declare")
     expect(start).toContain("throwIf(min(declared_columns) = 0, 'app.events lacks a column that the schema declares")
@@ -246,6 +246,30 @@ describe('planCutover', () => {
     }))).toEqual(['Cannot cut over app.events: column n is Nested, but chkit cannot read its fields, so the mirror could not list its columns.'])
   })
 
+  test.each<Pick<TableDefinition['columns'][number], 'defaultKind' | 'default'>>([
+    { defaultKind: 'ALIAS', default: { expression: 'arrayZip([toString(id)])' } },
+    { defaultKind: 'MATERIALIZED', default: { expression: 'arrayZip([toString(id)])' } },
+    { defaultKind: 'EPHEMERAL' },
+    { defaultKind: 'DEFAULT' },
+    { default: '' },
+  ])('refuses a Nested column with default attributes %o', (attributes) => {
+    const nested = [...columns, { name: 'n', type: 'Nested(x String)', ...attributes }]
+    const oldDef = { ...OLD, columns: nested }
+    const newDef = { ...NEW, columns: nested }
+    for (const input of [{ oldDef }, { newDef }, { oldDef, newDef }]) {
+      expect(messages(() => plan(input))).toEqual([
+        'Cannot cut over app.events: column n is Nested with a DEFAULT, MATERIALIZED, ALIAS or EPHEMERAL expression; a cutover copies only plain Nested columns.',
+      ])
+    }
+  })
+
+  test('checks the live type when a flattened leaf shares a declared Nested name', () => {
+    const nested = [...columns, { name: 'a', type: 'Nested(b UInt64)' }, { name: 'a.b', type: 'Nested(c UInt64)' }]
+    const start = plan({ oldDef: { ...OLD, columns: nested }, newDef: { ...NEW, columns: nested } }).operations[0]?.sql
+    expect(start).toContain("countIf(has(['a', 'a.b'], name) AND startsWith(type, 'Nested('))")
+    expect(start).toContain("hasAll(groupArray(name), ['a.b.c']) OR countIf(name = 'a.b' AND startsWith(type, 'Nested(')) > 0")
+  })
+
   test('refuses stored leaf overlaps with different declarations in either direction', () => {
     const nested = [...columns, { name: 'n', type: 'Nested(x UInt64, y UInt64)' }]
     const plain = [...columns, { name: 'n.x', type: 'Array(UInt64)' }, { name: 'n.y', type: 'Array(UInt64)' }]
@@ -277,7 +301,7 @@ describe('planCutover', () => {
     const engine = 'ReplicatedMergeTree'
     const { names, operations } = plan({ oldDef: { ...OLD, columns: nested, engine }, newDef: { ...NEW, engine }, options: { cluster: 'c2' } })
     const sqlOf = (name: string) => operations.find((op) => op.key === `table:app.${name}`)?.sql
-    expect(operations[0]?.sql).toContain("countIf(has(['n'], name))")
+    expect(operations[0]?.sql).toContain("countIf(has(['n'], name) AND startsWith(type, 'Nested('))")
     expect(operations[0]?.sql).toContain('AS flatten_nested_version')
     expect(operations[0]?.sql).toContain("FROM clusterAllReplicas('c2', view(")
     expect(sqlOf(names.snapshot)).toContain('flatten_nested = 1\nCOMMENT ')

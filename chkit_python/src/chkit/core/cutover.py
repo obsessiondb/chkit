@@ -257,6 +257,7 @@ def plan_cutover(
     declared_columns = _assert_cutover_supported(
         old_def=old_canonical,
         new_def=new_canonical,
+        input_columns=[*old_def.columns, *new_def.columns],
         request=request,
         options=options,
         definitions=definitions,
@@ -1159,6 +1160,7 @@ def _assert_cutover_supported(  # noqa: PLR0912, PLR0915
     *,
     old_def: TableDefinition,
     new_def: TableDefinition,
+    input_columns: list[ColumnDefinition],
     request: CutoverRequest,
     options: CutoverOptions,
     definitions: list[SchemaDefinition],
@@ -1246,6 +1248,19 @@ def _assert_cutover_supported(  # noqa: PLR0912, PLR0915
             "one by engine name, sorting key, primary key, partition key and read-only "
             "settings (such as index_granularity), so at least one of them must change."
         )
+
+    # Canonicalization removes an explicit DEFAULT kind.
+    defaulted_nested = dict.fromkeys(
+        js_trim(column.name)
+        for column in input_columns
+        if (column.default_kind is not None or column.default is not None)
+        and _is_nested_type(column.type)
+    )
+    problems.extend(
+        f"column {name} is Nested with a DEFAULT, MATERIALIZED, ALIAS or EPHEMERAL expression; "
+        "a cutover copies only plain Nested columns."
+        for name in defaulted_nested
+    )
 
     unreadable_nested = dict.fromkeys(
         column.name
@@ -1486,7 +1501,8 @@ def _column_checks(
     copied_nested = [column for column in stored_nested if column[0] in columns]
     copied_nested_names = [column[0] for column in copied_nested]
     unflattened_nested = (
-        f"(SELECT countIf(has({literals([column[0] for column in stored_nested])}, name)) "
+        f"(SELECT countIf(has({literals([column[0] for column in stored_nested])}, name) "
+        "AND startsWith(type, 'Nested(')) "
         f"{stored_columns}) AS unflattened_nested"
         if stored_nested
         else None
@@ -1494,7 +1510,7 @@ def _column_checks(
     has_nested = "".join(
         f" AND (hasAll(groupArray(name), "
         f"{literals([f'{name}.{field_name}' for field_name, _ in fields])}) OR "
-        f"has(groupArray(name), {_string_literal(name)}))"
+        f"countIf(name = {_string_literal(name)} AND startsWith(type, 'Nested(')) > 0)"
         for name, fields, _ in copied_nested
     )
     plain_leaves = [

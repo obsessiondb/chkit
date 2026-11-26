@@ -428,7 +428,10 @@ def test_checks_the_table_stores_the_old_columns_no_more_and_no_fewer() -> None:
         "FROM system.columns WHERE database = 'app' AND table = 'events' "
         "AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')"
     )
-    assert f"(SELECT countIf(has(['n'], name)) {stored}) AS unflattened_nested" in start
+    assert (
+        "(SELECT countIf(has(['n'], name) AND startsWith(type, 'Nested(')) "
+        f"{stored}) AS unflattened_nested"
+    ) in start
     assert (
         "throwIf(max(unflattened_nested) > 0, 'app.events stores a Nested column as one "
         "column (created with flatten_nested = 0)."
@@ -443,7 +446,7 @@ def test_checks_the_table_stores_the_old_columns_no_more_and_no_fewer() -> None:
     assert (
         "((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR "
         "(SELECT hasAll(groupArray(name), ['id', 'user_id', 'payload', 'meta']) AND "
-        "(hasAll(groupArray(name), ['n.x']) OR has(groupArray(name), 'n')) "
+        "(hasAll(groupArray(name), ['n.x']) OR countIf(name = 'n' AND startsWith(type, 'Nested(')) > 0) "
         f"{stored})) AS declared_columns"
     ) in start
     assert (
@@ -545,6 +548,42 @@ def test_refuses_a_nested_column_whose_fields_cannot_be_read(type_: str) -> None
     ]
 
 
+@pytest.mark.parametrize(
+    "attributes",
+    [
+        {"defaultKind": "ALIAS", "default": {"expression": "arrayZip([toString(id)])"}},
+        {"defaultKind": "MATERIALIZED", "default": {"expression": "arrayZip([toString(id)])"}},
+        {"defaultKind": "EPHEMERAL"},
+        {"defaultKind": "DEFAULT"},
+        {"default": ""},
+    ],
+)
+def test_refuses_a_nested_column_with_default_attributes(attributes: dict[str, object]) -> None:
+    nested = [*COLUMNS, {"name": "n", "type": "Nested(x String)", **attributes}]
+    old_def = events(["id"], columns=nested)
+    new_def = events(["user_id", "id"], columns=nested)
+    for old, new in ((old_def, NEW), (OLD, new_def), (old_def, new_def)):
+        assert messages(old_def=old, new_def=new) == [
+            "Cannot cut over app.events: column n is Nested with a DEFAULT, MATERIALIZED, "
+            "ALIAS or EPHEMERAL expression; a cutover copies only plain Nested columns."
+        ]
+
+
+def test_checks_the_live_type_when_a_flattened_leaf_shares_a_declared_nested_name() -> None:
+    nested = [
+        *COLUMNS,
+        {"name": "a", "type": "Nested(b UInt64)"},
+        {"name": "a.b", "type": "Nested(c UInt64)"},
+    ]
+    start = plan(
+        old_def=events(["id"], columns=nested), new_def=events(["user_id", "id"], columns=nested)
+    ).operations[0].sql
+    assert "countIf(has(['a', 'a.b'], name) AND startsWith(type, 'Nested('))" in start
+    assert (
+        "hasAll(groupArray(name), ['a.b.c']) OR countIf(name = 'a.b' AND startsWith(type, 'Nested(')) > 0"
+    ) in start
+
+
 @pytest.mark.parametrize("reverse", [False, True])
 def test_refuses_stored_leaf_overlaps_with_different_declarations(reverse: bool) -> None:
     nested = [*COLUMNS, {"name": "n", "type": "Nested(x UInt64, y UInt64)"}]
@@ -598,7 +637,7 @@ def test_checks_uncopied_old_nested_and_pins_only_a_snapshot_from_the_definition
     )
     creates = {op.key: op.sql for op in cutover.operations if op.type == "create_table"}
     start = cutover.operations[0].sql
-    assert "countIf(has(['n'], name))" in start
+    assert "countIf(has(['n'], name) AND startsWith(type, 'Nested('))" in start
     assert "AS flatten_nested_version" in start
     assert "FROM clusterAllReplicas('c2', view(" in start
     assert "flatten_nested = 1\nCOMMENT " in creates[f"table:app.{cutover.names.snapshot}"]

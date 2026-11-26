@@ -205,7 +205,10 @@ export function planCutover(input: {
   const oldDef = canonicalTable(input.oldDef, indexGranularity)
   const newDef = canonicalTable(input.newDef, indexGranularity)
   const names = cutoverNames(request.table, options.stamp)
-  const declaredColumns = assertCutoverSupported({ oldDef, newDef, request, options, definitions: input.definitions, names })
+  const declaredColumns = assertCutoverSupported({
+    oldDef, newDef, request, options, definitions: input.definitions, names,
+    inputColumns: [...input.oldDef.columns, ...input.newDef.columns],
+  })
   const copied = oldDef.columns.filter((column) => declaredColumns.includes(column.name))
   const columns = copied.flatMap((column) => columnLeaves(column).map((leaf) => leaf.name))
   const snapshotFromSchema = snapshotFromDefinition(oldDef)
@@ -549,10 +552,10 @@ function createCutoverSql(input: {
   const storedNested = nested.filter((column) => column.stored)
   const copiedNested = storedNested.filter((column) => copiedColumns.includes(column.name))
   const unflattenedNested = storedNested.length > 0
-    ? `(SELECT countIf(has(${literals(storedNested.map((column) => column.name))}, name)) ${storedColumns}) AS unflattened_nested`
+    ? `(SELECT countIf(has(${literals(storedNested.map((column) => column.name))}, name) AND startsWith(type, 'Nested(')) ${storedColumns}) AS unflattened_nested`
     : undefined
   const hasNested = copiedNested.map(
-    (column) => ` AND (hasAll(groupArray(name), ${literals(column.fields.map((field) => `${column.name}.${field.name}`))}) OR has(groupArray(name), ${stringLiteral(column.name)}))`
+    (column) => ` AND (hasAll(groupArray(name), ${literals(column.fields.map((field) => `${column.name}.${field.name}`))}) OR countIf(name = ${stringLiteral(column.name)} AND startsWith(type, 'Nested(')) > 0)`
   )
   const plainLeaves = stored.filter((leaf) => copiedColumns.includes(leaf.column) && !copiedNested.some((column) => column.name === leaf.column))
   const declaredColumns = `(${tableCount(table)} = 0 OR (SELECT hasAll(groupArray(name), ${literals(plainLeaves.map((leaf) => leaf.name))})${hasNested.join('')} ${storedColumns})) AS declared_columns`
@@ -775,12 +778,13 @@ function createCutoverSql(input: {
 function assertCutoverSupported(input: {
   oldDef: TableDefinition
   newDef: TableDefinition
+  inputColumns: ColumnDefinition[]
   request: CutoverRequest
   options: CutoverOptions
   definitions: SchemaDefinition[]
   names: CutoverNames
 }): string[] {
-  const { oldDef, newDef, request, options, definitions, names } = input
+  const { oldDef, newDef, inputColumns, request, options, definitions, names } = input
   const target = `${request.database}.${request.table}`
   const problems: string[] = []
 
@@ -847,6 +851,14 @@ function assertCutoverSupported(input: {
     problems.push(
       'only the engine arguments change. The cutover tells the old table from the new one by engine name, sorting key, primary key, partition key and read-only settings (such as index_granularity), so at least one of them must change.'
     )
+  }
+
+  // Canonicalization removes an explicit DEFAULT kind.
+  const defaultedNested = new Set(inputColumns
+    .filter((column) => (column.defaultKind !== undefined || column.default !== undefined) && isNestedType(column.type))
+    .map((column) => column.name.trim()))
+  for (const name of defaultedNested) {
+    problems.push(`column ${name} is Nested with a DEFAULT, MATERIALIZED, ALIAS or EPHEMERAL expression; a cutover copies only plain Nested columns.`)
   }
 
   const unreadableNested = new Set([...oldDef.columns, ...newDef.columns]
