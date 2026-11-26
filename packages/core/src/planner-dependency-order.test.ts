@@ -2047,10 +2047,11 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
   // A bare NULL is a literal even when a column is named `null`, so these
   // tables close no cycle: the ALIAS `b` runs after `a` changes. Only a
   // quoted `null` reads the column. In the first plan `a` changes its type
-  // and the old DEFAULT of `z` reads it, so `z` changes first (#814); read as
-  // a column, `null` would close a temporary cycle, and the plan would keep
-  // its sorted order. In the second plan no column changes its type, so none
-  // is ordered by one.
+  // and the old DEFAULT of `z` reads it, so `z` changes first (#814). Read as
+  // a column, `null`, whose type changes too, would have to change before
+  // `a`: that reorders the type changes, so the plan would keep its sorted
+  // order. In the second plan no column changes its type, so none is
+  // ordered by one.
   test('a bare NULL is no read of a column named null', () => {
     expect(
       orderOf(
