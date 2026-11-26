@@ -1164,7 +1164,7 @@ _WHILE_PROCESSING_REASON = (
     "that fails while it runs can leave some of its writes applied (parts of an INSERT ... "
     "SELECT, a DDL that ran on some hosts)"
 )
-_BEFORE_START_EFFECTS_REASON = (
+BEFORE_START_EFFECTS_REASON = (
     "the server reports it was rejected before it started (ExceptionBeforeStart), but a "
     "statement other than a SELECT or an INSERT can apply effects before that (an ALTER's "
     "mutation keeps running in system.mutations, or applied to some partitions before one "
@@ -1266,7 +1266,7 @@ def resolve_recorded_attempt(  # noqa: PLR0911, PLR0912 - one return per outcome
                 return RecordedAttempt(kind="unknown", reason=_WHILE_PROCESSING_REASON)
             if sql is not None and rejection_runs_nothing(sql):
                 return RecordedAttempt(kind="failed", error=status.error or "<unknown>")
-            return RecordedAttempt(kind="unknown", reason=_BEFORE_START_EFFECTS_REASON)
+            return RecordedAttempt(kind="unknown", reason=BEFORE_START_EFFECTS_REASON)
         if not prepared:
             return RecordedAttempt(kind="unknown", reason=_NO_ENTRY_REASON)
         # A prepared attempt with nothing of its id on the server was never
@@ -1420,10 +1420,7 @@ def _failed_while_running_error(
         f"Async migration step {input_.operation_type} (statement "
         f"{input_.statement_index + 1} of {input_.migration_name}, query_id {query_id}) "
         f"{what}, so chkit does not run it, or its before-retry SQL, again. Check in "
-        "ClickHouse what the statement applied. Then reconcile every statement of "
-        f"{input_.migration_name} "
-        "that already ran, since an abandon runs the migration again from statement 1, run "
-        f"chkit migrate --apply --abandon {input_.migration_name}, and apply again."
+        f"ClickHouse what the statement applied. {_record_outcome_advice(input_.migration_name)}"
     )
     return MigrateError("async_outcome_unknown", msg)
 
@@ -1440,12 +1437,23 @@ def outcome_unknown_error(
         f"{statement_index + 1} of {migration_name}, query_id {query_id}): "
         "the journal records an attempt of it and no replica runs it, but chkit cannot "
         f"tell whether it finished: {reason}. Nothing was submitted and no before-retry SQL "
-        "ran. Check in ClickHouse whether the statement's rows reached its target. Then "
-        f"reconcile every statement of {migration_name} that already ran, since an abandon "
-        "runs the migration again from statement 1, run chkit migrate --apply --abandon "
-        f"{migration_name}, and apply again."
+        "ran. Check in ClickHouse whether the statement's rows reached its target. "
+        f"{_record_outcome_advice(migration_name)}"
     )
     return MigrateError("async_outcome_unknown", msg)
+
+
+def _record_outcome_advice(migration_name: str) -> str:
+    """How the operator records an attempt's outcome once they checked it."""
+    return (
+        f"Then record what you found: chkit migrate --apply --mark-applied {migration_name} "
+        "if it applied all of its writes, or chkit migrate --apply --mark-not-applied "
+        f"{migration_name} once nothing it applied is left (its before-retry SQL runs before "
+        "it is submitted again), and apply again; the statements recorded as completed do "
+        f"not run again. Or reconcile every statement of {migration_name} that already ran "
+        f"and run chkit migrate --apply --abandon {migration_name}, which runs the migration "
+        "again from statement 1."
+    )
 
 
 def _journal_time(value: str) -> datetime:
