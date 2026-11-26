@@ -238,6 +238,20 @@ describe('planCutover', () => {
     expect(fromDefinition).not.toContain('no_ttl')
   })
 
+  test('checks on every replica that ClickHouse is 24.9 or later for both snapshot paths', () => {
+    const engine = 'ReplicatedMergeTree'
+    const asTable = plan().operations[0]?.sql ?? ''
+    const fromDefinition = plan({ oldDef: { ...OLD, engine }, newDef: { ...NEW, engine }, options: { cluster: 'c2' } }).operations[0]?.sql ?? ''
+    const version = "toUInt32OrZero(splitByChar('.', version())[1]) * 100 + toUInt32OrZero(splitByChar('.', version())[2]) >= 2409 AS supported_version"
+    const guard = "throwIf(min(supported_version) = 0, 'A cutover needs ClickHouse 24.9 or later on every replica: an older server cannot attach the table\\'s parts to the snapshot (ATTACH PARTITION ALL FROM). Nothing was created or copied.')"
+
+    expect(asTable).toContain(`FROM (SELECT ${version},`)
+    expect(fromDefinition).toContain(`FROM clusterAllReplicas('c2', view(SELECT ${version},`)
+    for (const start of [asTable, fromDefinition]) {
+      expect(start).toStartWith(`SELECT\n  ${guard},\n  throwIf(min(atomic) = 0,`)
+    }
+  })
+
   test('checks on every replica that the table stores the engine of the old definition, before it creates anything', () => {
     // AS copies the table's engine: a SummingMergeTree snapshot would merge rows away before the copy.
     // On ObsessionDB, engine is SharedMergeTree for every Shared engine; engine_full names it.
