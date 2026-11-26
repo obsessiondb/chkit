@@ -38,5 +38,5 @@ Schema management defines the destination structure. chkit Sync adds readers and
 
 - [Scheduling and recovery](/api-sync/operations/): tags, retries, budgets, backfills, and monitoring.
 - [Test a source](/api-sync/testing/): exercise checkpoints and recovery without a live database.
-- [Plugin reference](/plugins/ingest/): configuration and command summary.
+- [Plugin reference](/plugins/sync/): configuration and command summary.
 - [Sync CLI](/sync/cli/): discover templates, install providers, and operate streams.

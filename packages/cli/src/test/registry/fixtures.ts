@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
 import { buildRegistry } from '../../registry/build.js'
-import { CATALOG_SCHEMA_URL, ITEM_SCHEMA_URL, type RegistryItem } from '../../registry/model.js'
+import { CATALOG_SCHEMA_URL, ITEM_SCHEMA_URL, type RegistryItem, type SyncPluginPackage } from '../../registry/model.js'
 import { CLI_VERSION } from '../../runtime/version.js'
 
 // Keep successful installation fixtures compatible after release PRs bump the CLI.
@@ -12,7 +12,7 @@ export const FIXTURE_VERSION = CLI_VERSION
 export function fixtureTracker() {
   const roots: string[] = []
   return {
-    async create(withTests = false) {
+    async create(withTests = false, pluginPackage: SyncPluginPackage = '@chkit/plugin-sync') {
       const root = await mkdtemp(join(tmpdir(), 'chkit-registry-test-'))
       roots.push(root)
       const source = join(root, 'source')
@@ -29,7 +29,7 @@ export function fixtureTracker() {
   kind: 'ingest_pipeline', id: 'fixture', tags: ['provider:fixture'], streams: [],
   maxStreams: 1, maxFetches: 1, maxLoads: 1,
 }\n`)
-      const item = sourceItem()
+      const item = sourceItem(pluginPackage)
       if (withTests) {
         item.devDependencies = ['@types/bun@^1.3.0']
         for (const file of ['fixtures.ts', 'fixture.test.ts']) {
@@ -65,7 +65,7 @@ export async function writeManifest(path: string, item: RegistryItem): Promise<v
 
 /** Real resolvable package files for installer readiness checks, without fetching npm. */
 export async function installFixtureDependencies(cwd: string): Promise<void> {
-  for (const name of ['chkit', '@chkit/core', '@chkit/plugin-ingest']) {
+  for (const name of ['chkit', '@chkit/core', '@chkit/plugin-sync']) {
     const directory = join(cwd, 'node_modules', name)
     await write(join(directory, 'package.json'), JSON.stringify({
       name, version: FIXTURE_VERSION, type: 'module', main: './index.js',
@@ -75,11 +75,11 @@ export async function installFixtureDependencies(cwd: string): Promise<void> {
   }
 }
 
-function sourceItem(): RegistryItem {
+function sourceItem(pluginPackage: SyncPluginPackage): RegistryItem {
   return {
     $schema: ITEM_SCHEMA_URL,
     name: 'fixture', type: 'registry:item', title: 'Fixture', description: 'A provider fixture',
-    dependencies: [`@chkit/core@${FIXTURE_VERSION}`, `@chkit/plugin-ingest@${FIXTURE_VERSION}`],
+    dependencies: [`@chkit/core@${FIXTURE_VERSION}`, `${pluginPackage}@${FIXTURE_VERSION}`],
     files: ['index.ts', 'schema.ts', 'pipeline.ts'].map((file) => ({ path: `fixture/${file}`, target: `src/integrations/fixture/${file}`, type: 'registry:file' })),
     meta: { chkit: {
       formatVersion: 1, version: '1.0.0', language: 'typescript', license: 'MIT',

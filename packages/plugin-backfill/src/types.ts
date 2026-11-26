@@ -77,6 +77,9 @@ export interface BackfillRunState {
   completedAt?: string
   lastError?: string
   progress: BackfillProgress
+  /** `CHECKPOINT_VERSION` of the format `progress` is in; unset when an
+   *  older release wrote it (#765). */
+  checkpointVersion?: number
 }
 
 /**

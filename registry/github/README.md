@@ -13,7 +13,7 @@ bunx chkit check
 bunx chkit generate --name add_github
 # Review the migration before applying it.
 bunx chkit migrate --apply
-bunx chkit ingest run --tag provider:github
+bunx chkit sync run --tag provider:github
 ```
 
 ## Pipeline and resources
@@ -36,8 +36,8 @@ The default repository is `obsessiondb/chkit`, so its stream IDs use `github.<re
 Select a resource without running any other stream:
 
 ```sh
-bunx chkit ingest run --tag provider:github --tag repository:obsessiondb/chkit --tag resource:pull_request_commits
-bunx chkit ingest run --tag provider:github --tag repository:obsessiondb/chkit --tag resource:pull_request_comments
+bunx chkit sync run --tag provider:github --tag repository:obsessiondb/chkit --tag resource:pull_request_commits
+bunx chkit sync run --tag provider:github --tag repository:obsessiondb/chkit --tag resource:pull_request_comments
 ```
 
 Repeated tags use AND matching. The default `maxStreams: 1` executes selected streams sequentially; filtered runs give resources separate schedules and execution budgets. Stream order does not establish dependencies. A child reader discovers its own accessible parents through GitHub, even when the issues or pull-requests stream has never run. Individual issues and PRs are records inside their resource stream.
@@ -65,8 +65,8 @@ Pull-request metadata, reviews, PR commits, and stargazers use the library's `fu
 Deleted records, removed stars, and commits no longer present after force-pushes remain stored. Pagination over live results is not a source snapshot; periodic historical replay refreshes older timestamp-selected observations and changes beyond overlap:
 
 ```sh
-bunx chkit ingest run --tag provider:github --tag resource:issue_comments --backfill reconcile-2026-10-05 --from 2008-01-01
-bunx chkit ingest status --tag provider:github --json
+bunx chkit sync run --tag provider:github --tag resource:issue_comments --backfill reconcile-2026-10-05 --from 2008-01-01
+bunx chkit sync status --tag provider:github --json
 ```
 
 Use a new backfill ID for each reconciliation. Historical replay reads current observations rather than reconstructing old versions. Full-sync resources ignore date bounds. A failed stream can have published some rows without completing its journal progress; it does not move another stream's checkpoint. Run one ingestion process per ClickHouse target at a time.

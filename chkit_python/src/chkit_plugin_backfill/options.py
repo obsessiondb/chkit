@@ -144,6 +144,18 @@ class PluginConfig(BaseModel):
         default=None, alias="insertSettings"
     )
 
+    @field_validator("insert_settings")
+    @classmethod
+    def _finite_insert_settings(
+        cls, value: dict[str, str | int | float | bool] | None
+    ) -> dict[str, str | int | float | bool] | None:
+        # TS zod numbers refuse NaN and infinities; so does chkit-py.
+        for key, item in (value or {}).items():
+            if isinstance(item, float) and not math.isfinite(item):
+                msg = f"insertSettings.{key} must be a finite number"
+                raise ValueError(msg)
+        return value
+
     # TS PluginConfigSchema is non-strict zod: unknown keys are stripped, not
     # rejected ("validated softly at load time").
     model_config = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
@@ -199,6 +211,7 @@ class RunOptions(BaseModel):
 
 class ResumeOptions(RunOptions):
     replay_failed: bool = Field(default=False, alias="replayFailed")
+    accept_unknown: bool = Field(default=False, alias="acceptUnknown")
 
 
 class StatusOptions(BaseModel):
@@ -287,6 +300,14 @@ RESUME_FLAGS: list[dict[str, Any]] = [
         "type": "boolean",
         "description": "Re-execute failed chunks",
     },
+    {
+        "name": "--accept-unknown",
+        "type": "boolean",
+        "description": (
+            "Replay chunks whose last attempt has an unknown outcome"
+            " (can write their rows twice)"
+        ),
+    },
 ]
 
 PLAN_ID_FLAGS: list[dict[str, Any]] = [
@@ -357,6 +378,7 @@ RUN_FLAG_MAP: dict[str, dict[str, Any]] = {
 RESUME_FLAG_MAP: dict[str, dict[str, Any]] = {
     **RUN_FLAG_MAP,
     "--replay-failed": {"key": "replay_failed"},
+    "--accept-unknown": {"key": "accept_unknown"},
 }
 
 PLAN_ID_FLAG_MAP: dict[str, dict[str, Any]] = {

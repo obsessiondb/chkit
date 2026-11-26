@@ -5,7 +5,7 @@ import { z } from 'zod'
 
 import { detectPackageManager, type PackageManager } from '../runtime/deps.js'
 import { readOptional } from './files.js'
-import { requireDependency, type RegistryItem } from './model.js'
+import { requireDependency, SYNC_PLUGIN_PACKAGES, type RegistryItem } from './model.js'
 
 const manifestSchema = z.object({
   name: z.string().optional(),
@@ -38,7 +38,9 @@ export async function planDependencies(input: { cwd: string; item: RegistryItem;
   let installed = true
   for (const spec of desired) {
     const { name, range } = requireDependency(spec)
-    const compatibility = name === '@chkit/plugin-ingest' ? meta.ingest : name === 'chkit' || name === '@chkit/core' ? meta.chkit : undefined
+    const compatibility = SYNC_PLUGIN_PACKAGES.some((pluginPackage) => pluginPackage === name)
+      ? meta.ingest
+      : name === 'chkit' || name === '@chkit/core' ? meta.chkit : undefined
     if (compatibility && !subset(range, compatibility, versionOptions)) throw new Error(`Dependency ${spec} is outside the template compatibility range ${compatibility}`)
     const existing = parsed.dependencies?.[name] ?? parsed.devDependencies?.[name]
     const required = name === 'chkit' && !hasExplicitCli ? meta.chkit : range

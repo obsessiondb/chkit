@@ -44,6 +44,8 @@ from typing import Literal, TypeVar
 
 from chkit import __version__
 from chkit.cli.commands.migrate_errors import MigrateError, in_progress_checksum_mismatch_error
+from chkit.cli.commands.migrate_interrupt import as_cleanup
+from chkit.cli.commands.migrate_lock import async_without_lock_accepted, migrate_lock_disabled
 from chkit.cli.commands.migrate_query_intents import QueryContext, QueryTracker
 from chkit.cli.commands.migrate_recovery import (
     assert_completed_statement,
@@ -282,6 +284,9 @@ class _Submission:
     up on it (``abandon``) refuses both, and waits until a send that started
     connecting was stopped, or one writing was written or failed: the request
     is written before the run stops, or never started.
+
+    It is created before its thread starts (``start``), so a run stopped while
+    the thread starts can already give it up (#793).
     """
 
     def __init__(self, submit: Callable[[_Submission], object]) -> None:
@@ -290,11 +295,17 @@ class _Submission:
         self._cancelled = False
         # idle, connecting, writing, sent, done
         self._state = "idle"
+        # Whether a write of the request was let through.
+        self._written = False
+        # What a completed abandon returned, so a later one does not wait again.
+        self._excluded: bool | None = None
         # A daemon, so an interrupted run exits while the request is open;
         # the query keeps running and a re-run attaches to it.
         self._thread = threading.Thread(
             target=self._run, args=(submit,), name=SUBMIT_THREAD_NAME, daemon=True
         )
+
+    def start(self) -> None:
         self._thread.start()
 
     def _run(self, submit: Callable[[_Submission], object]) -> None:
@@ -321,6 +332,7 @@ class _Submission:
                 msg = "The run stopped without an outcome; the submit was not sent"
                 raise RuntimeError(msg)
             self._state = "writing"
+            self._written = True
 
     def end_write(self) -> None:
         """The request is written, or its write failed."""
@@ -348,15 +360,26 @@ class _Submission:
         writes: it is waited for up to the connect timeout and a margin. A
         request whose bytes are being written keeps the run, and its migrate
         lock, until its write completed or failed, however long that takes;
-        the transport's write timeout bounds it.
+        the transport's write timeout bounds it. Once it returned, a later
+        call returns the same answer at once (#793); an interrupted one waits
+        again.
         """
         with self._cond:
             self._cancelled = True
+            if self._excluded is not None:
+                return self._excluded
             excluded = self._cond.wait_for(
                 lambda: self._state != "connecting", SUBMIT_CONNECT_TIMEOUT_SECONDS + 5
             )
             self._cond.wait_for(lambda: self._state != "writing")
+            self._excluded = excluded
             return excluded
+
+    def abandon_unsent(self) -> bool:
+        """Give up on the request; return whether it was, and will be, never written."""
+        excluded = self.abandon()
+        with self._cond:
+            return excluded and not self._written
 
     @property
     def abandoned(self) -> bool:
@@ -516,35 +539,85 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:  # noqa:
                 ),
                 attempt_query_id,
             )
+        poll_after_time = _query_log_lower_bound(server_now_ms)
+        # Polling decides the outcome, as in TS: the submit error is raised only
+        # when the server never saw the query, so it is not logged here (#561).
+        submission = _Submission(
+            lambda before_send: client.submit(
+                input_.sql,
+                query_id=attempt_query_id,
+                settings=async_submit_settings(input_.sql, input_.settings),
+                before_send=before_send,
+            )
+        )
     except BaseException as error:
         back_to_prepared(error)
         raise
-    poll_after_time = _query_log_lower_bound(server_now_ms)
-    # Polling decides the outcome, as in TS: the submit error is raised only
-    # when the server never saw the query, so it is not logged here (#561).
-    submission = _Submission(
-        lambda before_send: client.submit(
-            input_.sql,
-            query_id=attempt_query_id,
-            settings=async_submit_settings(input_.sql, input_.settings),
-            before_send=before_send,
-        )
-    )
 
-    return _poll_until_terminal(
-        input_=input_,
+    return _start_and_poll(
+        input_,
+        submission,
+        back_to_prepared,
         migration_state=state_after_start,
         query_id=attempt_query_id,
         poll_after_time=poll_after_time,
-        submission=submission,
         started_at=started_at,
-        fingerprint=input_.fingerprint,
     )
+
+
+def _start_and_poll(
+    input_: AsyncApplyInput,
+    submission: _Submission,
+    back_to_prepared: Callable[[BaseException], None],
+    *,
+    migration_state: MigrationRowState | None,
+    query_id: str,
+    poll_after_time: str,
+    started_at: str,
+) -> AsyncApplyResult:
+    """Start the submit and poll until terminal.
+
+    From the thread's start on, every stop, Ctrl-C included, gives the submit
+    up before the migrate lock is released (#793). A stop before polling
+    whose request was never written puts the record back to prepared; once
+    polling started, the fenced record stays, as in TS.
+    """
+    polling = False
+    try:
+        submission.start()
+        polling = True
+        return _poll_until_terminal(
+            input_=input_,
+            migration_state=migration_state,
+            query_id=query_id,
+            poll_after_time=poll_after_time,
+            submission=submission,
+            started_at=started_at,
+            fingerprint=input_.fingerprint,
+        )
+    except BaseException as error:
+        if submission.abandon_unsent() and not polling:
+            back_to_prepared(error)
+        raise
 
 
 def _assert_lock_held(input_: AsyncApplyInput) -> None:
     """Two runs without the lock could both submit the statement, each under an
     id of its own (#767). The run stops before it; the next one takes the lock."""
+    # A run with the lock turned off holds none either, unless the user
+    # accepts the risk (#810).
+    if migrate_lock_disabled() and not async_without_lock_accepted():
+        msg = (
+            f"Async migration step {input_.operation_type} (statement "
+            f"{input_.statement_index + 1} of {input_.migration_name}) was not submitted: "
+            "CHKIT_MIGRATE_LOCK is off, so this run holds no migrate lock, and two runs "
+            "without the lock could both submit it. The statements before it are "
+            "recorded. Unset CHKIT_MIGRATE_LOCK and run chkit migrate --apply again to "
+            "submit it under the lock. When the lock cannot work on this target "
+            "(migrate_lock_unverifiable) and no other migrate runs against it, set "
+            "CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK=1 to submit it without the lock."
+        )
+        raise MigrateError("async_needs_lock", msg)
     if not input_.lockless_bootstrap:
         return
     msg = (
@@ -599,9 +672,10 @@ def _record_attempt(
 
     def back_to_prepared(error: BaseException) -> None:
         # Not sent: put the record back to prepared, so a re-run runs it
-        # again without an abandon (#767). Ctrl-C included.
+        # again without an abandon (#767). Ctrl-C included: it is cleanup (#816).
         try:
-            write_attempt(PREPARED_RECORD_MARKER)
+            with as_cleanup():
+                write_attempt(PREPARED_RECORD_MARKER)
         except Exception as revert_error:
             raise RuntimeError(
                 _not_reverted_message(error, revert_error, input_.migration_name)
@@ -968,6 +1042,8 @@ def _check_in_flight(
     a fresh server has no ``system.query_log`` until its first log flush. With
     one, the check also reads the attempt's outcome from ``system.query_log``
     (#672), and fails like an unreadable replica when query_log cannot be read.
+    A failed outcome lookup leaves the attempt's outcome unknown, so it stops
+    with ``async_outcome_unknown`` (#782).
     """
     try:
         if attempt_after_time is None:
@@ -990,14 +1066,16 @@ def _check_in_flight(
                 "system.query_log to the user; until then a re-run of `chkit migrate "
                 "--apply` stops here too."
             )
-            raise RuntimeError(msg) from error
+            raise MigrateError("async_outcome_unknown", msg) from error
         msg = (
             f"Async migration step {operation_type} (query_id {query_id}): could "
             f"not check whether a previous attempt is still running "
             f"({_describe_error(error)}). Nothing was resubmitted and no "
             f"before-retry SQL ran — re-run `chkit migrate --apply`."
         )
-        raise RuntimeError(msg) from error
+        if attempt_after_time is None:
+            raise RuntimeError(msg) from error
+        raise MigrateError("async_outcome_unknown", msg) from error
 
 
 def _record_finished_attempt(

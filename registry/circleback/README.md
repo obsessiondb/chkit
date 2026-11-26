@@ -11,7 +11,7 @@ bunx chkit check
 bunx chkit generate --name add_circleback
 # Review the migration before applying it.
 bunx chkit migrate --apply
-bunx chkit ingest run --tag provider:circleback
+bunx chkit sync run --tag provider:circleback
 ```
 
 ## Resources
@@ -31,8 +31,8 @@ Provider fields stay under `raw.data`; meeting objects retain provider-returned 
 People perform one [detail GET per listed profile](https://circleback.ai/docs/api/people/get-person), preserving native fields and `externalLinks`; returned IDs must match discovery. Companies similarly request one detail per listed domain. These same-resource reads add to each full run's request cost and require matching access.
 
 ```sh
-bunx chkit ingest run --tag provider:circleback --tag resource:meeting_transcripts
-bunx chkit ingest status --tag provider:circleback --json
+bunx chkit sync run --tag provider:circleback --tag resource:meeting_transcripts
+bunx chkit sync status --tag provider:circleback --json
 ```
 
 ## Full reads and recovery

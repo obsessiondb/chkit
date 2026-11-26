@@ -13,7 +13,13 @@ import pytest
 
 from chkit.cli.journal_store import JournalStore
 from chkit.clickhouse.ddl_propagation import wait_for_ddl_propagation
-from chkit.clickhouse.replicas import ReplicaFanout, resolve_replica_fanout
+from chkit.clickhouse.replicas import (
+    ReplicaAccess,
+    ReplicaFanout,
+    probe_replica_access,
+    resolve_replica_fanout,
+    resolve_replica_fanout_or_raise,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -35,7 +41,7 @@ class _ReplicaClient:
     replicas: int = 2
     queries: list[str] = field(default_factory=list[str])
 
-    def query(self, sql: str) -> _Result:
+    def query(self, sql: str, settings: object = None) -> _Result:
         self.queries.append(sql)
         if "system.one" in sql:
             return _Result([{"replicas": self.replicas}])
@@ -58,7 +64,7 @@ def test_reports_the_replicas_of_a_multi_replica_target_once_per_client() -> Non
 
 def test_falls_back_to_the_single_replica_path_when_the_cluster_cannot_be_queried() -> None:
     class _NoCluster:
-        def query(self, sql: str) -> _Result:
+        def query(self, sql: str, settings: object = None) -> _Result:
             msg = "Requested cluster 'default' not found. (CLUSTER_DOESNT_EXIST)"
             raise RuntimeError(msg)
 
@@ -72,11 +78,66 @@ def test_uses_the_configured_cluster_name() -> None:
     assert "clusterAllReplicas('prod', system.one)" in client.queries[0]
 
 
+class _Failing:
+    def __init__(self, message: str) -> None:
+        self.message = message
+
+    def query(self, sql: str, settings: object = None) -> _Result:
+        raise RuntimeError(self.message)
+
+
+def test_probe_replica_access_reads_every_replica_strictly_and_fans_out_even_to_one_host() -> None:
+    client = _ReplicaClient([1], replicas=1)
+
+    assert probe_replica_access(client) == ReplicaAccess(
+        kind="fanout", fanout=ReplicaFanout(cluster="default", replicas=1)
+    )
+    assert (
+        "FROM clusterAllReplicas('default', system.one) SETTINGS skip_unavailable_shards = 0"
+        in client.queries[0]
+    )
+
+
+def test_probe_replica_access_reports_a_denied_or_missing_cluster_or_no_count_as_partial() -> None:
+    denied = "Code: 497. DB::Exception: Not enough privileges. (ACCESS_DENIED)"
+    missing = "Requested cluster 'default' not found. (CLUSTER_DOESNT_EXIST)"
+
+    class _Empty:
+        def query(self, sql: str, settings: object = None) -> _Result:
+            return _Result([])
+
+    assert probe_replica_access(_Failing(denied)) == ReplicaAccess(
+        kind="partial", reason=f"the user may not read every replica ({denied})"
+    )
+    assert probe_replica_access(_Failing(missing)) == ReplicaAccess(
+        kind="partial", reason="the cluster default does not exist, so not every replica can be read"
+    )
+    assert probe_replica_access(_Empty()) == ReplicaAccess(
+        kind="partial", reason="the replica probe of cluster default returned no replica count"
+    )
+    # The lenient and strict fan-out helpers keep their single-replica fallback.
+    assert resolve_replica_fanout_or_raise(_Failing(denied)) is None
+
+
+# Two replicas, one unavailable: a probe that skipped it would count one host
+# and pass for a single-node target.
+def test_probe_replica_access_raises_when_a_replica_does_not_answer() -> None:
+    class _OneDown:
+        def query(self, sql: str, settings: object = None) -> _Result:
+            if "skip_unavailable_shards = 0" in sql:
+                msg = "Code: 279. DB::NetException: All connection tries failed. (ALL_CONNECTION_TRIES_FAILED)"
+                raise RuntimeError(msg)
+            return _Result([{"replicas": 1}])
+
+    with pytest.raises(RuntimeError, match="ALL_CONNECTION_TRIES_FAILED"):
+        probe_replica_access(_OneDown())
+
+
 @dataclass
 class _ColumnReplicaClient(_ReplicaClient):
     """A column wait reads every replica's definition: one row per replica."""
 
-    def query(self, sql: str) -> _Result:
+    def query(self, sql: str, settings: object = None) -> _Result:
         result = super().query(sql)
         if "system.columns" not in sql:
             return result
@@ -102,7 +163,7 @@ def test_waits_until_every_replica_stores_the_same_dictionary_uuid_after_a_passw
     visible = [{"replicas": 2, "agreed": 0}, {"replicas": 2, "agreed": 1}]
 
     class _Catalog:
-        def query(self, sql: str) -> _Result:
+        def query(self, sql: str, settings: object = None) -> _Result:
             queries.append(sql)
             if "system.one" in sql:
                 return _Result([{"replicas": 2}])
@@ -170,7 +231,7 @@ def test_waits_until_every_replica_lists_the_journal_table_before_reading_it() -
     client = _ReplicaClient([1, 2])
     real_query = client.query
 
-    def query(sql: str) -> _Result:
+    def query(sql: str, settings: object = None) -> _Result:
         if sql.startswith("SELECT currentDatabase()"):
             client.queries.append(sql)
             return _Result([{"database": "default"}])

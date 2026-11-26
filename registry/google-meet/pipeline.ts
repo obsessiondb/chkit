@@ -1,4 +1,4 @@
-import { cursorState, definePipeline, defineStream } from '@chkit/plugin-ingest'
+import { cursorState, definePipeline, defineStream } from '@chkit/plugin-sync'
 
 import { googleMeetConfig, type GoogleMeetReaderConfig } from './config.js'
 import { google_meet_conferencesRaw, google_meet_transcriptsRaw, google_meet_transcriptEntriesRaw, google_meet_participantsRaw, google_meet_participantSessionsRaw, google_meet_recordingsRaw, parseMeetState, readResource, type MeetSelection, type MeetState, type Resource } from './sources/resources.js'

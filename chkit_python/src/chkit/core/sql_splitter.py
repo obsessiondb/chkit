@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from dataclasses import dataclass, field
 
 from chkit.core.sql_lexer import (
+    JS_WHITESPACE,
     SQLToken,
     is_trivia,
     iter_sql_tokens,
@@ -34,7 +36,7 @@ def split_sql_statements(text: str) -> list[str]:
     statement. ``--`` comments are not special here:
     `extract_executable_statements` strips them first.
     """
-    return _split(text, line_comments=True)
+    return [piece.text for piece in _split(text, line_comments=True)]
 
 
 def extract_executable_statements(text: str) -> list[str]:
@@ -45,7 +47,56 @@ def extract_executable_statements(text: str) -> list[str]:
     of comments is not executable: ClickHouse rejects it as "Empty query" (for
     example a block comment after the last statement), so it is dropped.
     """
-    return _extract(text, line_comments=True)
+    return [piece.text for piece in _extract(text, line_comments=True).statements]
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutableStatementWithComments:
+    """An executable statement with the ``--`` comments that come before it (#831)."""
+
+    # The statement as `extract_executable_statements` returns it.
+    sql: str
+    # The ``--`` comments on lines of their own after the previous executable
+    # statement and before this one ends, trimmed, in file order. Each block
+    # holds the comments that only whitespace separates; a comment after SQL
+    # on its line is left out.
+    comment_blocks: list[list[str]] = field(default_factory=list)
+
+
+def extract_executable_statements_with_comments(text: str) -> list[ExecutableStatementWithComments]:
+    """`extract_executable_statements`, with the ``--`` comments of each statement.
+
+    A statement's comments are those between the end of the executable
+    statement before it and its own end. A comment after the last statement
+    belongs to none. Like the split, it reads a ``--`` inside a string, a
+    quoted name, a block comment, a heredoc or a ``//``, ``# `` or ``#!``
+    comment as text.
+    """
+    extracted = _extract(text, line_comments=True)
+    statements = extracted.statements
+    result = [ExecutableStatementWithComments(sql=piece.text) for piece in statements]
+    index = 0
+    # The offset of the last comment kept for the statement at ``index``.
+    previous_offset: int | None = None
+    for comment in extracted.comments:
+        while index < len(statements) and statements[index].end <= comment.offset:
+            index += 1
+            previous_offset = None
+        if index >= len(result):
+            break
+        if not comment.own_line:
+            continue
+        blocks = result[index].comment_blocks
+        if (
+            blocks
+            and previous_offset is not None
+            and js_trim(extracted.stripped[previous_offset : comment.offset]) == ""
+        ):
+            blocks[-1].append(comment.text)
+        else:
+            blocks.append([comment.text])
+        previous_offset = comment.offset
+    return result
 
 
 def extract_legacy_executable_statements(text: str) -> list[str]:
@@ -56,11 +107,34 @@ def extract_legacy_executable_statements(text: str) -> list[str]:
     live. Only for telling whether a migration that an older chkit applied in
     part resumes at the statements it recorded.
     """
-    return _extract(text, line_comments=False)
+    return [piece.text for piece in _extract(text, line_comments=False).statements]
 
 
-def _split(text: str, *, line_comments: bool) -> list[str]:
-    statements: list[str] = []
+@dataclass(frozen=True, slots=True)
+class _Piece:
+    text: str
+    # The offset of the ``;`` that ends it, or the end of its last character.
+    end: int
+
+
+@dataclass(frozen=True, slots=True)
+class _LineComment:
+    # Its offset in the text with ``--`` comments stripped.
+    offset: int
+    text: str
+    # Only whitespace comes before it on its line.
+    own_line: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _Extracted:
+    statements: list[_Piece]
+    comments: list[_LineComment]
+    stripped: str
+
+
+def _split(text: str, *, line_comments: bool) -> list[_Piece]:
+    statements: list[_Piece] = []
     current: list[str] = []
     lexed_end = _lexed_end_at(text)
     openers = _OPENERS_WITH_LINE_COMMENTS if line_comments else _OPENERS
@@ -76,21 +150,25 @@ def _split(text: str, *, line_comments: bool) -> list[str]:
         if ch == ";":
             trimmed = js_trim("".join(current))
             if trimmed:
-                statements.append(f"{trimmed};")
+                statements.append(_Piece(text=f"{trimmed};", end=i))
             current = []
             i += 1
             continue
         current.append(ch)
         i += 1
 
-    tail = js_trim("".join(current))
+    rest = "".join(current)
+    tail = js_trim(rest)
     if tail:
-        statements.append(f"{tail};")
+        trailing = len(rest) - len(rest.rstrip(JS_WHITESPACE))
+        statements.append(_Piece(text=f"{tail};", end=n - trailing))
     return statements
 
 
-def _extract(text: str, *, line_comments: bool) -> list[str]:
+def _extract(text: str, *, line_comments: bool) -> _Extracted:
     stripped: list[str] = []
+    comments: list[_LineComment] = []
+    stripped_len = 0
     lexed_end = _lexed_end_at(text)
     openers = _OPENERS_WITH_LINE_COMMENTS if line_comments else _OPENERS
     i = 0
@@ -100,6 +178,14 @@ def _extract(text: str, *, line_comments: bool) -> list[str]:
         if text.startswith("--", i):
             # The comment runs to the end of the line; the newline stays.
             newline = text.find("\n", i)
+            line_start = text.rfind("\n", 0, i) + 1
+            comments.append(
+                _LineComment(
+                    offset=stripped_len,
+                    text=js_trim(text[i : n if newline == -1 else newline]),
+                    own_line=js_trim(text[line_start:i]) == "",
+                )
+            )
             if newline == -1:
                 break
             i = newline
@@ -107,24 +193,26 @@ def _extract(text: str, *, line_comments: bool) -> list[str]:
         end = _region_end(text, i, lexed_end, line_comments) if ch in openers else None
         if end is not None:
             stripped.append(text[i:end])
+            stripped_len += end - i
             i = end
             continue
         stripped.append(ch)
+        stripped_len += 1
         i += 1
 
     stripped_text = "".join(stripped)
     statements = _split(stripped_text, line_comments=line_comments)
-    executable = [s for s in statements if _has_executable_content(s)]
+    executable = [s for s in statements if _has_executable_content(s.text)]
     if len(executable) == len(statements):
-        return statements
+        return _Extracted(statements, comments, stripped_text)
     # Before #562 the splitter cut a ``#`` or ``//`` comment that holds a ``;``
     # in two; keeping the comment-only piece made ClickHouse reject the file
     # instead of running the commented-out text after the ``;``.
     if not line_comments and any(
         _is_line_comment_with_semicolon(token) for token in tokenize_sql(stripped_text)
     ):
-        return statements
-    return executable
+        return _Extracted(statements, comments, stripped_text)
+    return _Extracted(executable, comments, stripped_text)
 
 
 def _region_end(

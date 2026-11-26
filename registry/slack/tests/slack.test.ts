@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
-import { HttpError, definePipeline, runIngestion, selectStreams, type PipelineDefinition, type ReadContext } from '@chkit/plugin-ingest'
-import { createMemoryDestination, createMemoryJournal, createReadContext } from '@chkit/plugin-ingest/testing'
+import { HttpError, definePipeline, runIngestion, selectStreams, type PipelineDefinition, type ReadContext } from '@chkit/plugin-sync'
+import { createMemoryDestination, createMemoryJournal, createReadContext } from '@chkit/plugin-sync/testing'
 
 import { createSlackClient } from '../client.js'
 import type { SlackReaderConfig } from '../config.js'

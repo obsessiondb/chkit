@@ -1,4 +1,4 @@
-import { paginate, rawTable, type SourceContext } from '@chkit/plugin-ingest'
+import { paginate, rawTable, type SourceContext } from '@chkit/plugin-sync'
 import { z } from 'zod'
 
 import { createGitHubClient, toGitHubRows } from '../client.js'

@@ -33,6 +33,8 @@ from dataclasses import dataclass
 from typing import Any, Protocol, TypeVar
 from urllib.parse import urlparse
 
+from chkit.clickhouse.replicas import resolve_replica_fanout_or_raise
+
 T = TypeVar("T")
 
 
@@ -273,15 +275,13 @@ def wait_for_table_on_every_replica(
 
     ``wait_for_table`` sees one replica per attempt, so on a multi-replica
     service (ObsessionDB) the next request can still land on one that has not
-    applied the CREATE. When the server names a cluster for parallel replicas,
-    count the replicas listing the table through ``clusterAllReplicas`` until
+    applied the CREATE. Discover the service replicas as the production propagation waits do,
+    then count replicas listing the table through ``clusterAllReplicas`` until
     all of them do; otherwise (a single node) ``system.tables`` is enough.
     ``client.query(sql)`` must return an object with ``rows``.
     """
-    cluster_rows = client.query(
-        "SELECT getSetting('cluster_for_parallel_replicas') AS cluster"
-    ).rows
-    cluster = str(cluster_rows[0]["cluster"]) if cluster_rows else ""
+    fanout = resolve_replica_fanout_or_raise(client)
+    cluster = fanout.cluster if fanout else ""
     db = database.replace("\\", "\\\\").replace("'", "\\'")
     name = table.replace("\\", "\\\\").replace("'", "\\'")
     if cluster:

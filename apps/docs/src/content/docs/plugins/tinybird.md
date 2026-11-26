@@ -93,7 +93,7 @@ The command exits `0` when the import ran, also when some objects do not transla
 A datasource with `KAFKA_CONNECTION_NAME` gets the columns Tinybird adds to every Kafka datasource, after its `SCHEMA` columns and in this order: `__value String`, `__topic LowCardinality(String)`, `__partition Int16`, `__offset Int64`, `__timestamp DateTime`, `__key String`, and `__headers Map(String, String)` when `KAFKA_STORE_HEADERS` is `true`. A meta column the `SCHEMA` declares itself is placed and typed the same way, as Tinybird does. Materialized views, copies and endpoints that read these columns translate as usual.
 
 :::caution
-Kafka ingestion is not translated. The table matches Tinybird's, but nothing consumes the topic: set up a ClickHouse Kafka engine table with a materialized view, [`@chkit/plugin-ingest`](/plugins/ingest/), or your own inserts. ObsessionDB has no Kafka CDC yet. The import reports this as a warning on each Kafka datasource and in the head of the generated schema file.
+Kafka ingestion is not translated. The table matches Tinybird's, but nothing consumes the topic: set up a ClickHouse Kafka engine table with a materialized view, [`@chkit/plugin-sync`](/plugins/sync/), or your own inserts. ObsessionDB has no Kafka CDC yet. The import reports this as a warning on each Kafka datasource and in the head of the generated schema file.
 :::
 
 ### Materialized pipes

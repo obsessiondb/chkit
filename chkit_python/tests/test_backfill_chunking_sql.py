@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from chkit_plugin_backfill.chunking.sql import (
     build_chunk_execution_sql,
+    build_where_clause_from_chunk,
     extract_source_table_ref,
     find_top_level_keywords,
     inject_sort_key_filter,
@@ -302,3 +303,50 @@ def test_keeps_the_view_query_unwrapped_for_a_plan_without_a_column_list() -> No
         mv_replay_queries=["SELECT * FROM db.a"],
     )
     assert "INSERT INTO db.t\nSELECT * FROM db.a\nWHERE" in sql
+
+
+# ── build_where_clause_from_chunk numeric bounds ─────────────────────────────
+
+
+def test_renders_numeric_bounds_as_constants_of_the_sort_key_type() -> None:
+    # chkit#826: a bare '3' equal to the partition id made ClickHouse derive a
+    # string comparison on _partition_id and match no row.
+    chunk = Chunk.model_validate(
+        {
+            "id": "c1",
+            "partitionId": "3",
+            "ranges": [
+                {"dimensionIndex": 0, "from": "3", "to": "133334"},
+                {"dimensionIndex": 1, "from": "-1.5"},
+            ],
+            "estimate": {
+                "rows": 1,
+                "bytesCompressed": 1,
+                "bytesUncompressed": 1,
+                "confidence": "exact",
+                "reason": "exact-count",
+            },
+            "analysis": {"lineage": []},
+        }
+    )
+    table = TableProfile.model_validate(
+        {
+            "database": "db",
+            "table": "t",
+            "sortKeys": [
+                {"name": "id", "type": "UInt64", "category": "numeric", "boundaryEncoding": "literal"},
+                {
+                    "name": "amount",
+                    "type": "Decimal(18, 4)",
+                    "category": "numeric",
+                    "boundaryEncoding": "literal",
+                },
+            ],
+        }
+    )
+    assert build_where_clause_from_chunk(chunk, table).split("\n") == [
+        "_partition_id = '3'",
+        "  AND id >= CAST('3', 'UInt64')",
+        "  AND id < CAST('133334', 'UInt64')",
+        "  AND amount >= CAST('-1.5', 'Decimal(18, 4)')",
+    ]

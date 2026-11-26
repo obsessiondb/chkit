@@ -1,5 +1,58 @@
 # chkit
 
+## 0.2.0-beta.19
+
+### Patch Changes
+
+- f1912dd: With `CHKIT_MIGRATE_LOCK=off`, `chkit migrate --apply` now stops before an async statement with `async_needs_lock`, because two concurrent runs could both submit it. Set `CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK=1` to submit it anyway when no other migrate runs against the target.
+- c0af2a5: `chkit migrate` no longer submits an async statement again behind a load balancer over independent servers: without `clickhouse.cluster`, a prepared attempt in a journal that is not replicated now stops with `async_outcome_unknown` instead of being treated as never sent.
+- ee6c032: `chkit migrate` now pairs each `-- operation:` marker with the statement right after it, so a statement without a marker no longer shifts later markers onto the wrong statements, for example running a `CREATE TABLE` as the async load below it (#831). Such a hand-written file may now need `--allow-destructive` for an unmarked destructive statement that used to inherit another statement's marker.
+- a7851fe: Ctrl-C during `migrate` now stops the run cleanly, as chkit-py does: it starts no new statement, puts an async statement that wasn't sent yet back to prepared, and releases the migrate lock before exiting with 130. A second Ctrl-C exits at once and leaves the lock claim in place.
+- ab00efd: Warn about migration data copies in `check` and `generate`, including JSON output, without changing exit status.
+- e4514c9: `check` and `drift` recognize stored SQL UDF arithmetic on ObsessionDB without hiding changes to the function body.
+- 99f3950: Install `@chkit/plugin-sync`, register `sync()`, and use `chkit sync` or `chkit plugin sync` with your existing checkpoints. The deprecated `@chkit/plugin-ingest` package, `ingest()` registration, and CLI commands remain available during the transition.
+- Updated dependencies: `@chkit/core@0.2.0-beta.19`, `@chkit/clickhouse@0.2.0-beta.19`, `@chkit/codegen@0.2.0-beta.19`
+
+## 0.2.0-beta.18
+
+### Patch Changes
+
+- Updated dependencies: `@chkit/core@0.2.0-beta.18`, `@chkit/clickhouse@0.2.0-beta.18`, `@chkit/codegen@0.2.0-beta.18`
+
+## 0.2.0-beta.17
+
+### Patch Changes
+
+- 750475d: `generate` orders column additions, renames, modifications, removals and their dependent indexes, constraints, projections and TTL changes so migrations avoid unknown columns and default-expression cycles, including dotted names, lambdas and casts. Long expression chains plan efficiently without stack overflows, and comment-only column changes use `COMMENT COLUMN`.
+- bf17aab: `migrate --apply` locks the journal, stops retries if ownership is lost, and recovers completed async attempts without replaying them; it retries only unsent attempts or SELECT/INSERT statements rejected before execution, limits `-- before-retry:` SQL to those rejected statements, and stops uncertain outcomes with `async_outcome_unknown`. `--retry` rejects edits to completed statements, polling errors retain submit failures, and stopped locks can be recovered after heartbeat expiry or with `--break-lock`.
+
+  - Breaking: don't upgrade while an async migration is in progress, and add the journal's `operation_fingerprints` column with a user that can alter it before running async statements; a statement that failed while it ran, or that an earlier release left started or failed, now needs a reconcile and `--abandon` before it runs again.
+
+- 686817c: Add `migrate --apply --break-lock <claim> --cancel-lock-queries` to recover a stopped run's data loads: chkit replaces each target with an empty copy before reloading, so a load still running on the server cannot add rows, including on SharedMergeTree in ObsessionDB and ClickHouse Cloud.
+- 85b2b8e: Names sort by Unicode code point across migration planning, snapshots, drift, pull, codegen and plugin listings, matching chkit-py.
+
+  - Breaking: run `chkit codegen` after upgrading and check imports where multiple tables map to the same type name, since the table receiving the `_2` suffix can change.
+
+- 75d4600: `generate --cutover` rejects nullable keys, including `LowCardinality(Nullable(T))` and commented or quoted type spellings. `generate`, cutover planning and `drift` distinguish one key column containing commas or spaces from multiple columns while accepting equivalent key spellings.
+- 36020c0: `migrate` waits up to 30 seconds for DDL on every replica, repeats unfinished waits on resume, and keeps journal writes in the intended database even when replicas lag. Wait failures preserve column mismatch details and release sessions, unknown replica counts stop the run, and non-SELECT barrier statements are rejected before execution.
+- aa6cb57: With `CHKIT_DEBUG=1`, every log line now goes to stderr, so `--json` output on stdout stays one JSON document.
+- 719c503: `drift` and `check` recognize equivalent stored expressions, function aliases, engine quoting, managed `Replicated*`/`Shared*` engines and ClickHouse UNION/CTE/UDF rewrites, and exclude materialized-view backing tables. Parenthesized skip-index expressions no longer trigger drift or needless `generate` changes, and `pull` writes their canonical form.
+- e8664e6: `drift` and `check` detect changed dictionary definitions, case-sensitive engine arguments, and expression changes involving columns named `all` or `distinct`, instead of overlooking them.
+- 11dbee8: Plugin commands receive only positional arguments through either spelling, honor `--`, reject invalid flags before hooks, and can reject positionals with `takesArgs: false` or declare short flags with `FlagDef.short`. Plugin listings show only configured plugins and fail clearly when none are configured.
+
+  - Breaking: a plugin command that skipped `args[0]` because it held its own name must stop doing so.
+
+- 2205acd: CLI arguments match chkit-py: supported short flags work, unknown flags, missing values, stray arguments and invalid `--connect` choices fail before hooks or file writes, `--` ends flag parsing, and the last `--config` wins. Help and argument errors work outside projects, installed pull/codegen shortcuts work without plugin registration, and `--table` is accepted only where it scopes the command.
+
+  - Breaking: drop `--table` from `chkit status`, `codegen` and `pull` invocations; it never narrowed them.
+
+- 72247d1: `migrate` splits statements and detects destructive SQL correctly around ClickHouse comments, heredocs and quoted names, preserving literal semicolons and requiring `--allow-destructive` for commented keyword sequences that still execute. `generate` preserves heredoc expressions and quoted-name escapes, strips engine comments safely, and SQL scanning stays linear for repeated unclosed heredoc openers.
+
+  - Breaking: a partly applied migration split differently by an earlier release stops with `statement_split_changed` rather than resuming at the wrong statement.
+
+- a162b6c: Text index SQL in migrations, snapshots and `pull` preserves ClickHouse's keyword spacing and tight array subscripts without planning changes to equivalent existing indexes.
+- Updated dependencies: `@chkit/core@0.2.0-beta.17`, `@chkit/clickhouse@0.2.0-beta.17`, `@chkit/codegen@0.2.0-beta.17`
+
 ## 0.2.0-beta.16
 
 ### Patch Changes
