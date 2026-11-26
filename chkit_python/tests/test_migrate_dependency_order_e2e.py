@@ -429,6 +429,22 @@ _COLUMN_CHANGES: list[dict[str, Any]] = [
         "order": ["column:y", "ttl", "column:x"],
         "columns": ["id", "y"],
     },
+    # #814: these fail on ClickHouse 26.3 in key order with code 43, since
+    # ClickHouse checks every expression against a column's new type.
+    {
+        "label": "typerelease",
+        "before": f"{{'name': 'a', 'type': 'String'}}, {{'name': 'b', 'type': 'UInt64', {_e('length(a)')}}}",
+        "after": f"{{'name': 'a', 'type': 'UInt64'}}, {{'name': 'b', 'type': 'UInt64', {_e('0')}}}",
+        "order": ["column:b", "column:a"],
+        "columns": ["a", "b", "id"],
+    },
+    {
+        "label": "typeprovide",
+        "before": "{'name': 'z', 'type': 'String'}",
+        "after": f"{{'name': 'b', 'type': 'UInt64', {_e('z + 1')}}}, {{'name': 'z', 'type': 'UInt64'}}",
+        "order": ["column:z", "column:b"],
+        "columns": ["b", "id", "z"],
+    },
     {
         "label": "ttlremove",
         "before": "{'name': 'x', 'type': 'DateTime'}",

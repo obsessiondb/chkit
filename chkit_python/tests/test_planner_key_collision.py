@@ -89,6 +89,60 @@ def test_a_statement_of_the_other_table_does_not_hide_that_the_cycle_closing_mod
     ]
 
 
+def test_each_table_orders_its_own_type_change() -> None:
+    # `a` of `t:column:x` and `x:column:a` of `t` both change from String to
+    # UInt64. In `t:column:x`, `b` stops reading `a`, so its MODIFY runs first;
+    # in `t`, `x:column:b` starts reading `x:column:a`, so its MODIFY runs
+    # after. The colliding keys don't mix the two tables' orders (#814).
+    before: list[SchemaDefinition] = [
+        app_table(
+            "t:column:x",
+            [
+                ID,
+                {"name": "a", "type": "String"},
+                {"name": "b", "type": "UInt64", "default": "fn:length(a)"},
+            ],
+        ),
+        app_table(
+            "t",
+            [
+                ID,
+                {"name": "x:column:a", "type": "String"},
+                {"name": "x:column:b", "type": "UInt64", "default": "fn:0"},
+            ],
+        ),
+    ]
+    after: list[SchemaDefinition] = [
+        app_table(
+            "t:column:x",
+            [
+                ID,
+                {"name": "a", "type": "UInt64"},
+                {"name": "b", "type": "UInt64", "default": "fn:0"},
+            ],
+        ),
+        app_table(
+            "t",
+            [
+                ID,
+                {"name": "x:column:a", "type": "UInt64"},
+                {"name": "x:column:b", "type": "UInt64", "default": "fn:`x:column:a` + 1"},
+            ],
+        ),
+    ]
+    other = [
+        "ALTER TABLE app.`t:column:x` MODIFY COLUMN `b` UInt64 DEFAULT 0;",
+        "ALTER TABLE app.`t:column:x` MODIFY COLUMN `a` UInt64;",
+    ]
+    own = [
+        "ALTER TABLE app.t MODIFY COLUMN `x:column:a` UInt64;",
+        "ALTER TABLE app.t MODIFY COLUMN `x:column:b` UInt64 DEFAULT `x:column:a` + 1;",
+    ]
+    assert sql_of([before[0]], [after[0]]) == other
+    assert sql_of([before[1]], [after[1]]) == own
+    assert sql_of(before, after) == [*own, *other]
+
+
 def test_a_default_that_reads_a_renamed_column_runs_after_the_rename_to_it() -> None:
     # Renames `a:b` -> `c` and `a` -> `b:c` both give the operation key
     # `table:app.t:column_rename:a:b:c`.

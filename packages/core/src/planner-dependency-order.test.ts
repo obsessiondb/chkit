@@ -10,9 +10,11 @@ import {
   view,
 } from './index'
 import type { ColumnDefinition, SchemaDefinition } from './index'
+import type { MigrationOperation } from './index'
 import { buildDependencyGraph, orderByDependencies } from './object-dependencies.js'
 import { cycleRepairWork } from './column-cycle-repair.js'
-import { columnDefaultReads } from './column-reads.js'
+import { orderColumnStatements } from './column-order.js'
+import { columnDefaultReads, columnRenameKey } from './column-reads.js'
 
 const appTable = (name: string, columns: ColumnDefinition[] = [{ name: 'id', type: 'UInt64' }]) =>
   table({ database: 'app', name, columns, engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'] })
@@ -1229,6 +1231,297 @@ describe('planDiff orders MODIFY read releases and table TTL changes (#769)', ()
   })
 })
 
+describe('planDiff orders a column type change against the expressions that read the column (#814)', () => {
+  const t = (columns: ColumnDefinition[], extra: { ttl?: string } = {}) =>
+    table({
+      database: 'app',
+      name: 't',
+      columns: [{ name: 'id', type: 'UInt64' }, ...columns],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+      ...extra,
+    })
+  const sqls = (previous: SchemaDefinition[], next: SchemaDefinition[]) =>
+    planDiff(previous, next).operations.map((op) => op.sql)
+
+  test('changes the type after the MODIFY whose new DEFAULT stops reading the column', () => {
+    expect(
+      sqls(
+        [t([{ name: 'a', type: 'String' }, { name: 'b', type: 'UInt64', default: { expression: 'length(a)' } }])],
+        [t([{ name: 'a', type: 'UInt64' }, { name: 'b', type: 'UInt64', default: { expression: '0' } }])]
+      )
+    ).toEqual(['ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT 0;', 'ALTER TABLE app.t MODIFY COLUMN `a` UInt64;'])
+  })
+
+  test('changes the type after the DROP of a column whose ALIAS reads it', () => {
+    expect(
+      sqls(
+        [t([{ name: 'a', type: 'String' }, { name: 'b', type: 'UInt64', defaultKind: 'ALIAS', default: { expression: 'length(a)' } }])],
+        [t([{ name: 'a', type: 'UInt64' }])]
+      )
+    ).toEqual(['ALTER TABLE app.t DROP COLUMN IF EXISTS `b`;', 'ALTER TABLE app.t MODIFY COLUMN `a` UInt64;'])
+  })
+
+  test('runs the MODIFY and the ADD whose new DEFAULT starts reading the column after its type change', () => {
+    expect(
+      sqls(
+        [t([{ name: 'b', type: 'UInt64', default: { expression: '0' } }, { name: 'z', type: 'String' }])],
+        [
+          t([
+            { name: 'b', type: 'UInt64', default: { expression: 'z + 1' } },
+            { name: 'c', type: 'UInt64', defaultKind: 'MATERIALIZED', default: { expression: 'z * 2' } },
+            { name: 'z', type: 'UInt64' },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `z` UInt64;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT z + 1;',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `c` UInt64 MATERIALIZED z * 2;',
+    ])
+  })
+
+  // No order of the two MODIFYs applies when both DEFAULTs need their own type of `a`.
+  test('keeps key order when the old and the new DEFAULT both read the column', () => {
+    expect(
+      sqls(
+        [t([{ name: 'a', type: 'String' }, { name: 'b', type: 'UInt64', default: { expression: 'length(a)' } }])],
+        [t([{ name: 'a', type: 'UInt64' }, { name: 'b', type: 'UInt64', default: { expression: 'a + 1' } }])]
+      )
+    ).toEqual(['ALTER TABLE app.t MODIFY COLUMN `a` UInt64;', 'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT a + 1;'])
+  })
+
+  // Moving MODIFY `a` behind `b` must not move it behind `z`, whose new
+  // DEFAULT needs the new type and which ran after it before.
+  test('a statement whose old and new DEFAULT both read the column keeps its side of the type change', () => {
+    expect(
+      sqls(
+        [
+          t([
+            { name: 'a', type: 'String' },
+            { name: 'b', type: 'UInt64', default: { expression: 'length(a)' } },
+            { name: 'z', type: 'UInt64', default: { expression: 'length(toString(a))' } },
+          ]),
+        ],
+        [
+          t([
+            { name: 'a', type: 'UInt64' },
+            { name: 'b', type: 'UInt64', default: { expression: '0' } },
+            { name: 'z', type: 'UInt64', default: { expression: 'a + 1' } },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT 0;',
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64;',
+      'ALTER TABLE app.t MODIFY COLUMN `z` UInt64 DEFAULT a + 1;',
+    ])
+  })
+
+  // `b` would wait for `a`, `z` for `b`, and `a` already waits for `z`: the
+  // edge the sort already satisfies goes in, the other is left out.
+  test('keeps the sorted order when two type-change edges conflict', () => {
+    expect(
+      sqls(
+        [t([{ name: 'a', type: 'UInt64', default: { expression: 'toUInt64(b)' } }, { name: 'b', type: 'UInt8' }])],
+        [
+          t([
+            { name: 'a', type: 'UInt64', default: { expression: 'z' } },
+            { name: 'b', type: 'UInt16' },
+            { name: 'z', type: 'UInt64', default: { expression: 'toUInt64(b)' } },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt16;',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `z` UInt64 DEFAULT toUInt64(b);',
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT z;',
+    ])
+  })
+
+  // Holding `a` and `b` behind `x` would run `c DEFAULT a` while the old
+  // `a DEFAULT b` and `b DEFAULT c` stand, so the sorted order stays.
+  test('keeps the sorted order when the type-change edges would close a cycle of expressions', () => {
+    expect(
+      sqls(
+        [
+          t([
+            { name: 'a', type: 'UInt64', default: { expression: 'b' } },
+            { name: 'b', type: 'UInt64', default: { expression: 'c' } },
+            { name: 'c', type: 'UInt64', default: { expression: '0' } },
+            { name: 'x', type: 'UInt32' },
+          ]),
+        ],
+        [
+          t([
+            { name: 'a', type: 'UInt64', default: { expression: 'x' } },
+            { name: 'b', type: 'UInt64', default: { expression: 'x' } },
+            { name: 'c', type: 'UInt64', default: { expression: 'a' } },
+            { name: 'x', type: 'UInt64' },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT x;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT x;',
+      'ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT a;',
+      'ALTER TABLE app.t MODIFY COLUMN `x` UInt64;',
+    ])
+  })
+
+  // The TTL edges would run `b` first, and the unchanged `c` would then add
+  // two DateTimes: type changes keep their order, so the sorted order stays.
+  test('keeps the sorted order when it would reorder two type changes', () => {
+    expect(
+      sqls(
+        [
+          t(
+            [
+              { name: 'a', type: 'DateTime' },
+              { name: 'b', type: 'UInt32' },
+              { name: 'c', type: 'String', default: { expression: 'toString(a + b)' } },
+            ],
+            { ttl: 'toDateTime(toUInt32(a))' }
+          ),
+        ],
+        [
+          t(
+            [
+              { name: 'a', type: 'UInt32' },
+              { name: 'b', type: 'DateTime' },
+              { name: 'c', type: 'String', default: { expression: 'toString(a + b)' } },
+            ],
+            { ttl: 'toDateTime(toUInt32(b))' }
+          ),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt32;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` DateTime;',
+      'ALTER TABLE app.t MODIFY TTL toDateTime(toUInt32(b));',
+    ])
+  })
+
+  // The unchanged `c DEFAULT if(id = 0, a, b)` sees the types of `a` and `b`
+  // in the order their changes run, so that order stays.
+  test('type changes keep their order among themselves', () => {
+    expect(
+      sqls(
+        [
+          t([
+            { name: 'a', type: 'Int64' },
+            { name: 'b', type: 'UInt32' },
+            { name: 'c', type: 'UInt64', default: { expression: 'if(id = 0, a, b)' } },
+            { name: 'd', type: 'UInt64', default: { expression: 'toUInt64(a)' } },
+          ]),
+        ],
+        [
+          t([
+            { name: 'a', type: 'UInt32' },
+            { name: 'b', type: 'UInt64' },
+            { name: 'c', type: 'UInt64', default: { expression: 'if(id = 0, a, b)' } },
+            { name: 'd', type: 'UInt64', default: { expression: '0' } },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `d` UInt64 DEFAULT 0;',
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt32;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64;',
+    ])
+  })
+
+  // Each ADD COLUMN appends its column, so moving `a` behind the type change
+  // and past the ADD of `b` would change the table's column order.
+  test('keeps the sorted order when it would change the order of the ADD COLUMNs', () => {
+    expect(
+      sqls(
+        [t([{ name: 'z', type: 'UInt32' }])],
+        [
+          t([
+            { name: 'z', type: 'UInt64' },
+            { name: 'a', type: 'UInt64', default: { expression: 'toUInt64(z)' } },
+            { name: 'b', type: 'String' },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT toUInt64(z);',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `b` String;',
+      'ALTER TABLE app.t MODIFY COLUMN `z` UInt64;',
+    ])
+  })
+
+  // Moving ADD `n` and ADD `k` behind the type change would run ADD `k`
+  // while `k.x` exists, which ClickHouse skips: ADDs and DROPs keep their order.
+  test('keeps the sorted order when it would move an ADD past a DROP', () => {
+    expect(
+      sqls(
+        [
+          t([
+            { name: 'a', type: 'UInt64', default: { expression: 'length(`k.x`)' } },
+            { name: 'k.x', type: 'Array(UInt32)' },
+            { name: 'z', type: 'UInt32' },
+          ]),
+        ],
+        [
+          t([
+            { name: 'a', type: 'UInt64', default: { expression: 'z' } },
+            { name: 'k', type: 'UInt64', default: { expression: 'n' } },
+            { name: 'n', type: 'UInt64' },
+            { name: 'z', type: 'UInt64' },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT z;',
+      'ALTER TABLE app.t DROP COLUMN IF EXISTS `k.x`;',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `n` UInt64;',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `k` UInt64 DEFAULT n;',
+      'ALTER TABLE app.t MODIFY COLUMN `z` UInt64;',
+    ])
+  })
+
+  test('changes the type after the table TTL stops reading the column', () => {
+    expect(
+      sqls(
+        [t([{ name: 'a', type: 'String' }], { ttl: 'toDateTime(id) + toIntervalDay(length(a))' })],
+        [t([{ name: 'a', type: 'UInt64' }], { ttl: 'toDateTime(id) + INTERVAL 1 DAY' })]
+      )
+    ).toEqual(['ALTER TABLE app.t MODIFY TTL toDateTime(id) + INTERVAL 1 DAY;', 'ALTER TABLE app.t MODIFY COLUMN `a` UInt64;'])
+  })
+
+  // Moving MODIFY `a` behind the TTL change would move it past the ADD INDEX
+  // that sits between them, so the sorted order stays.
+  test('keeps the sorted order when a statement would move past another ALTER', () => {
+    const indexed = t([{ name: 'a', type: 'UInt64' }], { ttl: 'toDateTime(id) + INTERVAL 1 DAY' })
+    expect(
+      sqls(
+        [t([{ name: 'a', type: 'String' }], { ttl: 'toDateTime(id) + toIntervalDay(length(a))' })],
+        [{ ...indexed, indexes: [{ name: 'idx', expression: 'a', type: 'minmax', granularity: 1 }] }]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64;',
+      'ALTER TABLE app.t ADD INDEX IF NOT EXISTS `idx` (a) TYPE minmax GRANULARITY 1;',
+      'ALTER TABLE app.t MODIFY TTL toDateTime(id) + INTERVAL 1 DAY;',
+    ])
+  })
+
+  test('a table with a column rename keeps its order', () => {
+    const previous = [t([{ name: 'a', type: 'String' }, { name: 'b', type: 'UInt64', default: { expression: 'length(a)' } }, { name: 'old', type: 'UInt64' }])]
+    const next = [t([{ name: 'a', type: 'UInt64' }, { name: 'b', type: 'UInt64', default: { expression: '0' } }, { name: 'new', type: 'UInt64' }])]
+    const rename = { database: 'app', table: 't', from: 'old', to: 'new' }
+    const operations = [
+      { type: 'alter_table_modify_column', key: 'table:app.t:column:a', risk: 'caution', sql: 'MODIFY a' },
+      { type: 'alter_table_modify_column', key: 'table:app.t:column:b', risk: 'caution', sql: 'MODIFY b' },
+      { type: 'alter_table_rename_column', key: columnRenameKey(rename), risk: 'caution', sql: 'RENAME' },
+    ] satisfies MigrationOperation[]
+    expect(orderColumnStatements(operations, { previous, next }, [rename]).map((op) => op.sql)).toEqual(['MODIFY a', 'MODIFY b', 'RENAME'])
+    expect(orderColumnStatements(operations, { previous, next }, []).map((op) => op.sql)).toEqual(['MODIFY b', 'MODIFY a', 'RENAME'])
+  })
+})
+
 // Each expected read below is what ClickHouse 26.3 reads: a DROP COLUMN of a
 // column it reads is refused (#805).
 describe('columnDefaultReads skips keywords and alias names (#805)', () => {
@@ -1670,17 +1963,17 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
     })
   const text = (name: string, expression: string): ColumnDefinition => ({ name, type: 'String', default: { expression } })
 
-  // `a` changes to String; the ALIAS `b` calls `length(a)`, so it must come
-  // after that change. Each expression for `a` reads `month` or `date` only
-  // seemingly, so these tables keep their sorted order.
+  // `a` gets a new DEFAULT; the ALIAS `b` calls `length(a)`. Each expression
+  // for `a` reads `month` or `date` only seemingly, so these tables keep their
+  // sorted order. No column changes its type, so none is ordered by one (#814).
   test.each<[string, string, ColumnDefinition]>([
     ["toString(date '2024-01-01')", 'date', text('date', 'toString(id)')],
-    ['toString(arrayMap(`as` -> tuple(id as month).1, [id])[1])', 'month', u('month', 'id')],
-    ['CAST(arrayMap(lambda(tuple(month), month), [id])[1] AS String)', 'month', u('month', 'id')],
+    ['toString(arrayMap(`as` -> tuple(id as month).1, [id])[1])', 'month', text('month', 'toString(id)')],
+    ['CAST(arrayMap(lambda(tuple(month), month), [id])[1] AS String)', 'month', text('month', 'toString(id)')],
   ])('with a DEFAULT %s, the table keeps its sorted order', (expression, name, changed) => {
     expect(
       orderOf(
-        [t([u('a'), text(name, 'toString(z)'), u('z', 'length(toString(a))')])],
+        [t([{ name: 'a', type: 'String' }, text(name, 'toString(z)'), u('z', 'length(toString(a))')])],
         [t([text('a', expression), u('b', 'length(a)', { defaultKind: 'ALIAS' }), changed, u('z', 'id')])]
       )
     ).toEqual(['t.a', 't.b', `t.${name}`, 't.z'])
@@ -1752,19 +2045,24 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
   })
 
   // A bare NULL is a literal even when a column is named `null`, so these
-  // tables keep their sorted order: the ALIAS `b` runs after `a` changes to
-  // String. Only a quoted `null` reads the column.
+  // tables close no cycle: the ALIAS `b` runs after `a` changes. Only a
+  // quoted `null` reads the column. In the first plan `a` changes its type
+  // and the old DEFAULT of `z` reads it, so `z` changes first (#814). Read as
+  // a column, `null`, whose type changes too, would have to change before
+  // `a`: that reorders the type changes, so the plan would keep its sorted
+  // order. In the second plan no column changes its type, so none is
+  // ordered by one.
   test('a bare NULL is no read of a column named null', () => {
     expect(
       orderOf(
         [t([u('a'), text('null', 'toString(z)'), u('z', 'length(toString(a))')])],
         [t([text('a', "ifNull(null, '')"), u('b', "match(a, 'x')", { type: 'UInt8', defaultKind: 'ALIAS' }), u('null', 'id'), u('z', 'id')])]
       )
-    ).toEqual(['t.a', 't.b', 't.null', 't.z'])
+    ).toEqual(['t.z', 't.a', 't.b', 't.null'])
     expect(
       orderOf(
-        [t([u('a'), u('b', 'length(`null`)', { defaultKind: 'ALIAS' }), text('null', 'toString(z)'), u('z', 'length(toString(a))')])],
-        [t([text('a', 'toString(ifNull(null, 1))'), u('b', 'length(a)', { defaultKind: 'ALIAS' }), u('null', 'id'), u('z', 'id')])]
+        [t([{ name: 'a', type: 'String' }, u('b', 'length(`null`)', { defaultKind: 'ALIAS' }), text('null', 'toString(z)'), u('z', 'length(toString(a))')])],
+        [t([text('a', 'toString(ifNull(null, 1))'), u('b', 'length(a)', { defaultKind: 'ALIAS' }), text('null', 'toString(id)'), u('z', 'id')])]
       )
     ).toEqual(['t.a', 't.b', 't.null', 't.z'])
     expect(
@@ -1941,23 +2239,25 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
 
   // The unit of `date_add`, `dateDiff` and the like, a bare NOT and a bare
   // SELECT are not reads even when a column has that name, so these tables
-  // keep their sorted order: the ALIAS `b` runs after `a` changes to String.
+  // keep their sorted order: the ALIAS `b` runs after `a` changes. `a` keeps
+  // its type, so no type change orders `z` (#814).
   test.each<[string, string, string]>([
     ['date_add', 'toString(date_add(day, if(true, 1, 0), toDateTime(id)))', 'day'],
     ['not', 'toString(not - toInt64(id))', 'not'],
   ])('a bare %s word is no read of a column with that name', (_, expression, name) => {
     expect(
       orderOf(
-        [t([u('a'), u(name, 'z'), u('z', 'length(toString(a))')])],
+        [t([{ name: 'a', type: 'String' }, u(name, 'z'), u('z', 'length(toString(a))')])],
         [t([text('a', expression), u('b', "match(a, 'x')", { type: 'UInt8', defaultKind: 'ALIAS' }), u(name, 'id'), u('z', 'id')])]
       )
     ).toEqual(['t.a', 't.b', `t.${name}`, 't.z'])
   })
 
+  // `a` keeps its type, so no type change orders `c` (#814).
   test('a dateDiff unit is no read of a column with that name', () => {
     expect(
       orderOf(
-        [t([{ name: 'a', type: 'String' }, u('b'), text('c', 'a'), text('hour', 'c')])],
+        [t([u('a'), u('b'), text('c', 'a'), text('hour', 'c')])],
         [t([u('a', 'dateDiff(hour, toDateTime(0), toDateTime(id))'), u('b', 'a + 1'), text('c', "'x'"), text('hour', "'y'")])]
       )
     ).toEqual(['t.a', 't.b', 't.c', 't.hour'])
@@ -2059,11 +2359,11 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
 
   // `toUInt64(`true`)` reads no column, so `a` does not read the column
   // `true`: the table keeps its sorted order, where `b DEFAULT a + 1` runs
-  // after `a` changes to UInt64.
+  // after `a` changes. `a` keeps its type, so no type change orders `c` (#814).
   test('a quoted true is no read of a column with that name', () => {
     expect(
       orderOf(
-        [t([{ name: 'a', type: 'String' }, u('b'), text('c', 'a'), text('true', 'c')])],
+        [t([u('a'), u('b'), text('c', 'a'), text('true', 'c')])],
         [t([u('a', 'toUInt64(`true`)'), u('b', 'a + 1'), text('c', "'x'"), text('true', "'y'")])]
       )
     ).toEqual(['t.a', 't.b', 't.c', 't.true'])
@@ -2091,11 +2391,12 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
   })
 
   // ClickHouse stores `` `not` + 1 `` as `NOT 1`, so `a` does not read the
-  // column `not` and the table keeps its sorted order.
+  // column `not` and the table keeps its sorted order. `a` keeps its type, so
+  // no type change orders `c` (#814).
   test('a quoted not is no read of a column with that name', () => {
     expect(
       orderOf(
-        [t([{ name: 'a', type: 'String' }, u('b'), text('c', 'a'), u('not', 'length(c)')])],
+        [t([u('a'), u('b'), text('c', 'a'), u('not', 'length(c)')])],
         [t([u('a', '`not` + 1'), u('b', 'a + 1'), text('c', "'x'"), u('not', '5')])]
       )
     ).toEqual(['t.a', 't.b', 't.c', 't.not'])
