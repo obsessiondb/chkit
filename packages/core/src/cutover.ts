@@ -11,7 +11,7 @@ import {
 } from './model.js'
 import { columnTypeFingerprint, keyFingerprint, renderColumnType, toCreateSQL } from './sql.js'
 import { splitTopLevelComma } from './key-clause.js'
-import { identifierName, isTrivia, tokenizeSQL } from './sql-lexer.js'
+import { identifierName, isTrivia, type SQLToken, tokenizeSQL } from './sql-lexer.js'
 import {
   DEFAULT_INDEX_GRANULARITY,
   declaredReadonlySettings,
@@ -208,7 +208,7 @@ export function planCutover(input: {
   const declaredColumns = assertCutoverSupported({ oldDef, newDef, request, options, definitions: input.definitions, names })
   const copied = oldDef.columns.filter((column) => declaredColumns.includes(column.name))
   const columns = copied.flatMap((column) => columnLeaves(column).map((leaf) => leaf.name))
-  const flattenNested = copied.some((column) => nestedFields(column) !== undefined)
+  const snapshotFromSchema = snapshotFromDefinition(oldDef)
   const sql = createCutoverSql({
     database: request.database,
     table: request.table,
@@ -217,7 +217,8 @@ export function planCutover(input: {
     copiedColumns: declaredColumns,
     oldColumns: oldDef.columns,
     oldEngine: engineName(oldDef.engine),
-    snapshotFromDefinition: snapshotFromDefinition(oldDef),
+    snapshotFromDefinition: snapshotFromSchema,
+    pinFlattenNested: hasNestedColumns(newDef) || (snapshotFromSchema && hasNestedColumns(oldDef)),
     key: request.key,
     cluster: options.cluster,
     readonlySettings: declaredReadonlySettings(oldDef.settings, newDef.settings),
@@ -234,7 +235,7 @@ export function planCutover(input: {
     columns,
   }
 
-  const operations = buildOperations({ oldDef, newDef, request, options, names, sql, metadata, flattenNested })
+  const operations = buildOperations({ oldDef, newDef, request, options, names, sql, metadata })
   const retained = options.oldTable === 'keep'
     ? { ...withoutRename(input.oldDef), name: names.previous, retainedBy: { cutover: `${request.database}.${request.table}` } }
     : undefined
@@ -249,9 +250,8 @@ function buildOperations(input: {
   names: CutoverNames
   sql: CutoverSql
   metadata: CutoverMetadata
-  flattenNested: boolean
 }): MigrationOperation[] {
-  const { oldDef, newDef, request, options, names, sql, metadata, flattenNested } = input
+  const { oldDef, newDef, request, options, names, sql, metadata } = input
   const { database } = request
   const tableKey = `table:${database}.${request.table}`
   const stepKey = (step: string) => `${tableKey}:cutover:${step}`
@@ -266,7 +266,7 @@ function buildOperations(input: {
       type: 'create_table',
       key: `table:${database}.${names.shadow}`,
       risk: 'safe',
-      sql: createCutoverTableSQL({ ...withoutRename(newDef), name: names.shadow }, flattenNested),
+      sql: createCutoverTableSQL({ ...withoutRename(newDef), name: names.shadow }),
     },
     {
       type: 'create_materialized_view',
@@ -286,7 +286,7 @@ function buildOperations(input: {
       type: 'create_table',
       key: `table:${database}.${names.snapshot}`,
       risk: 'safe',
-      sql: createSnapshotSQL({ oldDef, request, names, metadata, flattenNested }),
+      sql: createSnapshotSQL({ oldDef, request, names, metadata }),
     },
     {
       type: 'cutover_snapshot',
@@ -379,7 +379,7 @@ function buildOperations(input: {
       type: 'create_table',
       key: `table:${database}.${names.reconcile}`,
       risk: 'safe',
-      sql: createCutoverTableSQL({ ...withoutRename(newDef), name: names.reconcile }, flattenNested),
+      sql: createCutoverTableSQL({ ...withoutRename(newDef), name: names.reconcile }),
     },
     {
       type: 'cutover_reconcile',
@@ -429,11 +429,9 @@ function buildOperations(input: {
   return operations
 }
 
-function createCutoverTableSQL(def: TableDefinition, flattenNested: boolean): string {
-  if (!flattenNested) return toCreateSQL(def)
-  const settings = { ...def.settings }
-  delete settings.flatten_nested
-  return toCreateSQL({ ...def, settings: { ...settings, flatten_nested: 1 } })
+function createCutoverTableSQL(def: TableDefinition): string {
+  if (!hasNestedColumns(def)) return toCreateSQL(def)
+  return toCreateSQL({ ...def, settings: { ...def.settings, flatten_nested: 1 } })
 }
 
 /**
@@ -451,12 +449,11 @@ function createSnapshotSQL(input: {
   request: CutoverRequest
   names: CutoverNames
   metadata: CutoverMetadata
-  flattenNested: boolean
 }): string {
-  const { oldDef, request, names, metadata, flattenNested } = input
+  const { oldDef, request, names, metadata } = input
   const comment = formatCutoverMetadata(metadata)
   if (snapshotFromDefinition(oldDef)) {
-    return createCutoverTableSQL({ ...withoutRename(oldDef), name: names.snapshot, comment }, flattenNested)
+    return createCutoverTableSQL({ ...withoutRename(oldDef), name: names.snapshot, comment })
   }
   return `CREATE TABLE IF NOT EXISTS ${renderQualifiedName(request.database, names.snapshot)} AS ${renderQualifiedName(request.database, request.table)}\nCOMMENT ${stringLiteral(comment)};`
 }
@@ -502,6 +499,7 @@ function createCutoverSql(input: {
   oldEngine: string
   /** The snapshot is rendered from the old definition, not created AS the table. */
   snapshotFromDefinition: boolean
+  pinFlattenNested: boolean
   key: string[]
   cluster?: string
   /** Read-only settings the layout compares, besides engine and keys. */
@@ -510,7 +508,7 @@ function createCutoverSql(input: {
   oldSettings: TableDefinition['settings']
   indexGranularity: number
 }): CutoverSql {
-  const { database, table, names, columns, copiedColumns, oldColumns, oldEngine, snapshotFromDefinition, key, cluster, readonlySettings, oldSettings, indexGranularity } = input
+  const { database, table, names, columns, copiedColumns, oldColumns, oldEngine, snapshotFromDefinition, pinFlattenNested, key, cluster, readonlySettings, oldSettings, indexGranularity } = input
   const q = (name: string) => renderQualifiedName(database, name)
   const target = `${database}.${table}`
   const columnList = columns.map(quoteColumn).join(', ')
@@ -534,7 +532,7 @@ function createCutoverSql(input: {
   // The snapshot holds every column the table stores, but the mirror and the
   // copy move only the columns of the old definition: a column only the server
   // has would not reach the new table, and a copied column it lacks stops the
-  // mirror. A copied Nested column must be stored as its flattened leaves.
+  // mirror. Stored Nested columns must use flattened leaves.
   const literals = (values: string[]) => `[${values.map(stringLiteral).join(', ')}]`
   const leaves = oldColumns.flatMap((column) =>
     columnLeaves(column).map((leaf) => ({ ...leaf, column: column.name, stored: isStored(column) }))
@@ -548,9 +546,10 @@ function createCutoverSql(input: {
   const liveColumns = `FROM system.columns WHERE database = ${stringLiteral(database)} AND table = ${stringLiteral(table)}`
   const storedColumns = `${liveColumns} AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')`
   const undeclaredColumns = `(SELECT countIf(NOT has(${literals(known)}, name)) ${storedColumns}) AS undeclared_columns`
-  const copiedNested = nested.filter((column) => column.stored && copiedColumns.includes(column.name))
-  const unflattenedNested = copiedNested.length > 0
-    ? `(SELECT countIf(has(${literals(copiedNested.map((column) => column.name))}, name)) ${storedColumns}) AS unflattened_nested`
+  const storedNested = nested.filter((column) => column.stored)
+  const copiedNested = storedNested.filter((column) => copiedColumns.includes(column.name))
+  const unflattenedNested = storedNested.length > 0
+    ? `(SELECT countIf(has(${literals(storedNested.map((column) => column.name))}, name)) ${storedColumns}) AS unflattened_nested`
     : undefined
   const hasNested = copiedNested.map(
     (column) => ` AND (hasAll(groupArray(name), ${literals(column.fields.map((field) => `${column.name}.${field.name}`))}) OR has(groupArray(name), ${stringLiteral(column.name)}))`
@@ -609,9 +608,11 @@ function createCutoverSql(input: {
   // A snapshot rendered from the old definition always declares PRIMARY KEY.
   // Before ClickHouse 26.7 parts attach only between tables that both declare
   // it or both leave it out; 26.7 compares the key by value.
+  const serverVersion = "toUInt32OrZero(splitByChar('.', version())[1]) * 100 + toUInt32OrZero(splitByChar('.', version())[2])"
   const declaredKey = snapshotFromDefinition
-    ? `(${tableCount(table)} = 0 OR (SELECT any(position(engine_full, ' PRIMARY KEY ') > 0) FROM system.tables WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(table)}) OR toUInt32OrZero(splitByChar('.', version())[1]) * 100 + toUInt32OrZero(splitByChar('.', version())[2]) >= 2607) AS declared_key`
+    ? `(${tableCount(table)} = 0 OR (SELECT any(position(engine_full, ' PRIMARY KEY ') > 0) FROM system.tables WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(table)}) OR ${serverVersion} >= 2607) AS declared_key`
     : undefined
+  const flattenNestedVersion = pinFlattenNested ? `(${serverVersion} >= 2501) AS flatten_nested_version` : undefined
   // Per replica: 1 when the condition holds. A guard throws unless every replica reports 1.
   const guard = (condition: string, message: string) =>
     `SELECT throwIf(countIf(ok = 0) > 0 OR count() = 0, ${stringLiteral(message)}) FROM ${everyReplica(`SELECT toUInt8(${condition}) AS ok`)}`
@@ -689,6 +690,9 @@ function createCutoverSql(input: {
       ...(unflattenedNested
         ? [`  throwIf(max(unflattened_nested) > 0, ${stringLiteral(`${target} stores a Nested column as one column (created with flatten_nested = 0). The cutover creates the new table with flatten_nested = 1, which stores each field as its own Array column, so writers that insert the Nested column would fail after the swap. Nothing was created or copied. A cutover supports only Nested columns stored flattened.`)}),`]
         : []),
+      ...(flattenNestedVersion
+        ? [`  throwIf(min(flatten_nested_version) = 0, ${stringLiteral(`${target}: the cutover of a table with Nested columns creates its tables with flatten_nested = 1, which ClickHouse accepts in CREATE TABLE from version 25.1. Nothing was created or copied. Upgrade ClickHouse, or cut the table over by hand.`)}),`]
+        : []),
       `  throwIf(max(undeclared_columns) > 0, ${stringLiteral(`${target} stores a column that the schema does not declare, so its values would not reach the new table. Nothing was created or copied. Run chkit drift, change the schema to match the table, and generate the cutover again.`)}),`,
       `  throwIf(min(declared_columns) = 0, ${stringLiteral(`${target} lacks a column that the schema declares, so the mirror cannot read it. Nothing was created or copied. Run chkit drift, change the schema to match the table, and generate the cutover again.`)}),`,
       `  throwIf(max(column_kinds) > 0, ${stringLiteral(`${target} stores a column that the schema declares ALIAS or EPHEMERAL, or computes a column that the schema stores, so the cutover would not copy its values. Nothing was created or copied. Run chkit drift, change the schema to match the table, and generate the cutover again.`)}),`,
@@ -721,6 +725,7 @@ function createCutoverSql(input: {
           `${tableCount(table)} AS present,`,
           `${storedEngine},`,
           ...(unflattenedNested ? [`${unflattenedNested},`] : []),
+          ...(flattenNestedVersion ? [`${flattenNestedVersion},`] : []),
           `${undeclaredColumns},`,
           `${declaredColumns},`,
           `${columnKinds},`,
@@ -808,6 +813,9 @@ function assertCutoverSupported(input: {
       )
     }
   }
+  if ([oldDef, newDef].some((def) => def.settings?.flatten_nested !== undefined && hasNestedColumns(def))) {
+    problems.push('settings.flatten_nested is set on a table with Nested columns: the cutover creates its tables with flatten_nested = 1.')
+  }
 
   if (newDef.renamedFrom) {
     problems.push('the table is also renamed. Rename it in a separate migration.')
@@ -842,18 +850,33 @@ function assertCutoverSupported(input: {
   }
 
   const unreadableNested = new Set([...oldDef.columns, ...newDef.columns]
-    .filter((column) => NESTED_PREFIX.test(column.type.trim()) && nestedFields(column) === undefined)
+    .filter((column) => isNestedType(column.type) && nestedFields(column) === undefined)
     .map((column) => column.name))
   for (const name of unreadableNested) {
     problems.push(`column ${name} is Nested, but chkit cannot read its fields, so the mirror could not list its columns.`)
   }
 
   const columns = copiedColumns(oldDef, newDef, problems)
+  const oldStored = oldDef.columns.filter(isStored)
+  const oldLeafOwners = new Map(oldStored.flatMap((column) => columnLeaves(column).map((leaf) => [leaf.name, column.name] as const)))
+  const copiedLeaves = new Set(oldStored.filter((column) => columns.includes(column.name)).flatMap((column) => columnLeaves(column).map((leaf) => leaf.name)))
+  for (const column of newDef.columns.filter(isInsertable)) {
+    for (const { name } of columnLeaves(column)) {
+      const oldOwner = oldLeafOwners.get(name)
+      if (oldOwner !== undefined && oldOwner !== column.name && !copiedLeaves.has(name)) {
+        problems.push(`column ${name} is stored in both the old and the new table, but declared differently, so the cutover would not copy it. Declare it the same way in both.`)
+      }
+    }
+  }
   const oldColumns = new Map(oldDef.columns.map((column) => [column.name, column]))
   for (const name of request.key) {
     const column = oldColumns.get(name)
     if (!column) {
       problems.push(`key column ${name} does not exist in ${target}.`)
+      continue
+    }
+    if (isNestedType(column.type)) {
+      problems.push(`key column ${name} is Nested; a key must be a column whose values identify a row.`)
       continue
     }
     if (!columns.includes(name)) {
@@ -949,21 +972,25 @@ function copiedColumns(oldDef: TableDefinition, newDef: TableDefinition, problem
 const CLICKHOUSE_SPACE = /^[\s\u0085\u180e\u200b-\u200d\u2060]$/
 
 function isNullableType(type: string): boolean {
-  const tokens = tokenizeSQL(type).filter((token) => !isTrivia(token) && !CLICKHOUSE_SPACE.test(token.text))
+  const tokens = typeTokens(type)
   const isOpen = (index: number) => tokens[index]?.kind === 'punctuation' && tokens[index]?.text === '('
-  // The name at `index` and the index after it.
-  const nameAt = (index: number): [string | undefined, number] => {
-    const token = tokens[index]
-    if (token === undefined) return [undefined, index]
-    if (token.text === '\u201c' && tokens[index + 2]?.text === '\u201d') {
-      const inner = tokens[index + 1]
-      return [inner?.kind === 'identifier' ? inner.text : undefined, index + 3]
-    }
-    return [identifierName(token), index + 1]
-  }
-  let [name, next] = nameAt(0)
-  if (name === 'LowCardinality' && isOpen(next)) [name, next] = nameAt(next + 1)
+  let [name, next] = typeNameAt(tokens, 0)
+  if (name === 'LowCardinality' && isOpen(next)) [name, next] = typeNameAt(tokens, next + 1)
   return name === 'Nullable' && isOpen(next)
+}
+
+function typeTokens(type: string): SQLToken[] {
+  return tokenizeSQL(type).filter((token) => !isTrivia(token) && !CLICKHOUSE_SPACE.test(token.text))
+}
+
+function typeNameAt(tokens: SQLToken[], index: number): [string | undefined, number] {
+  const token = tokens[index]
+  if (token === undefined) return [undefined, index]
+  if (token.text === '\u201c' && tokens[index + 2]?.text === '\u201d') {
+    const inner = tokens[index + 1]
+    return [inner?.kind === 'identifier' ? inner.text : undefined, index + 3]
+  }
+  return [identifierName(token), index + 1]
 }
 
 function isStored(column: ColumnDefinition): boolean {
@@ -991,14 +1018,28 @@ function columnLeaves(column: ColumnDefinition): Array<{ name: string; type: str
   return fields.map((field) => ({ name: `${column.name}.${field.name}`, type: `Array(${field.type})` }))
 }
 
-const NESTED_PREFIX = /^Nested[\s\u0085\u180e\u200b-\u200d\u2060]*\(/
+function nestedOpen(tokens: SQLToken[]): SQLToken | undefined {
+  const [name, next] = typeNameAt(tokens, 0)
+  const open = tokens[next]
+  return name === 'Nested' && open?.kind === 'punctuation' && open.text === '(' ? open : undefined
+}
+
+function isNestedType(type: string): boolean {
+  return nestedOpen(typeTokens(type)) !== undefined
+}
+
+function hasNestedColumns(def: TableDefinition): boolean {
+  return def.columns.some((column) => isNestedType(column.type))
+}
 
 /** The fields of a `Nested(...)` column, or undefined for another type or a field chkit cannot read. */
 function nestedFields(column: ColumnDefinition): Array<{ name: string; type: string }> | undefined {
-  const type = column.type.trim()
-  const prefix = NESTED_PREFIX.exec(type)?.[0]
-  if (prefix === undefined || !type.endsWith(')')) return undefined
-  const body = type.slice(prefix.length, -1)
+  const tokens = typeTokens(column.type)
+  const open = nestedOpen(tokens)
+  const close = tokens.at(-1)
+  if (!open || close?.kind !== 'punctuation' || close.text !== ')') return undefined
+  if (tokenizeSQL(column.type.slice(close.end)).some((token) => token.kind === 'line_comment' || !token.terminated)) return undefined
+  const body = column.type.slice(open.end, close.start)
   const fields: Array<{ name: string; type: string }> = []
   for (const field of splitTopLevelComma(body)) {
     const token = tokenizeSQL(field).find((candidate) => !isTrivia(candidate) && !CLICKHOUSE_SPACE.test(candidate.text))
@@ -1006,7 +1047,7 @@ function nestedFields(column: ColumnDefinition): Array<{ name: string; type: str
     if (!token || name === undefined) return undefined
     fields.push({ name, type: field.slice(token.end).trim() })
   }
-  return fields
+  return fields.length > 0 ? fields : undefined
 }
 
 function replicatedPath(engine: string): string | undefined {

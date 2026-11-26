@@ -47,8 +47,8 @@ NESTED_COLUMNS: list[dict[str, Any]] = [
     {"name": "payload", "type": "String"},
     {"name": "n", "type": "Nested(x UInt64, `y z` Decimal64(2))"},
 ]
-NESTED_X = "arrayMap(i -> toUInt64(i), range(id % 5))"
-NESTED_Y = "arrayMap(i -> toDecimal64(i, 2), range(id % 5))"
+NESTED_X = "arrayMap(i -> id * 10 + i, range(id % 5 + 1))"
+NESTED_Y = "arrayMap(i -> toDecimal64(id, 2) + toDecimal64(i * 10 + 5, 2) / 100, range(id % 5 + 1))"
 
 
 @dataclass

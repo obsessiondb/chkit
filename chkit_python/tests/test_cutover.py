@@ -531,14 +531,109 @@ def test_moves_flattened_nested_leaves(cluster: str | None) -> None:
         assert "AS unflattened_nested" in start
 
 
-def test_refuses_a_nested_column_whose_fields_cannot_be_read() -> None:
-    nested = [*COLUMNS, {"name": "n", "type": "Nested(1 UInt8)"}]
+@pytest.mark.parametrize(
+    "type_", ["`Nested` /* comment */ (1 UInt8)", "Nested(x UInt64) -- comment", "Nested()"]
+)
+def test_refuses_a_nested_column_whose_fields_cannot_be_read(type_: str) -> None:
+    nested = [*COLUMNS, {"name": "n", "type": type_}]
     assert messages(
         old_def=events(["id"], columns=nested),
         new_def=events(["user_id", "id"], columns=nested),
     ) == [
         "Cannot cut over app.events: column n is Nested, but chkit cannot read its fields, "
         "so the mirror could not list its columns."
+    ]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_refuses_stored_leaf_overlaps_with_different_declarations(reverse: bool) -> None:
+    nested = [*COLUMNS, {"name": "n", "type": "Nested(x UInt64, y UInt64)"}]
+    plain = [
+        *COLUMNS,
+        {"name": "n.x", "type": "Array(UInt64)"},
+        {"name": "n.y", "type": "Array(UInt64)"},
+    ]
+    old, new = (plain, nested) if reverse else (nested, plain)
+    assert messages(
+        old_def=events(["id"], columns=old),
+        new_def=events(["user_id", "id"], columns=new),
+    ) == [
+        f"Cannot cut over app.events: column {name} is stored in both the old and the new table, "
+        "but declared differently, so the cutover would not copy it. Declare it the same way in both."
+        for name in ("n.x", "n.y")
+    ]
+
+
+def test_pins_shadow_and_reconcile_when_only_new_definition_declares_nested() -> None:
+    nested = [*COLUMNS, {"name": "n", "type": "Nested(x UInt64)"}]
+    cutover = plan(new_def=events(["user_id", "id"], columns=nested))
+    creates = {op.key: op.sql for op in cutover.operations if op.type == "create_table"}
+    for name in (cutover.names.shadow, cutover.names.reconcile):
+        assert "flatten_nested = 1;" in creates[f"table:app.{name}"]
+    start = cutover.operations[0].sql
+    assert (
+        "(toUInt32OrZero(splitByChar('.', version())[1]) * 100 + "
+        "toUInt32OrZero(splitByChar('.', version())[2]) >= 2501) AS flatten_nested_version"
+    ) in start
+    assert (
+        "throwIf(min(flatten_nested_version) = 0, 'app.events: the cutover of a table with "
+        "Nested columns creates its tables with flatten_nested = 1, which ClickHouse accepts "
+        "in CREATE TABLE from version 25.1. Nothing was created or copied. Upgrade ClickHouse, "
+        "or cut the table over by hand.')"
+    ) in start
+    assert "unflattened_nested" not in start
+
+
+def test_checks_uncopied_old_nested_and_pins_only_a_snapshot_from_the_definition() -> None:
+    nested = [*COLUMNS, {"name": "n", "type": "Nested(x UInt64)"}]
+    local = plan(old_def=events(["id"], columns=nested))
+    assert "AS unflattened_nested" in local.operations[0].sql
+    assert "flatten_nested_version" not in local.operations[0].sql
+
+    engine = "ReplicatedMergeTree"
+    cutover = plan(
+        old_def=events(["id"], columns=nested, engine=engine),
+        new_def=events(["user_id", "id"], engine=engine),
+        cluster="c2",
+    )
+    creates = {op.key: op.sql for op in cutover.operations if op.type == "create_table"}
+    start = cutover.operations[0].sql
+    assert "countIf(has(['n'], name))" in start
+    assert "AS flatten_nested_version" in start
+    assert "FROM clusterAllReplicas('c2', view(" in start
+    assert "flatten_nested = 1\nCOMMENT " in creates[f"table:app.{cutover.names.snapshot}"]
+    for name in (cutover.names.shadow, cutover.names.reconcile):
+        assert "flatten_nested" not in creates[f"table:app.{name}"]
+
+
+@pytest.mark.parametrize("value", [0, 1])
+def test_refuses_explicit_flatten_nested_on_either_definition(value: int) -> None:
+    nested = [*COLUMNS, {"name": "n", "type": "Nested(x UInt64)"}]
+    settings = {"flatten_nested": value}
+    for old, new in (
+        (events(["id"], columns=nested, settings=settings), NEW),
+        (OLD, events(["user_id", "id"], columns=nested, settings=settings)),
+    ):
+        assert messages(old_def=old, new_def=new) == [
+            "Cannot cut over app.events: settings.flatten_nested is set on a table with Nested "
+            "columns: the cutover creates its tables with flatten_nested = 1."
+        ]
+
+
+@pytest.mark.parametrize(
+    "type_",
+    ["Nested /* comment */ (x UInt64)", "`Nested`(x UInt64)", "“Nested”(x UInt64) /* comment */\u0085"],
+)
+def test_recognizes_nested_spellings_and_refuses_them_as_keys(type_: str) -> None:
+    nested = [*COLUMNS, {"name": "n", "type": type_}]
+    old = events(["id"], columns=nested)
+    new = events(["user_id", "id"], columns=nested)
+    cutover = plan(old_def=old, new_def=new)
+    assert cutover.columns == ["id", "user_id", "payload", "n.x"]
+    assert "AS flatten_nested_version" in cutover.operations[0].sql
+    assert messages(old_def=old, new_def=new, key=["n"]) == [
+        "Cannot cut over app.events: key column n is Nested; "
+        "a key must be a column whose values identify a row."
     ]
 
 

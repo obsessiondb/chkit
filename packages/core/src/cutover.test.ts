@@ -238,12 +238,78 @@ describe('planCutover', () => {
     })
   }
 
-  test('refuses a Nested column whose fields cannot be read', () => {
-    const nested = [...columns, { name: 'n', type: 'Nested(1 UInt8)' }] as TableDefinition['columns']
+  test.each(['`Nested` /* comment */ (1 UInt8)', 'Nested(x UInt64) -- comment', 'Nested()'])('refuses an unreadable column of type %s', (type) => {
+    const nested = [...columns, { name: 'n', type }]
     expect(messages(() => plan({
       oldDef: events({ columns: nested }),
       newDef: events({ columns: nested, primaryKey: ['user_id', 'id'], orderBy: ['user_id', 'id'] }),
     }))).toEqual(['Cannot cut over app.events: column n is Nested, but chkit cannot read its fields, so the mirror could not list its columns.'])
+  })
+
+  test('refuses stored leaf overlaps with different declarations in either direction', () => {
+    const nested = [...columns, { name: 'n', type: 'Nested(x UInt64, y UInt64)' }]
+    const plain = [...columns, { name: 'n.x', type: 'Array(UInt64)' }, { name: 'n.y', type: 'Array(UInt64)' }]
+    for (const [oldColumns, newColumns] of [[nested, plain], [plain, nested]] as const) {
+      expect(messages(() => plan({ oldDef: { ...OLD, columns: oldColumns }, newDef: { ...NEW, columns: newColumns } }))).toEqual(
+        ['n.x', 'n.y'].map((name) => `Cannot cut over app.events: column ${name} is stored in both the old and the new table, but declared differently, so the cutover would not copy it. Declare it the same way in both.`)
+      )
+    }
+  })
+
+  test('pins shadow and reconcile when only the new definition declares Nested', () => {
+    const nested = [...columns, { name: 'n', type: 'Nested(x UInt64)' }]
+    const { names, operations } = plan({ newDef: { ...NEW, columns: nested } })
+    for (const name of [names.shadow, names.reconcile]) {
+      expect(operations.find((op) => op.key === `table:app.${name}`)?.sql).toContain('flatten_nested = 1;')
+    }
+    const start = operations[0]?.sql
+    expect(start).toContain("(toUInt32OrZero(splitByChar('.', version())[1]) * 100 + toUInt32OrZero(splitByChar('.', version())[2]) >= 2501) AS flatten_nested_version")
+    expect(start).toContain("throwIf(min(flatten_nested_version) = 0, 'app.events: the cutover of a table with Nested columns creates its tables with flatten_nested = 1, which ClickHouse accepts in CREATE TABLE from version 25.1. Nothing was created or copied. Upgrade ClickHouse, or cut the table over by hand.')")
+    expect(start).not.toContain('unflattened_nested')
+  })
+
+  test('checks an old Nested column that will not be copied, and pins only a snapshot from the definition', () => {
+    const nested = [...columns, { name: 'n', type: 'Nested(x UInt64)' }]
+    const local = plan({ oldDef: { ...OLD, columns: nested } })
+    expect(local.operations[0]?.sql).toContain('AS unflattened_nested')
+    expect(local.operations[0]?.sql).not.toContain('flatten_nested_version')
+
+    const engine = 'ReplicatedMergeTree'
+    const { names, operations } = plan({ oldDef: { ...OLD, columns: nested, engine }, newDef: { ...NEW, engine }, options: { cluster: 'c2' } })
+    const sqlOf = (name: string) => operations.find((op) => op.key === `table:app.${name}`)?.sql
+    expect(operations[0]?.sql).toContain("countIf(has(['n'], name))")
+    expect(operations[0]?.sql).toContain('AS flatten_nested_version')
+    expect(operations[0]?.sql).toContain("FROM clusterAllReplicas('c2', view(")
+    expect(sqlOf(names.snapshot)).toContain('flatten_nested = 1\nCOMMENT ')
+    expect(sqlOf(names.shadow)).not.toContain('flatten_nested')
+    expect(sqlOf(names.reconcile)).not.toContain('flatten_nested')
+  })
+
+  test('refuses explicit flatten_nested on either definition with Nested', () => {
+    const nested = [...columns, { name: 'n', type: 'Nested(x UInt64)' }]
+    for (const value of [0, 1]) {
+      const settings = { flatten_nested: value }
+      for (const input of [{ oldDef: { ...OLD, columns: nested, settings } }, { newDef: { ...NEW, columns: nested, settings } }]) {
+        expect(messages(() => plan(input))).toEqual([
+          'Cannot cut over app.events: settings.flatten_nested is set on a table with Nested columns: the cutover creates its tables with flatten_nested = 1.',
+        ])
+      }
+    }
+  })
+
+  test.each([
+    'Nested /* comment */ (x UInt64)',
+    '`Nested`(x UInt64)',
+    '“Nested”(x UInt64) /* comment */\u0085',
+  ])('recognizes %s and refuses it as a key', (type) => {
+    const nested = [...columns, { name: 'n', type }]
+    const input = { oldDef: { ...OLD, columns: nested }, newDef: { ...NEW, columns: nested } }
+    const cutover = plan(input)
+    expect(cutover.columns).toEqual(['id', 'user_id', 'payload', 'n.x'])
+    expect(cutover.operations[0]?.sql).toContain('AS flatten_nested_version')
+    expect(messages(() => plan({ ...input, key: ['n'] }))).toEqual([
+      'Cannot cut over app.events: key column n is Nested; a key must be a column whose values identify a row.',
+    ])
   })
 
   test('checks on every replica that the table stores {uuid} in its replication path when the snapshot is created AS it', () => {
