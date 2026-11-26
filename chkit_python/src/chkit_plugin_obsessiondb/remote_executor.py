@@ -192,7 +192,15 @@ class RemoteClickHouseClient:
         them up); a failed lookup is not cached. TS ``writeSettings``."""
         if self._setting_rows is None:
             self._setting_rows = self.query(_SETTING_ROWS_SQL).rows
-        return {**_durable_insert_settings(self._setting_rows), **(settings or {})}
+        # Defaults a caller's own value replaces, placed after the caller's
+        # other settings so that a settings profile among them cannot change
+        # them (#790).
+        own = settings or {}
+        return {
+            **{key: value for key, value in own.items() if key not in _DURABLE_INSERT_SETTINGS},
+            **_durable_insert_settings(self._setting_rows),
+            **{key: value for key, value in own.items() if key in _DURABLE_INSERT_SETTINGS},
+        }
 
     # ---- ClickHouseClient surface ----
 

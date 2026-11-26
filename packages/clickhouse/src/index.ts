@@ -990,7 +990,9 @@ export function createExecutorWithClient(
 					...credentialOptions(config),
 					application: CHKIT_APPLICATION_ID,
 					request_timeout: NO_REQUEST_TIMEOUT,
-					clickhouse_settings: { wait_end_of_query: 1, async_insert: 0 },
+					// The command's own settings carry the durable insert settings,
+					// last; a client default would put them before a profile (#790).
+					clickhouse_settings: { wait_end_of_query: 1 },
 					log: SILENT_CLIENT_LOG,
 				})
 				try {

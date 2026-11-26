@@ -302,6 +302,26 @@ def test_remote_client_submit_returns_passed_query_id(httpx_mock: HTTPXMock) -> 
     }
 
 
+def test_remote_client_sends_the_durable_insert_settings_after_the_callers(
+    httpx_mock: HTTPXMock,
+) -> None:
+    """#790, as TS remote-executor.test.ts: defaults a caller's own value
+    replaces, after the caller's other settings so a profile cannot change them."""
+    _add_async_insert_lookup(httpx_mock)
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/workbench/query/execute",
+        json={"data": [], "meta": [], "rows": 0},
+    )
+    client = create_remote_executor(_creds(), service_slug=SVC)
+    client.submit(
+        "INSERT INTO t SELECT 1", query_id="q", settings={"async_insert": "true", "profile": "bulk"}
+    )
+    [_lookup, request] = httpx_mock.get_requests()
+    assert list(json.loads(request.content)["json"]["settings"].items()) == [
+        ("profile", "bulk"), ("async_insert", "true"), ("wait_for_async_insert", 1),
+    ]
+
+
 def test_remote_client_submit_without_query_id_returns_server_id(
     httpx_mock: HTTPXMock,
 ) -> None:

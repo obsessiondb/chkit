@@ -190,8 +190,12 @@ describe('createRemoteExecutor command', () => {
 
 			await remote.command('DROP TABLE t', { max_table_size_to_drop: '0' })
 			await remote.command('DROP TABLE u')
+			await remote.command('INSERT INTO t SELECT 1', { async_insert: 'true' as unknown as 1, profile: 'bulk' })
 
-			expect(workbench.inputs).toEqual([
+			// After the caller's other settings, so a profile cannot change them (#790).
+			expect(Object.keys(workbench.inputs[0]?.settings ?? {})).toEqual(['max_table_size_to_drop', 'async_insert', 'wait_for_async_insert'])
+			expect(Object.entries(workbench.inputs[2]?.settings ?? {})).toEqual([['profile', 'bulk'], ['async_insert', 'true'], ['wait_for_async_insert', 1]])
+			expect(workbench.inputs.slice(0, 2)).toEqual([
 				{ serviceSlug: 'test', query: 'DROP TABLE t', settings: { async_insert: 0, wait_for_async_insert: 1, max_table_size_to_drop: '0' } },
 				{ serviceSlug: 'test', query: 'DROP TABLE u', settings: { async_insert: 0, wait_for_async_insert: 1 } },
 			])
