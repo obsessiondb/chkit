@@ -24,16 +24,24 @@ runtime-agnostic here.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
+import random
 import secrets
 import time
+import urllib.error
+import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol, TypeVar
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
-from chkit.clickhouse.replicas import resolve_replica_fanout_or_raise
+from chkit.clickhouse.replicas import (
+    all_replicas,
+    resolve_replica_fanout_or_raise,
+    string_literal,
+)
 
 T = TypeVar("T")
 
@@ -309,6 +317,84 @@ def wait_for_table_on_every_replica(
         raise AssertionError(msg)
 
 
+def run_on_every_replica(
+    client: Any,
+    env: LiveEnv,
+    statement: str,
+    *,
+    timeout: float = 60.0,
+    interval: float = 0.5,
+) -> None:
+    """Run a replica-local statement, such as ``SYSTEM STOP MERGES db.t``, on
+    every replica of the target, and return once each replica's
+    ``system.query_log`` shows it finished there.
+
+    On a multi-replica service (ObsessionDB) a SYSTEM statement acts only on
+    the replica that serves it, and ON CLUSTER is refused. The load balancer
+    spreads requests over the replicas (round-robin on the test service), so
+    each round sends the statement, tagged with a ``log_comment``, once per
+    replica in a row, then flushes the query log once per replica, until every
+    replica ``clusterAllReplicas`` reaches has logged it. A round with any
+    other request between two of its own could keep reaching the same
+    replica, so rounds are a random time apart, which moves them against
+    concurrent callers. The statement must be safe to repeat, and its table
+    must already be on every replica: ``SYSTEM STOP MERGES`` on a missing
+    table succeeds and does nothing. On a single node it runs once, through
+    ``client``. TS twin: ``runOnEveryReplica``.
+    """
+    fanout = resolve_replica_fanout_or_raise(client)
+    if fanout is None:
+        client.execute(statement)
+        return
+    tag = f"chkit_e2e_every_replica_{create_run_tag()}"
+    coverage = (
+        f"SELECT (SELECT count(DISTINCT hostName()) FROM {all_replicas(fanout, 'system.one')})"
+        f" AS replicas, (SELECT count(DISTINCT hostName()) FROM "
+        f"{all_replicas(fanout, 'system.query_log')} WHERE event_date >= yesterday() AND "
+        f"type = 'QueryFinish' AND log_comment = {string_literal(tag)}) AS ran "
+        "SETTINGS skip_unavailable_shards = 0"
+    )
+    deadline = time.monotonic() + timeout
+    while True:
+        for _ in range(fanout.replicas):
+            _send_on_new_connection(env, statement, {"log_comment": tag})
+        # A replica writes its query_log every few seconds; a flush writes it now.
+        for _ in range(fanout.replicas):
+            _send_on_new_connection(env, "SYSTEM FLUSH LOGS")
+        row = client.query(coverage).rows[0]
+        replicas = int(row["replicas"])
+        ran = int(row["ran"])
+        if replicas > 0 and ran >= replicas:
+            return
+        if time.monotonic() >= deadline:
+            msg = (
+                f"run_on_every_replica: {statement} ran on {ran} of {replicas} "
+                f"replicas after {timeout}s"
+            )
+            raise AssertionError(msg)
+        time.sleep(interval * (0.5 + random.random()))
+
+
+def _send_on_new_connection(env: LiveEnv, sql: str, settings: dict[str, str] | None = None) -> None:
+    """One HTTP request on a connection of its own, so no connection affinity
+    keeps it on the replica that served the previous one."""
+    credentials = base64.b64encode(
+        f"{env.clickhouse_user}:{env.clickhouse_password}".encode()
+    ).decode()
+    request = urllib.request.Request(
+        f"{env.clickhouse_url.rstrip('/')}/?{urlencode(settings or {})}",
+        data=sql.encode(),
+        headers={"Authorization": f"Basic {credentials}", "Connection": "close"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            response.read()
+    except urllib.error.HTTPError as error:
+        msg = f"{sql}: HTTP {error.code}: {error.read().decode(errors='replace')}"
+        raise RuntimeError(msg) from error
+
+
 class _CliResultLike(Protocol):
     """Structural type covering ``typer.testing.Result`` and ad-hoc CLI results.
 
@@ -357,6 +443,7 @@ __all__ = [
     "poll_until",
     "quote_ident",
     "resolve_live_env",
+    "run_on_every_replica",
     "run_once_visible",
     "wait_for_table_on_every_replica",
 ]

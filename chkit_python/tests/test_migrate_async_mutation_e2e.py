@@ -32,6 +32,7 @@ from tests.e2e_testkit import (
     poll_until,
     quote_ident,
     resolve_live_env,
+    run_on_every_replica,
     wait_for_table_on_every_replica,
 )
 
@@ -212,9 +213,14 @@ def test_the_next_statement_runs_only_once_the_mutation_is_done(
     waiting = _setup(label, statement)
     db = quote_ident(waiting.database)
     process: subprocess.Popen[str] | None = None
+    env = resolve_live_env()
+    # SYSTEM STOP MERGES acts on one replica, and any replica may run the
+    # mutation, so merges stop on every replica.
+    merges_stopped = False
     try:
         # The mutation stays queued until merges start again.
-        waiting.client.execute(f"SYSTEM STOP MERGES {db}.t")
+        merges_stopped = True
+        run_on_every_replica(waiting.client, env, f"SYSTEM STOP MERGES {db}.t")
         process = _start(waiting, args)
         rows = poll_until(
             lambda: _journal(waiting),
@@ -241,17 +247,22 @@ def test_the_next_statement_runs_only_once_the_mutation_is_done(
         )
         # Polls run every 5 s: across two of them, the statement stays started.
         assert _statuses_during(waiting, 11.0) == ["started"]
-        waiting.client.execute(f"SYSTEM START MERGES {db}.t")
+        run_on_every_replica(waiting.client, env, f"SYSTEM START MERGES {db}.t")
+        merges_stopped = False
 
         result = _wait(process)
         assert result.exit_code == 0, _diagnostic("migrate", result)
         seen = waiting.client.query(f"SELECT s FROM {db}.seen").rows
         assert [int(row["s"]) for row in seen] == [expected]
     finally:
-        if process is not None and process.poll() is None:
-            process.kill()
-            process.wait()
-        _teardown(waiting)
+        try:
+            if merges_stopped:
+                run_on_every_replica(waiting.client, env, f"SYSTEM START MERGES {db}.t")
+        finally:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait()
+            _teardown(waiting)
 
 
 def test_a_failed_mutation_is_not_journaled_complete(failing: Fixture) -> None:
