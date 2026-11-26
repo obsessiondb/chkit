@@ -19,7 +19,7 @@ The TypeScript CLI also provides a pass-through:
 chkit skills add obsessiondb/chkit --skill chkit-ingestion
 ```
 
-Choose the agent in the installer. Install `@chkit/plugin-ingest` and configure credentials through the [quickstart](/api-sync/quickstart/) before running a sync. The separate `chkit` skill covers schema and migration workflows.
+Choose the agent in the installer. Install `@chkit/plugin-sync` and configure credentials through the [quickstart](/api-sync/quickstart/) before running a sync. The separate `chkit` skill covers schema and migration workflows.
 
 To test unpublished changes to the skill, install it from a local checkout of the chkit repository:
 

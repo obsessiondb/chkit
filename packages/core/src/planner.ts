@@ -897,6 +897,9 @@ export function orderColumnStatements(
 ): MigrationOperation[] {
   const reads = columnDefaultReads(definitions.next)
   const oldReads = columnDefaultReads(definitions.previous)
+  // ALTER's check for cyclic defaults also reads lambda parameters (#799).
+  const cycleReads = columnDefaultReads(definitions.next, true)
+  const oldCycleReads = columnDefaultReads(definitions.previous, true)
   const ttlReads = tableTtlReads(definitions.next)
   const oldTtlReads = tableTtlReads(definitions.previous)
   const renamedTo = new Map(renames.map((rename) => [columnRenameKey(rename), columnKey(rename, rename.to)]))
@@ -923,6 +926,7 @@ export function orderColumnStatements(
   })
 
   const added = new Set(statements.filter((op) => op.type === 'alter_table_add_column').map((op) => op.key))
+  const releases = cycleReleases(cycleReads, oldCycleReads, added, new Set(modifies.keys()))
   const prerequisites = statements.map((op, index) => {
     const found = new Set<number>()
     if (op.type === 'alter_table_add_column' || op.type === 'alter_table_modify_column') {
@@ -936,7 +940,7 @@ export function orderColumnStatements(
     }
     // A column's last statement is the MODIFY COLUMN that sets its new expression.
     if (op.type === 'alter_table_modify_column' && statements[index + 1]?.key !== op.key) {
-      for (const column of cycleReleases(op.key, reads, oldReads, added)) {
+      for (const column of releases.get(op.key) ?? []) {
         for (const other of modifies.get(column) ?? []) found.add(other)
       }
     }
@@ -1066,7 +1070,12 @@ function repairedOrder(
     // The budget also covers the prerequisites the breaker checks walk.
     let total = size.get(table) ?? 0
     for (const index of scheduled) total += prerequisites[index]?.length ?? 0
-    const replay = defaultReplay(initial.get(table) ?? [], 8 * total + 1024)
+    // The columns whose reads the replay changes: the others keep their old reads throughout.
+    const changed = new Set<string>()
+    for (const index of list) {
+      if (changes.has(index) || statements[index]?.type === 'alter_table_drop_column') changed.add(ids[index] ?? '')
+    }
+    const replay = defaultReplay(initial.get(table) ?? [], 8 * total + 1024, changed)
     const edges = breakClosedCycles(scheduled, new Set(list), statements, prerequisites, groups, groupOf, ids, changes, replay)
     cycleRepairWork.units += replay.used()
     if (edges !== undefined) added.push(...edges)
@@ -1247,20 +1256,20 @@ function breakClosedCycles(
       const column = columns[target]
       if (column === undefined || !replayed.has(target)) continue
       const change = changes.get(target)
-      const cycle = change === undefined ? new Set<string>() : replay.closedCycle(column, change)
+      const cycle = change === undefined ? NO_CYCLE : replay.closedCycle(column, change)
       if (cycle === undefined) return undefined
-      if (cycle.size > 0) {
-        const candidates = [...cycle]
+      if (cycle.columns.length > 0) {
+        const candidates = cycle.columns
           .filter((other) => other !== column)
           .flatMap((other) => changing.get(other) ?? [])
           .filter((j) => !placed.has(j) && groupOf[j] !== group)
           .sort((a, b) => a - b)
-        if (!replay.spend(cycle.size + candidates.length)) return undefined
+        if (!replay.spend(cycle.columns.length + candidates.length)) return undefined
         let breaker: number | undefined
         for (const j of candidates) {
           const after = changes.get(j) ?? new Set<string>()
           if (!(replay.reads(columns[j] ?? '') ?? []).some((read) => cycle.has(read) && !after.has(read))) continue
-          const waits = waitsFor(prerequisites, extra, j, target, placed, replay)
+          const waits = waitsFor({ prerequisites, extra, dependents, groups, groupOf }, j, target, placed, replay)
           if (waits === undefined) return undefined
           if (!waits) {
             breaker = j
@@ -1341,31 +1350,74 @@ function siftDown(values: number[], start: number): void {
   }
 }
 
+/** The statement graph `waitsFor` searches. */
+interface WaitGraph {
+  prerequisites: number[][]
+  extra: ReadonlyMap<number, number[]>
+  /** The statements that wait for each one, across groups (`extra` included). */
+  dependents: ReadonlyMap<number, number[]>
+  groups: number[][]
+  groupOf: number[]
+}
+
 /**
  * Whether statement `from` runs after statement `target` through
  * `prerequisites` and `extra`, or undefined when `replay` runs out of work.
  * A `placed` statement has run, so it does not wait for `target`, which has
- * not. Each prerequisite it looks at uses one unit of the replay's work.
+ * not. `target` is ready to run, so every statement that waits for it is
+ * still to run. The search runs from both ends, widening the smaller
+ * frontier (in turns on a tie): down the prerequisites of `from`, and up
+ * the statements that wait for `target`, where the members of a group wait
+ * for each other. Many breakers can wait for one long chain of statements
+ * that does not reach `target`; the other end then stops it early. Each
+ * prerequisite, dependent or group member it looks at uses one unit of the
+ * replay's work.
  */
 function waitsFor(
-  prerequisites: number[][],
-  extra: ReadonlyMap<number, number[]>,
+  graph: WaitGraph,
   from: number,
   target: number,
   placed: ReadonlySet<number>,
   replay: DefaultReplay
 ): boolean | undefined {
-  const seen = new Set([from])
-  const pending = [from]
-  for (let index = pending.pop(); index !== undefined; index = pending.pop()) {
-    for (const list of [prerequisites[index], extra.get(index)]) {
-      for (const other of list ?? []) {
-        if (!replay.spend()) return undefined
-        if (other === target) return true
-        if (placed.has(other) || seen.has(other)) continue
-        seen.add(other)
-        pending.push(other)
+  const down = new Set([from])
+  const up = new Set([target])
+  const upGroups = new Set<number>()
+  let downFront = [from]
+  let upFront = [target]
+  let widenDown = false
+  while (downFront.length > 0 && upFront.length > 0) {
+    widenDown = downFront.length === upFront.length ? !widenDown : downFront.length < upFront.length
+    const front: number[] = []
+    if (widenDown) {
+      for (const index of downFront) {
+        for (const list of [graph.prerequisites[index], graph.extra.get(index)]) {
+          for (const other of list ?? []) {
+            if (!replay.spend()) return undefined
+            if (up.has(other)) return true
+            if (placed.has(other) || down.has(other)) continue
+            down.add(other)
+            front.push(other)
+          }
+        }
       }
+      downFront = front
+    } else {
+      for (const index of upFront) {
+        const group = graph.groupOf[index] ?? 0
+        const members = upGroups.has(group) ? [] : (graph.groups[group] ?? [])
+        upGroups.add(group)
+        for (const list of [members, graph.dependents.get(index)]) {
+          for (const other of list ?? []) {
+            if (!replay.spend()) return undefined
+            if (down.has(other)) return true
+            if (up.has(other)) continue
+            up.add(other)
+            front.push(other)
+          }
+        }
+      }
+      upFront = front
     }
   }
   return false
@@ -1515,11 +1567,11 @@ interface DefaultReplay {
   /** The columns `column` reads, in code point order. */
   reads: (column: string) => readonly string[] | undefined
   /**
-   * The columns on a cycle through `column` that giving it `reads` would
-   * close, or none. It changes nothing. It returns undefined when the replay
+   * The cycle through `column` that giving it `reads` would close, or none
+   * (no columns). It changes nothing. It returns undefined when the replay
    * has used up its work.
    */
-  closedCycle: (column: string, reads: ReadonlySet<string>) => Set<string> | undefined
+  closedCycle: (column: string, reads: ReadonlySet<string>) => ClosedCycle | undefined
   /** Gives `column` the `reads` (none removes it); they must close no cycle. */
   assign: (column: string, reads: Iterable<string> | undefined) => void
   /** Uses `units` (one by default) of work; false once the work has run out. */
@@ -1531,6 +1583,19 @@ interface DefaultReplay {
 }
 
 /**
+ * A cycle `closedCycle` found. `columns` holds `column` and every column on
+ * the cycle that a statement changes, among others; it leaves out the links
+ * of a chain of unchanged columns that each read one column.
+ */
+interface ClosedCycle {
+  columns: readonly string[]
+  /** Whether a read of a column of `columns` (other than `column`) is on the cycle. */
+  has: (read: string) => boolean
+}
+
+const NO_CYCLE: ClosedCycle = { columns: [], has: () => false }
+
+/**
  * The replay of one table, from its `initial` (old) expressions. Its state
  * never holds a cycle, so a new read Y of column X closes one exactly when
  * Y reaches X. That search runs from both ends at once, widening the smaller
@@ -1540,17 +1605,32 @@ interface DefaultReplay {
  * order they were added, so every search does the same work in both ports.
  * Each read a search, an update or a copy looks at uses one unit of the
  * `budget`.
+ *
+ * Only the `changed` columns are assigned new reads; the others keep their
+ * old reads. A walk down the reads skips a chain of unchanged columns that
+ * each read one column (`land`) and remembers where it ends, which never
+ * changes. Many cycles can run through one long chain (#829); each cycle
+ * then costs the columns around the chain, not its length.
  */
-function defaultReplay(initial: ReadonlyArray<[string, ReadonlySet<string>]>, budget: number): DefaultReplay {
+function defaultReplay(
+  initial: ReadonlyArray<[string, ReadonlySet<string>]>,
+  budget: number,
+  changed: ReadonlySet<string>
+): DefaultReplay {
   const number = new Map<string, number>()
   const names: string[] = []
   const reads: Array<number[] | undefined> = []
   const readers: Array<Set<number>> = []
+  const fixed: boolean[] = []
+  // Where a walk that reads a column lands (`land`), or -1 until it is known.
+  const landing: number[] = []
   // Marks with an epoch per search, instead of a set per search.
   const down: number[] = []
   const up: number[] = []
+  const seen: number[] = []
   const inside: number[] = []
   let epoch = 0
+  let gather = 0
   let left = budget
   const of = (column: string): number => {
     const known = number.get(column)
@@ -1560,8 +1640,11 @@ function defaultReplay(initial: ReadonlyArray<[string, ReadonlySet<string>]>, bu
     names.push(column)
     reads.push(undefined)
     readers.push(new Set())
+    fixed.push(!changed.has(column))
+    landing.push(-1)
     down.push(0)
     up.push(0)
+    seen.push(0)
     inside.push(0)
     return id
   }
@@ -1584,6 +1667,39 @@ function defaultReplay(initial: ReadonlyArray<[string, ReadonlySet<string>]>, bu
     assignNumbers(id, next === undefined ? undefined : numbered(next))
   }
   for (const [column, columnReads] of initial) assign(column, columnReads)
+  // The column a walk that reads `column` lands on: `column` itself, or,
+  // when no statement changes it and it reads one column, where that read
+  // lands. Those reads never change, so the answer is kept. Each link it
+  // follows the first time uses one unit; the caller checks the budget. A
+  // cycle among those reads (an old schema ClickHouse refuses) uses up the
+  // work, so the table keeps its sorted order.
+  const land = (column: number): number => {
+    const path: number[] = []
+    let at = column
+    for (;;) {
+      const known = landing[at] ?? -1
+      if (known >= 0) {
+        at = known
+        break
+      }
+      if (known === -2) {
+        for (const link of path) landing[link] = -1
+        left = -1
+        return at
+      }
+      const next = reads[at]
+      if (!fixed[at] || next?.length !== 1 || left < 0) {
+        landing[at] = at
+        break
+      }
+      path.push(at)
+      landing[at] = -2
+      left -= 1
+      at = next[0] ?? at
+    }
+    for (const link of path) landing[link] = at
+    return at
+  }
   // Whether `from` reaches `to` through reads, or undefined when the work runs out.
   const reaches = (from: number, to: number): boolean | undefined => {
     epoch += 1
@@ -1598,8 +1714,9 @@ function defaultReplay(initial: ReadonlyArray<[string, ReadonlySet<string>]>, bu
       const front: number[] = []
       if (widenDown) {
         for (const column of downFront) {
-          for (const reached of reads[column] ?? []) {
+          for (const read of reads[column] ?? []) {
             left -= 1
+            const reached = land(read)
             if (left < 0) return undefined
             if (up[reached] === epoch) return true
             if (down[reached] !== epoch) {
@@ -1637,43 +1754,73 @@ function defaultReplay(initial: ReadonlyArray<[string, ReadonlySet<string>]>, bu
       const target = of(column)
       const current = new Set(reads[target] ?? [])
       left -= current.size
-      const cycle = new Set<string>()
       const numberedNext = numbered(next)
       if (left < 0) return undefined
+      gather += 1
+      const mark = gather
+      const columns: string[] = []
       for (const read of numberedNext) {
         if (current.has(read)) continue
         const hit = reaches(read, target)
         if (hit === undefined) return undefined
         if (!hit) continue
-        // This read's cycle: the columns it reaches (`down`) that reach `column`.
-        epoch += 1
-        const below = [read]
-        down[read] = epoch
-        for (let at = below.pop(); at !== undefined; at = below.pop()) {
-          for (const other of reads[at] ?? []) {
-            left -= 1
-            if (left < 0) return undefined
-            if (other === target || down[other] === epoch) continue
-            down[other] = epoch
-            below.push(other)
-          }
+        if (columns.length === 0) {
+          seen[target] = mark
+          inside[target] = mark
+          columns.push(column)
         }
-        down[target] = epoch
-        const back = [target]
-        inside[target] = epoch
-        cycle.add(column)
-        for (let at = back.pop(); at !== undefined; at = back.pop()) {
-          for (const reader of readers[at] ?? []) {
+        // The columns this read reaches (`seen`), walked depth first; one is
+        // on the cycle (`inside`) when one of its reads lands on the cycle.
+        // A column still on the walk is marked `-mark`: meeting it again means
+        // the state holds a cycle (an old schema ClickHouse refuses), so the
+        // table keeps its sorted order.
+        const start = land(read)
+        if (left < 0) return undefined
+        if (seen[start] === mark) continue
+        seen[start] = mark
+        inside[start] = -mark
+        const stack = [start]
+        const position = [0]
+        const onCycle = [false]
+        for (let top = stack.length - 1; top >= 0; top = stack.length - 1) {
+          const at = stack[top] ?? 0
+          const list = reads[at] ?? []
+          const index = position[top] ?? 0
+          if (index < list.length) {
+            position[top] = index + 1
             left -= 1
+            const reached = land(list[index] ?? 0)
             if (left < 0) return undefined
-            if (down[reader] !== epoch || inside[reader] === epoch) continue
-            inside[reader] = epoch
-            cycle.add(names[reader] ?? '')
-            back.push(reader)
+            if (seen[reached] !== mark) {
+              seen[reached] = mark
+              inside[reached] = -mark
+              stack.push(reached)
+              position.push(0)
+              onCycle.push(false)
+            } else if (inside[reached] === mark) onCycle[top] = true
+            else if (inside[reached] === -mark) {
+              left = -1
+              return undefined
+            }
+            continue
           }
+          stack.pop()
+          position.pop()
+          inside[at] = 0
+          if (!onCycle.pop()) continue
+          inside[at] = mark
+          columns.push(names[at] ?? '')
+          if (top > 0) onCycle[top - 1] = true
         }
       }
-      return cycle
+      return {
+        columns,
+        // A read of a column on the cycle is on it when it lands on the cycle.
+        has: (read) => {
+          const id = number.get(read)
+          return id !== undefined && inside[land(id)] === mark
+        },
+      }
     },
     assign,
     spend: (units = 1) => {
@@ -1746,23 +1893,23 @@ const LITERAL_WORDS: ReadonlySet<string> = new Set(['false', 'inf', 'infinity', 
 // Bare words that are not function names even before `(`.
 const NOT_FUNCTIONS: ReadonlySet<string> = new Set(['exists', 'lambda', 'select', 'with'])
 // Keywords of ClickHouse's expression grammar (operators, literals and the
-// words of CASE, INTERVAL, DATE, CAST, EXTRACT, subqueries, joins and
-// windows): a bare one may not read a column of that name, so its expression
-// is not plain, and neither is a call to one outside `KEYWORD_FUNCTIONS`. A
-// quoted name reads such a column.
+// words of CASE, INTERVAL, DATE, CAST, EXTRACT, subqueries and windows): a
+// bare one may not read a column of that name, so its expression is not
+// plain, and neither is a call to one outside `KEYWORD_FUNCTIONS`. A quoted
+// name reads such a column. Query clause and join words (`left`, `right`,
+// `format`, `offset`, `settings`...) are not here: ClickHouse 26.3 reads a
+// bare one as its column and a call to one as a function, and their clause
+// uses (`... FORMAT JSON`, `LIMIT 1 OFFSET 2`) follow an operand, which is
+// not plain anyway. `values` is: from 26.4, `(values(c))` is a subquery over
+// SQL-standard VALUES, and so is `(values - 1)` before 26.4.3.
 const EXPRESSION_KEYWORDS: ReadonlySet<string> = new Set([
   'all', 'and', 'any', 'array', 'as', 'asc', 'ascending', 'between', 'both', 'by', 'case', 'cast', 'collate',
   'columns', 'current', 'date', 'desc', 'descending', 'distinct', 'div', 'else', 'end', 'escape', 'except',
   'exists', 'extract', 'filter', 'first', 'following', 'for', 'from', 'global', 'ignore', 'ilike', 'in',
   'interval', 'is', 'lambda', 'last', 'leading', 'like', 'mod', 'not', 'nulls', 'or', 'order', 'over',
   'partition', 'position', 'preceding', 'range', 'regexp', 'replace', 'respect', 'row', 'rows', 'select',
-  'substring', 'then', 'ties', 'timestamp', 'trailing', 'trim', 'unbounded', 'when', 'where', 'window', 'with',
-  'within',
-  // Query clauses and joins.
-  'anti', 'apply', 'asof', 'cross', 'cube', 'fill', 'final', 'format', 'full', 'group', 'grouping', 'having',
-  'inner', 'interpolate', 'intersect', 'into', 'join', 'left', 'limit', 'natural', 'offset', 'on', 'outer',
-  'paste', 'placing', 'prewhere', 'qualify', 'right', 'rollup', 'sample', 'semi', 'sets', 'settings', 'step',
-  'totals', 'union', 'using', 'values',
+  'substring', 'then', 'ties', 'timestamp', 'trailing', 'trim', 'unbounded', 'values', 'when', 'where', 'window',
+  'with', 'within',
 ])
 // Keywords that are also ordinary functions when called: their special
 // forms (`substring(s FROM 1)`, `trim(BOTH ...)`) put keywords inside, which
@@ -1909,48 +2056,130 @@ function parseType(tokens: SQLToken[], at: number, depth = 0): number {
 }
 
 /**
- * The columns whose MODIFY must run before the MODIFY that gives column `key`
- * its new expression (#769). ClickHouse rejects an expression that closes a
- * cycle. The new expression closes one through column P when it reads a
- * column that leads to P, and P's old expression reads a column that leads
- * back to `key`, which P's new expression no longer reads. "Leads to" follows
- * reads that both the old and the new expression of their column have, so
- * the path exists in every intermediate state and only P's MODIFY breaks it.
- * On the way to P it also follows the reads of `added` columns: the MODIFY
- * runs after the ADD of every added column its expression reads through them.
- * Every such P is read by the new expression through the new schema, so these
- * edges can't form a cycle unless the new schema has one.
+ * For each `modified` column K, the `modified` columns whose MODIFY must run
+ * before the MODIFY that gives K its new expression (#769). ClickHouse
+ * rejects an expression that closes a cycle. K's new expression closes one
+ * through column P when it reads a column that leads to P, and P's old
+ * expression reads a column that leads back to K, which P's new expression
+ * no longer reads. "Leads to" follows reads that both the old and the new
+ * expression of their column have, so the path exists in every intermediate
+ * state and only P's MODIFY breaks it. On the way to P it also follows the
+ * reads of `added` columns: the MODIFY runs after the ADD of every added
+ * column its expression reads through them. Every such P is read by K's new
+ * expression through the new schema, so these edges can't form a cycle unless
+ * the new schema has one.
+ *
+ * Such a K, P and every column between them lie on a cycle of old and new
+ * reads, so the search starts from the old reads that P drops and keeps to
+ * the columns on such cycles (#789). Beyond work linear in the reads, it
+ * searches those columns once for each old read that a P drops, and once
+ * more for each such read and P when the first search finds a K: a deep
+ * chain of defaults costs no more than a short one, unless many dropped
+ * reads lead into the same long part of a cycle. Beyond the result, memory
+ * stays linear in the reads.
  */
 function cycleReleases(
-  key: string,
   reads: DependencyGraph,
   oldReads: DependencyGraph,
-  added: ReadonlySet<string>
-): string[] {
-  const reachable = (from: string, throughAdded: boolean): Set<string> => {
+  added: ReadonlySet<string>,
+  modified: ReadonlySet<string>
+): Map<string, string[]> {
+  const cyclic = onCycles(reads, oldReads)
+  // Column → the columns that lead to it, the first step from K excluded.
+  const leadsFrom = new Map<string, string[]>()
+  for (const [column, columnReads] of reads) {
+    if (!cyclic.has(column)) continue
+    const follow = added.has(column)
+    for (const read of columnReads) {
+      if (cyclic.has(read) && (follow || oldReads.get(column)?.has(read))) {
+        const from = leadsFrom.get(read)
+        if (from === undefined) leadsFrom.set(read, [column])
+        else from.push(column)
+      }
+    }
+  }
+  const closure = (from: string, next: (column: string) => Iterable<string>): Set<string> => {
     const seen = new Set([from])
     const pending = [from]
     for (let column = pending.pop(); column !== undefined; column = pending.pop()) {
-      const follow = throughAdded && added.has(column)
-      for (const read of reads.get(column) ?? []) {
-        if ((follow || oldReads.get(column)?.has(read)) && !seen.has(read)) {
-          seen.add(read)
-          pending.push(read)
+      for (const other of next(column)) {
+        if (cyclic.has(other) && !seen.has(other)) {
+          seen.add(other)
+          pending.push(other)
         }
       }
     }
     return seen
   }
-  const released = new Set<string>()
-  for (const read of reads.get(key) ?? []) {
-    for (const column of reachable(read, true)) {
-      if (column === key) continue
-      for (const dropped of oldReads.get(column) ?? []) {
-        if (!reads.get(column)?.has(dropped) && reachable(dropped, false).has(key)) released.add(column)
+  const stableReads = (column: string) =>
+    [...(reads.get(column) ?? [])].filter((read) => oldReads.get(column)?.has(read))
+  // Dropped read → the breakers that drop it. Each closure is searched,
+  // used and let go, so the searches need memory linear in the reads.
+  const droppedBy = new Map<string, string[]>()
+  for (const breaker of [...modified].sort(compareCodePoints)) {
+    if (!cyclic.has(breaker)) continue
+    for (const dropped of oldReads.get(breaker) ?? []) {
+      if (reads.get(breaker)?.has(dropped) || !cyclic.has(dropped)) continue
+      const breakers = droppedBy.get(dropped)
+      if (breakers === undefined) droppedBy.set(dropped, [breaker])
+      else breakers.push(breaker)
+    }
+  }
+  const released = new Map<string, Set<string>>()
+  for (const [dropped, breakers] of droppedBy) {
+    const back = closure(dropped, stableReads)
+    for (const breaker of breakers) {
+      let leadsToBreaker: Set<string> | undefined
+      for (const key of back) {
+        if (key === breaker || !modified.has(key)) continue
+        leadsToBreaker ??= closure(breaker, (column) => leadsFrom.get(column) ?? [])
+        const target = leadsToBreaker
+        if ([...(reads.get(key) ?? [])].some((read) => target.has(read))) {
+          released.set(key, (released.get(key) ?? new Set<string>()).add(breaker))
+        }
       }
     }
   }
-  return [...released]
+  return new Map([...released].map(([key, breakers]) => [key, [...breakers]]))
+}
+
+/**
+ * The columns that lie on a cycle of `reads` and `oldReads` together, or on
+ * a path between two such cycles: what is left after taking away, again and
+ * again, every column that reads none of the rest or that none of the rest
+ * reads.
+ */
+function onCycles(reads: DependencyGraph, oldReads: DependencyGraph): Set<string> {
+  const readsOf = new Map<string, Set<string>>()
+  const readBy = new Map<string, Set<string>>()
+  const link = (map: Map<string, Set<string>>, from: string, to: string) =>
+    map.set(from, (map.get(from) ?? new Set<string>()).add(to))
+  for (const graph of [reads, oldReads]) {
+    for (const [column, columnReads] of graph) {
+      for (const read of columnReads) {
+        link(readsOf, column, read)
+        link(readBy, read, column)
+      }
+    }
+  }
+  const left = new Set([...readsOf.keys()].filter((column) => readBy.has(column)))
+  const outs = new Map([...left].map((column) => [column, [...(readsOf.get(column) ?? [])].filter((read) => left.has(read)).length]))
+  const ins = new Map([...left].map((column) => [column, [...(readBy.get(column) ?? [])].filter((other) => left.has(other)).length]))
+  const pending = [...left].filter((column) => outs.get(column) === 0 || ins.get(column) === 0)
+  for (let column = pending.pop(); column !== undefined; column = pending.pop()) {
+    if (!left.delete(column)) continue
+    for (const read of readsOf.get(column) ?? []) {
+      const count = (ins.get(read) ?? 0) - 1
+      ins.set(read, count)
+      if (count === 0 && left.has(read)) pending.push(read)
+    }
+    for (const other of readBy.get(column) ?? []) {
+      const count = (outs.get(other) ?? 0) - 1
+      outs.set(other, count)
+      if (count === 0 && left.has(other)) pending.push(other)
+    }
+  }
+  return left
 }
 
 function columnKey(table: { database: string; table: string }, column: string): string {
@@ -2018,9 +2247,10 @@ function longestColumnPrefix(parts: string[], columns: ReadonlySet<string>): str
 /**
  * Column operation key → keys of the other columns of the same table that the
  * column's default expression names. A name followed by `(` is a function
- * call, not a column, and neither are the names `notColumnNames` finds.
+ * call, not a column, and neither are the names `notColumnNames` finds. With
+ * `lambdas`, the lambdas' own names read columns as well (`lambdaReads`).
  */
-export function columnDefaultReads(definitions: SchemaDefinition[]): DependencyGraph {
+export function columnDefaultReads(definitions: SchemaDefinition[], lambdas = false): DependencyGraph {
   const graph = new Map<string, Set<string>>()
   for (const def of definitions) {
     if (def.kind !== 'table') continue
@@ -2031,7 +2261,8 @@ export function columnDefaultReads(definitions: SchemaDefinition[]): DependencyG
       const parsed = parseColumnDefault(column.default)
       if (parsed.kind !== 'expression') continue
       const read = new Set<string>()
-      for (const name of dottedNames(parsed.sql, names)) {
+      const found = dottedNames(parsed.sql, names)
+      for (const name of lambdas ? [...found, ...lambdaReads(parsed.sql, names)] : found) {
         if (name !== column.name) read.add(keyOf(name))
       }
       graph.set(keyOf(column.name), read)
@@ -2172,6 +2403,40 @@ function lambdaParameters(tokens: SQLToken[], arrow: number): { names: Set<strin
     if (separator !== ',') return undefined
   }
   return undefined
+}
+
+/**
+ * The columns the lambdas in `sql` name where `dottedNames` skips them (#768).
+ * ClickHouse's ALTER check for cyclic defaults (code 174) reads a lambda's
+ * parameters as columns, even one its body never uses, and a use with `.name`
+ * parts as the longest leading part that is a column: `w -> w.a` reads the
+ * column `w.a` or `w`, never `a` (#799).
+ */
+function lambdaReads(sql: string, columns: ReadonlySet<string>): string[] {
+  const tokens = tokenizeSQL(sql).filter((token) => !isTrivia(token))
+  const found: string[] = []
+  tokens.forEach((token, i) => {
+    const next = tokens[i + 1]
+    if (token.text !== '-' || next?.text !== '>' || token.end !== next.start) return
+    const params = lambdaParameters(tokens, i)
+    if (params === undefined) return
+    for (const name of params.names) if (columns.has(name)) found.push(name)
+    const end = groupEnd(tokens, i + 2)
+    for (let j = i + 2; j < end; j += 1) {
+      const name = identifierName(tokens[j]!)
+      if (name === undefined || !params.names.has(name) || tokens[j - 1]?.text === '.') continue
+      const run = [name]
+      for (let part = tokens[j + 2]; tokens[j + 1]?.text === '.' && part !== undefined; part = tokens[j + 2]) {
+        const partName = identifierName(part)
+        if (partName === undefined) break
+        run.push(partName)
+        j += 2
+      }
+      const column = longestColumnPrefix(run, columns)
+      if (column !== undefined) found.push(column)
+    }
+  })
+  return found
 }
 
 /** Index of the first `,` or unmatched closing bracket at the depth of `from`, or the end. */

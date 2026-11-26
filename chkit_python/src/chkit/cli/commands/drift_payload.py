@@ -99,6 +99,7 @@ def _build_sql_canonicalizer(
     client: Any,
     pairs: list[tuple[TableDefinition, IntrospectedTable]],
     object_queries: list[str],
+    stored_query_pairs: list[tuple[str, str]],
 ) -> MapSqlCanonicalizer | None:
     """Canonicalize every SQL fragment across the compared tables, views and dictionaries.
 
@@ -135,7 +136,8 @@ def _build_sql_canonicalizer(
                 client, expressions, wrap=True, on_registry_unavailable=on_registry_unavailable
             ),
             queries=canonicalize_sql_fragments(
-                client, queries, wrap=False, on_registry_unavailable=on_registry_unavailable
+                client, queries, wrap=False, stored_query_pairs=stored_query_pairs,
+                on_registry_unavailable=on_registry_unavailable
             ),
         )
     except Exception as error:
@@ -286,6 +288,11 @@ def build_drift_payload(
                 if queries is not None
                 for query in (queries.expected, queries.actual)
             ),
+        ],
+        [
+            (queries[0], queries[1])
+            for expected_view, actual_view in view_pairs
+            if (queries := collect_view_sql_queries(expected_view, actual_view))
         ],
     )
     table_drift_unsorted = [

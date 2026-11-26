@@ -5,7 +5,7 @@ from __future__ import annotations
 import heapq
 import json
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
 from chkit.core.canonical import canonicalize_definitions, definition_key
@@ -918,6 +918,9 @@ def order_column_statements(
     """
     reads = _column_default_reads(next_)
     old_reads = _column_default_reads(previous)
+    # ALTER's check for cyclic defaults also reads lambda parameters (#799).
+    cycle_reads = _column_default_reads(next_, lambdas=True)
+    old_cycle_reads = _column_default_reads(previous, lambdas=True)
     ttl_reads = _table_ttl_reads(next_)
     old_ttl_reads = _table_ttl_reads(previous)
     renamed_to = {
@@ -945,6 +948,7 @@ def order_column_statements(
                 releasers.setdefault(read, []).append(index)
 
     added = {op.key for op in statements if op.type == "alter_table_add_column"}
+    releases = _cycle_releases(cycle_reads, old_cycle_reads, added, set(modifies))
     prerequisites: list[list[int]] = []
     for index, op in enumerate(statements):
         found: dict[int, None] = {}
@@ -962,7 +966,7 @@ def order_column_statements(
         # A column's last statement is the MODIFY COLUMN that sets its new expression.
         is_last = index + 1 == len(statements) or statements[index + 1].key != op.key
         if op.type == "alter_table_modify_column" and is_last:
-            for column in _cycle_releases(op.key, reads, old_reads, added):
+            for column in releases.get(op.key, []):
                 for other in modifies.get(column, []):
                     found[other] = None
         if index > 0 and statements[index - 1].key == op.key:
@@ -1102,7 +1106,13 @@ def _repaired_order(  # noqa: PLR0915
         scheduled = sorted(index for root in roots for index in connected[root])
         # The budget also covers the prerequisites the breaker checks walk.
         total = size.get(table, 0) + sum(len(prerequisites[index]) for index in scheduled)
-        replay = _DefaultReplay(initial.get(table, []), 8 * total + 1024)
+        # The columns whose reads the replay changes: the others keep their old reads throughout.
+        changed = {
+            ids[index] or ""
+            for index in members
+            if index in changes or statements[index].type == "alter_table_drop_column"
+        }
+        replay = _DefaultReplay(initial.get(table, []), 8 * total + 1024, changed)
         edges = _break_closed_cycles(
             scheduled,
             set(members),
@@ -1294,28 +1304,32 @@ def _break_closed_cycles(  # noqa: PLR0915
             if column is None or target not in replayed:
                 continue
             change = changes.get(target)
-            cycle = replay.closed_cycle(column, change) if change is not None else set()
+            cycle = replay.closed_cycle(column, change) if change is not None else _NO_CYCLE
             if cycle is None:
                 return None
-            if cycle:
+            if cycle.columns:
                 candidates = sorted(
                     j
-                    for other in cycle
+                    for other in cycle.columns
                     if other != column
                     for j in changing.get(other, ())
                     if j not in placed and group_of[j] != group
                 )
-                if not replay.spend(len(cycle) + len(candidates)):
+                if not replay.spend(len(cycle.columns) + len(candidates)):
                     return None
                 breaker: int | None = None
                 for j in candidates:
                     if not any(
-                        read in cycle and read not in changes[j]
+                        cycle.has(read) and read not in changes[j]
                         for read in replay.reads(columns[j] or "") or ()
                     ):
                         continue
                     waits = _waits_for(
-                        prerequisites, extra, j, target, placed=placed, replay=replay
+                        _WaitGraph(prerequisites, extra, dependents, groups, group_of),
+                        j,
+                        target,
+                        placed=placed,
+                        replay=replay,
                     )
                     if waits is None:
                         return None
@@ -1352,9 +1366,27 @@ def _break_closed_cycles(  # noqa: PLR0915
     return added
 
 
+class _WaitGraph:
+    """The statement graph ``_waits_for`` searches."""
+
+    def __init__(
+        self,
+        prerequisites: list[list[int]],
+        extra: dict[int, list[int]],
+        dependents: dict[int, list[int]],
+        groups: list[list[int]],
+        group_of: list[int],
+    ) -> None:
+        self.prerequisites = prerequisites
+        self.extra = extra
+        # The statements that wait for each one, across groups (``extra`` included).
+        self.dependents = dependents
+        self.groups = groups
+        self.group_of = group_of
+
+
 def _waits_for(
-    prerequisites: list[list[int]],
-    extra: dict[int, list[int]],
+    graph: _WaitGraph,
     start: int,
     target: int,
     *,
@@ -1364,23 +1396,55 @@ def _waits_for(
     """Whether statement ``start`` runs after ``target`` through ``prerequisites`` and ``extra``.
 
     None when ``replay`` runs out of work. A ``placed`` statement has run, so
-    it does not wait for ``target``, which has not. Each prerequisite it looks
-    at uses one unit of the replay's work.
+    it does not wait for ``target``, which has not. ``target`` is ready to
+    run, so every statement that waits for it is still to run. The search runs
+    from both ends, widening the smaller frontier (in turns on a tie): down
+    the prerequisites of ``start``, and up the statements that wait for
+    ``target``, where the members of a group wait for each other. Many
+    breakers can wait for one long chain of statements that does not reach
+    ``target``; the other end then stops it early. Each prerequisite,
+    dependent or group member it looks at uses one unit of the replay's work.
     """
-    seen = {start}
-    pending = [start]
-    while pending:
-        index = pending.pop()
-        for others in (prerequisites[index], extra.get(index, ())):
-            for other in others:
-                if not replay.spend():
-                    return None
-                if other == target:
-                    return True
-                if other in placed or other in seen:
-                    continue
-                seen.add(other)
-                pending.append(other)
+    down = {start}
+    up = {target}
+    up_groups: set[int] = set()
+    down_front, up_front = [start], [target]
+    widen_down = False
+    while down_front and up_front:
+        if len(down_front) == len(up_front):
+            widen_down = not widen_down
+        else:
+            widen_down = len(down_front) < len(up_front)
+        front: list[int] = []
+        if widen_down:
+            for index in down_front:
+                for others in (graph.prerequisites[index], graph.extra.get(index, ())):
+                    for other in others:
+                        if not replay.spend():
+                            return None
+                        if other in up:
+                            return True
+                        if other in placed or other in down:
+                            continue
+                        down.add(other)
+                        front.append(other)
+            down_front = front
+        else:
+            for index in up_front:
+                group = graph.group_of[index]
+                members = () if group in up_groups else graph.groups[group]
+                up_groups.add(group)
+                for others in (members, graph.dependents.get(index, ())):
+                    for other in others:
+                        if not replay.spend():
+                            return None
+                        if other in down:
+                            return True
+                        if other in up:
+                            continue
+                        up.add(other)
+                        front.append(other)
+            up_front = front
     return False
 
 
@@ -1560,6 +1624,26 @@ def _replay_changes(
     return changes
 
 
+class _ClosedCycle:
+    """A cycle ``closed_cycle`` found.
+
+    ``columns`` holds ``column`` and every column on the cycle that a
+    statement changes, among others; it leaves out the links of a chain of
+    unchanged columns that each read one column.
+    """
+
+    def __init__(self, columns: list[str], has: Callable[[str], bool]) -> None:
+        self.columns = columns
+        # Whether a read of a column of ``columns`` (other than ``column``) is on the cycle.
+        self.has = has
+
+
+_NO_CYCLE = _ClosedCycle([], lambda _read: False)
+
+# The landing of a column ``_land`` is still following.
+_ON_PATH = -2
+
+
 class _DefaultReplay:
     """The replay of one table, from its ``initial`` (old) expressions.
 
@@ -1571,18 +1655,30 @@ class _DefaultReplay:
     and readers in the order they were added, so every search does the same
     work in both ports. Each read a search, an update or a copy looks at uses
     one unit of the ``budget``.
+
+    Only the ``changed`` columns are assigned new reads; the others keep
+    their old reads. A walk down the reads skips a chain of unchanged columns
+    that each read one column (``_land``) and remembers where it ends, which
+    never changes. Many cycles can run through one long chain (#829); each
+    cycle then costs the columns around the chain, not its length.
     """
 
-    def __init__(self, initial: list[tuple[str, set[str]]], budget: int) -> None:
+    def __init__(self, initial: list[tuple[str, set[str]]], budget: int, changed: set[str]) -> None:
         self._number: dict[str, int] = {}
         self._names: list[str] = []
         self._reads: list[list[int] | None] = []
         self._readers: list[dict[int, None]] = []
+        self._changed = changed
+        self._fixed: list[bool] = []
+        # Where a walk that reads a column lands (``_land``), or -1 until it is known.
+        self._landing: list[int] = []
         # Marks with an epoch per search, instead of a set per search.
         self._down: list[int] = []
         self._up: list[int] = []
+        self._seen: list[int] = []
         self._inside: list[int] = []
         self._epoch = 0
+        self._gather = 0
         self._left = budget
         for column, reads in initial:
             self.assign(column, reads)
@@ -1610,8 +1706,11 @@ class _DefaultReplay:
         self._names.append(column)
         self._reads.append(None)
         self._readers.append({})
+        self._fixed.append(column not in self._changed)
+        self._landing.append(-1)
         self._down.append(0)
         self._up.append(0)
+        self._seen.append(0)
         self._inside.append(0)
         return number
 
@@ -1620,6 +1719,39 @@ class _DefaultReplay:
         ordered = sorted(columns)
         self._left -= len(ordered)
         return sorted(self._of(column) for column in ordered)
+
+    def _land(self, column: int) -> int:
+        """The column a walk that reads ``column`` lands on.
+
+        ``column`` itself, or, when no statement changes it and it reads one
+        column, where that read lands. Those reads never change, so the answer
+        is kept. Each link it follows the first time uses one unit; the caller
+        checks the budget. A cycle among those reads (an old schema ClickHouse
+        refuses) uses up the work, so the table keeps its sorted order.
+        """
+        path: list[int] = []
+        at = column
+        while True:
+            known = self._landing[at]
+            if known >= 0:
+                at = known
+                break
+            if known == _ON_PATH:
+                for link in path:
+                    self._landing[link] = -1
+                self._left = -1
+                return at
+            reads = self._reads[at]
+            if not self._fixed[at] or reads is None or len(reads) != 1 or self._left < 0:
+                self._landing[at] = at
+                break
+            path.append(at)
+            self._landing[at] = _ON_PATH
+            self._left -= 1
+            at = reads[0]
+        for link in path:
+            self._landing[link] = at
+        return at
 
     def reads(self, column: str) -> list[str] | None:
         """The columns ``column`` reads."""
@@ -1643,8 +1775,8 @@ class _DefaultReplay:
         for read in numbered or ():
             self._readers[read][number] = None
 
-    def closed_cycle(self, column: str, reads: set[str]) -> set[str] | None:
-        """The columns on a cycle through ``column`` that giving it ``reads`` would close.
+    def closed_cycle(self, column: str, reads: set[str]) -> _ClosedCycle | None:  # noqa: PLR0915
+        """The cycle through ``column`` that giving it ``reads`` would close, or none (no columns).
 
         It changes nothing, and returns None when the replay has used up its
         work.
@@ -1652,11 +1784,13 @@ class _DefaultReplay:
         target = self._of(column)
         current = set(self._reads[target] or ())
         self._left -= len(current)
-        cycle: set[str] = set()
-        down, inside = self._down, self._inside
         numbered = self._numbered(reads)
         if self._left < 0:
             return None
+        self._gather += 1
+        mark = self._gather
+        seen, inside = self._seen, self._inside
+        columns: list[str] = []
         for read in numbered:
             if read in current:
                 continue
@@ -1665,35 +1799,62 @@ class _DefaultReplay:
                 return None
             if not hit:
                 continue
-            # This read's cycle: the columns it reaches (``down``) that reach ``column``.
-            self._epoch += 1
-            epoch = self._epoch
-            below = [read]
-            down[read] = epoch
-            while below:
-                for other in self._reads[below.pop()] or ():
+            if not columns:
+                seen[target] = mark
+                inside[target] = mark
+                columns.append(column)
+            # The columns this read reaches (``seen``), walked depth first; one
+            # is on the cycle (``inside``) when one of its reads lands on the cycle.
+            # A column still on the walk is marked ``-mark``: meeting it again
+            # means the state holds a cycle (an old schema ClickHouse refuses),
+            # so the table keeps its sorted order.
+            start = self._land(read)
+            if self._left < 0:
+                return None
+            if seen[start] == mark:
+                continue
+            seen[start] = mark
+            inside[start] = -mark
+            stack, position, on_cycle = [start], [0], [False]
+            while stack:
+                top = len(stack) - 1
+                at = stack[top]
+                at_reads = self._reads[at] or ()
+                index = position[top]
+                if index < len(at_reads):
+                    position[top] = index + 1
                     self._left -= 1
+                    reached = self._land(at_reads[index])
                     if self._left < 0:
                         return None
-                    if other == target or down[other] == epoch:
-                        continue
-                    down[other] = epoch
-                    below.append(other)
-            down[target] = epoch
-            back = [target]
-            inside[target] = epoch
-            cycle.add(column)
-            while back:
-                for reader in self._readers[back.pop()]:
-                    self._left -= 1
-                    if self._left < 0:
+                    if seen[reached] != mark:
+                        seen[reached] = mark
+                        inside[reached] = -mark
+                        stack.append(reached)
+                        position.append(0)
+                        on_cycle.append(False)
+                    elif inside[reached] == mark:
+                        on_cycle[top] = True
+                    elif inside[reached] == -mark:
+                        self._left = -1
                         return None
-                    if down[reader] != epoch or inside[reader] == epoch:
-                        continue
-                    inside[reader] = epoch
-                    cycle.add(self._names[reader])
-                    back.append(reader)
-        return cycle
+                    continue
+                stack.pop()
+                position.pop()
+                inside[at] = 0
+                if not on_cycle.pop():
+                    continue
+                inside[at] = mark
+                columns.append(self._names[at])
+                if top > 0:
+                    on_cycle[top - 1] = True
+
+        def has(name: str) -> bool:
+            # A read of a column on the cycle is on it when it lands on the cycle.
+            number = self._number.get(name)
+            return number is not None and inside[self._land(number)] == mark
+
+        return _ClosedCycle(columns, has)
 
     def _reaches(self, start: int, goal: int) -> bool | None:
         """Whether ``start`` reaches ``goal`` through reads, or None when the work runs out."""
@@ -1713,8 +1874,9 @@ class _DefaultReplay:
             front: list[int] = []
             if widen_down:
                 for column in down_front:
-                    for reached in self._reads[column] or ():
+                    for read in self._reads[column] or ():
                         self._left -= 1
+                        reached = self._land(read)
                         if self._left < 0:
                             return None
                         if up[reached] == epoch:
@@ -1797,10 +1959,15 @@ _LITERAL_WORDS = frozenset(["false", "inf", "infinity", "nan", "null", "true"])
 # Bare words that are not function names even before ``(``.
 _NOT_FUNCTIONS = frozenset(["exists", "lambda", "select", "with"])
 # Keywords of ClickHouse's expression grammar (operators, literals and the
-# words of CASE, INTERVAL, DATE, CAST, EXTRACT, subqueries, joins and
-# windows): a bare one may not read a column of that name, so its expression
-# is not plain, and neither is a call to one outside ``_KEYWORD_FUNCTIONS``. A
-# quoted name reads such a column.
+# words of CASE, INTERVAL, DATE, CAST, EXTRACT, subqueries and windows): a
+# bare one may not read a column of that name, so its expression is not
+# plain, and neither is a call to one outside ``_KEYWORD_FUNCTIONS``. A quoted
+# name reads such a column. Query clause and join words (``left``, ``right``,
+# ``format``, ``offset``, ``settings``...) are not here: ClickHouse 26.3 reads a
+# bare one as its column and a call to one as a function, and their clause
+# uses (``... FORMAT JSON``, ``LIMIT 1 OFFSET 2``) follow an operand, which is
+# not plain anyway. ``values`` is: from 26.4, ``(values(c))`` is a subquery
+# over SQL-standard VALUES, and so is ``(values - 1)`` before 26.4.3.
 _EXPRESSION_KEYWORDS = frozenset(
     [
         "all", "and", "any", "array", "as", "asc", "ascending", "between", "both", "by",
@@ -1810,13 +1977,7 @@ _EXPRESSION_KEYWORDS = frozenset(
         "is", "lambda", "last", "leading", "like", "mod", "not", "nulls", "or", "order",
         "over", "partition", "position", "preceding", "range", "regexp", "replace",
         "respect", "row", "rows", "select", "substring", "then", "ties", "timestamp",
-        "trailing", "trim", "unbounded", "when", "where", "window", "with", "within",
-        # Query clauses and joins.
-        "anti", "apply", "asof", "cross", "cube", "fill", "final", "format", "full", "group",
-        "grouping", "having", "inner", "interpolate", "intersect", "into", "join", "left",
-        "limit", "natural", "offset", "on", "outer", "paste", "placing", "prewhere", "qualify",
-        "right", "rollup", "sample", "semi", "sets", "settings", "step", "totals", "union",
-        "using", "values",
+        "trailing", "trim", "unbounded", "values", "when", "where", "window", "with", "within",
     ]
 )
 # Keywords that are also ordinary functions when called: their special forms
@@ -2025,48 +2186,115 @@ def _parse_type(tokens: list[SQLToken], at: int, depth: int = 0) -> int:
 
 
 def _cycle_releases(
-    key: str,
     reads: dict[str, set[str]],
     old_reads: dict[str, set[str]],
     added: set[str],
-) -> list[str]:
-    """Columns whose MODIFY must run before the MODIFY that sets ``key``'s expression (#769).
+    modified: set[str],
+) -> dict[str, list[str]]:
+    """For each ``modified`` column K, the ``modified`` columns whose MODIFY must run first (#769).
 
-    ClickHouse rejects an expression that closes a cycle. The new expression
+    These MODIFYs must run before the MODIFY that gives K its new expression.
+    ClickHouse rejects an expression that closes a cycle. K's new expression
     closes one through column P when it reads a column that leads to P, and
-    P's old expression reads a column that leads back to ``key``, which P's
-    new expression no longer reads. "Leads to" follows reads that both the
-    old and the new expression of their column have, so the path exists in
-    every intermediate state and only P's MODIFY breaks it. On the way to P
-    it also follows the reads of ``added`` columns: the MODIFY runs after the
-    ADD of every added column its expression reads through them. Every such
-    P is read by the new expression through the new schema, so these edges
-    can't form a cycle unless the new schema has one.
-    """
+    P's old expression reads a column that leads back to K, which P's new
+    expression no longer reads. "Leads to" follows reads that both the old
+    and the new expression of their column have, so the path exists in every
+    intermediate state and only P's MODIFY breaks it. On the way to P it also
+    follows the reads of ``added`` columns: the MODIFY runs after the ADD of
+    every added column its expression reads through them. Every such P is
+    read by K's new expression through the new schema, so these edges can't
+    form a cycle unless the new schema has one.
 
-    def reachable(start: str, through_added: bool) -> set[str]:
+    Such a K, P and every column between them lie on a cycle of old and new
+    reads, so the search starts from the old reads that P drops and keeps to
+    the columns on such cycles (#789). Beyond work linear in the reads, it
+    searches those columns once for each old read that a P drops, and once
+    more for each such read and P when the first search finds a K: a deep
+    chain of defaults costs no more than a short one, unless many dropped
+    reads lead into the same long part of a cycle. Beyond the result, memory
+    stays linear in the reads.
+    """
+    cyclic = _on_cycles(reads, old_reads)
+    # Column -> the columns that lead to it, the first step from K excluded.
+    leads_from: dict[str, list[str]] = {}
+    for column, column_reads in reads.items():
+        if column not in cyclic:
+            continue
+        follow = column in added
+        for read in column_reads:
+            if read in cyclic and (follow or read in old_reads.get(column, ())):
+                leads_from.setdefault(read, []).append(column)
+
+    def closure(start: str, step: Callable[[str], Iterable[str]]) -> set[str]:
         seen = {start}
         pending = [start]
         while pending:
-            column = pending.pop()
-            follow = through_added and column in added
-            for read in reads.get(column, ()):
-                if (follow or read in old_reads.get(column, ())) and read not in seen:
-                    seen.add(read)
-                    pending.append(read)
+            for other in step(pending.pop()):
+                if other in cyclic and other not in seen:
+                    seen.add(other)
+                    pending.append(other)
         return seen
 
-    released: dict[str, None] = {}
-    for read in reads.get(key, ()):
-        for column in reachable(read, through_added=True):
-            if column == key:
-                continue
-            for dropped in old_reads.get(column, ()):
-                if dropped not in reads.get(column, ()) and key in reachable(
-                    dropped, through_added=False
-                ):
-                    released[column] = None
-    return list(released)
+    def stable_reads(column: str) -> Iterable[str]:
+        return reads.get(column, set()) & old_reads.get(column, set())
+
+    # Dropped read -> the breakers that drop it. Each closure is searched,
+    # used and let go, so the searches need memory linear in the reads.
+    dropped_by: dict[str, list[str]] = {}
+    for breaker in sorted(modified):
+        if breaker not in cyclic:
+            continue
+        for dropped in old_reads.get(breaker, ()):
+            if dropped not in reads.get(breaker, ()) and dropped in cyclic:
+                dropped_by.setdefault(dropped, []).append(breaker)
+    released: dict[str, dict[str, None]] = {}
+    for dropped, breakers in dropped_by.items():
+        back = closure(dropped, stable_reads)
+        for breaker in breakers:
+            leads_to_breaker: set[str] | None = None
+            for key in back:
+                if key == breaker or key not in modified:
+                    continue
+                if leads_to_breaker is None:
+                    leads_to_breaker = closure(breaker, lambda column: leads_from.get(column, ()))
+                if not leads_to_breaker.isdisjoint(reads.get(key, ())):
+                    released.setdefault(key, {})[breaker] = None
+    return {key: list(breakers) for key, breakers in released.items()}
+
+
+def _on_cycles(reads: dict[str, set[str]], old_reads: dict[str, set[str]]) -> set[str]:
+    """The columns on a cycle of ``reads`` and ``old_reads`` together, or on a path between two.
+
+    It is what is left after taking away, again and again, every column that
+    reads none of the rest or that none of the rest reads.
+    """
+    reads_of: dict[str, set[str]] = {}
+    read_by: dict[str, set[str]] = {}
+    for graph in (reads, old_reads):
+        for column, column_reads in graph.items():
+            for read in column_reads:
+                reads_of.setdefault(column, set()).add(read)
+                read_by.setdefault(read, set()).add(column)
+    left = {column for column in reads_of if column in read_by}
+    outs = {column: len(reads_of[column] & left) for column in left}
+    ins = {column: len(read_by[column] & left) for column in left}
+    pending = [column for column in left if outs[column] == 0 or ins[column] == 0]
+    while pending:
+        column = pending.pop()
+        if column not in left:
+            continue
+        left.discard(column)
+        for read in reads_of.get(column, ()):
+            if read in left:
+                ins[read] -= 1
+                if ins[read] == 0:
+                    pending.append(read)
+        for other in read_by.get(column, ()):
+            if other in left:
+                outs[other] -= 1
+                if outs[other] == 0:
+                    pending.append(other)
+    return left
 
 
 def _column_key(database: str, table: str, column: str) -> str:
@@ -2137,11 +2365,14 @@ def _longest_column_prefix(parts: list[str], columns: set[str]) -> str | None:
     return None
 
 
-def _column_default_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, set[str]]:
+def _column_default_reads(
+    definitions: Sequence[SchemaDefinition], lambdas: bool = False
+) -> dict[str, set[str]]:
     """Column operation key to the keys of the same table's columns its default expression names.
 
     A name followed by ``(`` is a function call, not a column, and neither are
-    the names ``_not_column_names`` finds.
+    the names ``_not_column_names`` finds. With ``lambdas``, the lambdas' own
+    names read columns as well (``_lambda_reads``).
     """
     graph: dict[str, set[str]] = {}
     for definition in definitions:
@@ -2156,7 +2387,8 @@ def _column_default_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, 
             if parsed.kind != "expression":
                 continue
             read: set[str] = set()
-            for name in _dotted_names(parsed.sql, names):
+            found = _dotted_names(parsed.sql, names)
+            for name in [*found, *_lambda_reads(parsed.sql, names)] if lambdas else found:
                 if name != column.name:
                     read.add(prefix + name)
             graph[prefix + column.name] = read
@@ -2310,6 +2542,47 @@ def _lambda_parameters(tokens: list[SQLToken], arrow: int) -> tuple[set[str], in
             return None
         j -= 2
     return None
+
+
+def _lambda_reads(sql: str, columns: set[str]) -> list[str]:
+    """The columns the lambdas in ``sql`` name where ``_dotted_names`` skips them (#768).
+
+    ClickHouse's ALTER check for cyclic defaults (code 174) reads a lambda's
+    parameters as columns, even one its body never uses, and a use with
+    ``.name`` parts as the longest leading part that is a column: ``w -> w.a``
+    reads the column ``w.a`` or ``w``, never ``a`` (#799).
+    """
+    tokens = [token for token in tokenize_sql(sql) if not is_trivia(token)]
+    found: list[str] = []
+    count = len(tokens)
+    for i, token in enumerate(tokens):
+        following = tokens[i + 1] if i + 1 < len(tokens) else None
+        if following is None or token.text != "-" or following.text != ">":
+            continue
+        if token.end != following.start:
+            continue
+        params = _lambda_parameters(tokens, i)
+        if params is None:
+            continue
+        names = params[0]
+        found.extend(name for name in sorted(names) if name in columns)
+        end = _group_end(tokens, i + 2)
+        j = i + 2
+        while j < end:
+            name = identifier_name(tokens[j])
+            if name is not None and name in names and tokens[j - 1].text != ".":
+                run = [name]
+                while j + 2 < count and tokens[j + 1].text == ".":
+                    part = identifier_name(tokens[j + 2])
+                    if part is None:
+                        break
+                    run.append(part)
+                    j += 2
+                column = _longest_column_prefix(run, columns)
+                if column is not None:
+                    found.append(column)
+            j += 1
+    return found
 
 
 def _group_end(tokens: list[SQLToken], start: int) -> int:

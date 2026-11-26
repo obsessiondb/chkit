@@ -20,7 +20,7 @@ test('plans a missing config without creating files or loading credentials', asy
   expect(result.configPath).toBe(join(fixture.cwd, 'clickhouse.config.ts'))
   expect(result.files).toHaveLength(1)
   expect(result.files[0]?.content).toContain('entry: "./src/integrations/attio/index.ts"')
-  expect(result.files[0]?.content).toContain('plugins: [ingest()]')
+  expect(result.files[0]?.content).toContain('plugins: [sync()]')
   expect(result.files[0]?.content).toContain('process.env.CLICKHOUSE_DB')
   await expect(readFile(result.configPath)).rejects.toThrow('ENOENT')
   assertParses(result.files)
@@ -48,13 +48,18 @@ export default config({
   expect((await planProjectConfig(fixture)).files).toEqual([])
 })
 
-test('preserves an aliased ingestion registration and its options', async () => {
-  const fixture = await project(`import { ingest as load } from '@chkit/plugin-ingest'
+test.each([
+  ['ingest', '@chkit/plugin-ingest'],
+  ['sync', '@chkit/plugin-sync'],
+  ['ingest', '@chkit/plugin-sync'],
+  ['sync', '@chkit/plugin-ingest'],
+])('preserves an aliased %s registration from %s and its options', async (factory, pluginPackage) => {
+  const fixture = await project(`import { ${factory} as load } from '${pluginPackage}'
 export default { schema: ['./old.ts'], plugins: [load({ journalTable: 'custom' })] }`)
   const result = await planProjectConfig(fixture)
   const content = result.files[0]?.content ?? ''
   expect(content).toContain("load({ journalTable: 'custom' })")
-  expect(content.match(/@chkit\/plugin-ingest/g)).toHaveLength(1)
+  expect(content.match(/@chkit\/plugin-(?:ingest|sync)/g)).toHaveLength(1)
   assertParses(result.files)
   await applyPlan(result.files)
   expect((await planProjectConfig(fixture)).files).toEqual([])
@@ -91,12 +96,12 @@ export default { entry: './src/integrations/attio/index.ts', plugins: [ingest()]
   expect((await planProjectConfig(fixture)).files).toEqual([])
 })
 
-test('avoids colliding with an existing ingest binding and preserves inline list comments', async () => {
-  const fixture = await project(`const ingest = 'local'
+test('avoids colliding with an existing sync binding and preserves inline list comments', async () => {
+  const fixture = await project(`const sync = 'local'
 export default { schema: ['./old.ts' // retain this path
 ], plugins: [] }`)
   const result = await planProjectConfig(fixture)
-  expect(result.files[0]?.content).toContain('import { ingest as chkitIngest1 }')
+  expect(result.files[0]?.content).toContain('import { sync as chkitSync1 }')
   expect(result.files[0]?.content).toContain('// retain this path')
   assertParses(result.files)
 })
@@ -126,7 +131,7 @@ test.each([
 
 test('computed config diagnostic supplies the manual registration and exact provider path', async () => {
   const fixture = await project('export default () => ({ schema: [] })')
-  await expect(planProjectConfig(fixture)).rejects.toThrow("import { ingest as chkitIngest } from '@chkit/plugin-ingest'")
+  await expect(planProjectConfig(fixture)).rejects.toThrow("import { sync as chkitSync } from '@chkit/plugin-sync'")
   await expect(planProjectConfig(fixture)).rejects.toThrow('"./src/integrations/attio/index.ts"')
 })
 
@@ -152,9 +157,10 @@ test('fills in only missing explicit provider re-exports', async () => {
   expect(entry).toContain('export { attioPipeline }')
 })
 
-test('rejects repeated ingestion registrations without modifying options', async () => {
+test('rejects old and new registrations together without modifying options', async () => {
   const fixture = await project(`import { ingest as load } from '@chkit/plugin-ingest'
-export default { schema: [], plugins: [load(), load({ journalTable: 'other' })] }`)
+import { sync } from '@chkit/plugin-sync'
+export default { schema: [], plugins: [load(), sync({ journalTable: 'other' })] }`)
   await expect(planProjectConfig(fixture)).rejects.toThrow('registered more than once')
 })
 
@@ -181,7 +187,7 @@ async function project(content?: string) {
   const cwd = await mkdtemp(join(tmpdir(), 'chkit-registry-config-'))
   directories.push(cwd)
   if (content !== undefined) await write(join(cwd, 'clickhouse.config.ts'), content)
-  return { cwd, providerEntry: join(cwd, 'src/integrations/attio/index.ts'), exportNames: exports }
+  return { cwd, providerEntry: join(cwd, 'src/integrations/attio/index.ts'), exportNames: exports, pluginPackage: '@chkit/plugin-sync' as const }
 }
 
 async function write(path: string, content: string): Promise<void> {

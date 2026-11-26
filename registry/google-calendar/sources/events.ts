@@ -1,4 +1,4 @@
-import { rawRows, rawTable, type ReadContext } from '@chkit/plugin-ingest'
+import { rawRows, rawTable, type ReadContext } from '@chkit/plugin-sync'
 import { z } from 'zod'
 
 import { createGoogleCalendarClient, type SyncCursor } from '../client.js'

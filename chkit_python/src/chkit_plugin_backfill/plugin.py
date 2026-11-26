@@ -9,6 +9,7 @@ plugin).
 
 from __future__ import annotations
 
+import sys
 import threading
 import uuid
 from dataclasses import dataclass
@@ -34,7 +35,8 @@ from chkit_plugin_backfill.check import evaluate_backfill_check
 from chkit_plugin_backfill.chunking.sql import (
     assert_insert_settings_keep_pinned,
     build_chunk_execution_sql,
-    unpinned_insert_settings,
+    delivery_override_warning,
+    effective_insert_settings,
 )
 from chkit_plugin_backfill.chunking.types import QuerySettings
 from chkit_plugin_backfill.chunking.utils.ids import generate_idempotency_token
@@ -281,9 +283,10 @@ def _run_backfill_locked(  # noqa: PLR0912, PLR0915 — mirrors TS runBackfill
     insert_settings: dict[str, str | int | float | bool] | None,
     stop: StopFlag,
 ) -> int:
-    # insertSettings that would undo the INSERT's pinned settings are refused
-    # before anything is read or submitted.
-    assert_insert_settings_keep_pinned(insert_settings)
+    # insertSettings that would undo what chkit writes on the INSERT are
+    # refused before anything is read or submitted.
+    cutover = bool(plan.execution.cutover_key and plan.execution.target_columns)
+    assert_insert_settings_keep_pinned(insert_settings, cutover=cutover)
     # Check for existing run state
     existing_run = read_run(paths.run_path)
 
@@ -354,11 +357,18 @@ def _run_backfill_locked(  # noqa: PLR0912, PLR0915 — mirrors TS runBackfill
         aliases = run_interruptible(
             lambda: read_pinned_setting_aliases(db.query_rows), stop, plan.plan_id
         )
-        assert_insert_settings_keep_pinned(insert_settings, aliases)
-        insert_settings = unpinned_insert_settings(insert_settings, aliases)
+        assert_insert_settings_keep_pinned(insert_settings, aliases, cutover=cutover)
+        insert_settings = effective_insert_settings(insert_settings, aliases)
+        warning = delivery_override_warning(insert_settings)
+        if warning is not None:
+            sys.stderr.write(f"{warning}\n")
         run_interruptible(
             lambda: assert_pinned_insert_settings_accepted(
-                plan_id=plan.plan_id, query=db.query_rows
+                plan_id=plan.plan_id,
+                query=db.query_rows,
+                insert_settings=insert_settings,
+                cutover=cutover,
+                token=plan.execution.require_idempotency_token and not cutover,
             ),
             stop,
             plan.plan_id,
@@ -577,8 +587,12 @@ def create_backfill_plugin(  # noqa: PLR0915 — command table, mirrors TS facto
                 # ObsessionDB enables parallel replicas by default, which
                 # inflates aggregate results (count, GROUP BY). Disable for
                 # planning queries until ObsessionDB handles it at the profile
-                # level.
-                query_settings={"enable_parallel_replicas": 0},
+                # level. Under the name every ClickHouse version accepts:
+                # enable_parallel_replicas is only an alias of it from 24.10 on,
+                # and older servers reject it.
+                query_settings={
+                    "allow_experimental_parallel_reading_from_replicas": 0
+                },
             )
 
             payload = plan_payload(output)

@@ -673,6 +673,13 @@ def test_order_ignores_prerequisites_not_in_the_list() -> None:
     assert order_by_dependencies(["a", "b"], lambda x: x, lambda _: ["zzz"]) == ["a", "b"]
 
 
+def test_order_keeps_a_50000_item_cycle_in_input_order_without_recursion_error() -> None:
+    # Item i needs i+1 and the last item needs 0: the search walks all 50,000 before it returns.
+    n = 50_000
+    items = list(range(n))
+    assert order_by_dependencies(items, str, lambda key: [str((int(key) + 1) % n)]) == items
+
+
 # ---------- ADD COLUMN order by the columns an expression reads (#681) ----------
 
 
@@ -829,6 +836,17 @@ def test_drops_a_column_after_the_dropped_column_whose_expression_reads_it() -> 
     ]
 
 
+def test_drops_a_3000_column_alias_chain_from_the_last_column_to_the_first() -> None:
+    n = 3000
+    columns: list[dict[str, Any]] = [{"name": "c0", "type": "UInt64"}] + [
+        {"name": f"c{i}", "type": "UInt64", "default_kind": "ALIAS", "default": _expr(f"c{i - 1} + 1")}
+        for i in range(1, n)
+    ]
+    assert _sqls([_t(columns)], [_t([])]) == [
+        f"ALTER TABLE app.t DROP COLUMN IF EXISTS `c{i}`;" for i in reversed(range(n))
+    ]
+
+
 def test_a_function_call_named_like_a_column_is_not_a_read() -> None:
     assert _sqls(
         [_t([{"name": "length", "type": "UInt64"}])],
@@ -856,6 +874,73 @@ def test_a_lambda_parameter_named_like_a_column_is_not_a_read() -> None:
         "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT arraySum(arrayMap(c -> c, [1]));",
         "ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT a;",
         "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `c` UInt64 DEFAULT id;",
+    ]
+
+
+# ALTER's check for cyclic defaults counts a lambda parameter named like a
+# column as a read of it, so MODIFY `a` DEFAULT b first met the old `b`
+# DEFAULT that declares `a`: Cyclic alias detected (#799).
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "arraySum(arrayMap(a -> 1, [1]))",
+        "arraySum(arrayMap((x, a) -> x, [1], [2]))",
+        "arraySum(arrayMap(lambda(tuple(a), 1), [1]))",
+    ],
+)
+def test_an_old_lambda_parameter_named_like_a_column_holds_back_the_modify_that_reads_back(
+    expression: str,
+) -> None:
+    assert _sqls(
+        [_t([{"name": "a", "type": "UInt64"}, {"name": "b", "type": "UInt64", "default": _expr(expression)}])],
+        [_t([{"name": "a", "type": "UInt64", "default": _expr("b")}, {"name": "b", "type": "UInt64"}])],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `b` REMOVE DEFAULT;",
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64;",
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;",
+    ]
+
+
+def test_a_new_lambda_parameter_named_like_a_column_waits_for_the_release_of_its_old_read_back() -> None:
+    assert _sqls(
+        [_t([{"name": "a", "type": "UInt64"}, {"name": "b", "type": "UInt64", "default": _expr("a")}])],
+        [_t([
+            {"name": "a", "type": "UInt64", "default": _expr("arraySum(arrayMap(b -> 1, [1]))")},
+            {"name": "b", "type": "UInt64"},
+        ])],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `b` REMOVE DEFAULT;",
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64;",
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT arraySum(arrayMap(b -> 1, [1]));",
+    ]
+
+
+def test_a_lambda_parameter_use_reads_the_dotted_column_it_names() -> None:
+    assert _sqls(
+        [_t([
+            {"name": "w.z", "type": "UInt64"},
+            {"name": "b", "type": "UInt64", "default": _expr("arraySum(arrayMap(w -> w.z, [tuple(1)::Tuple(z UInt64)]))")},
+        ])],
+        [_t([{"name": "w.z", "type": "UInt64", "default": _expr("b")}, {"name": "b", "type": "UInt64"}])],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `b` REMOVE DEFAULT;",
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64;",
+        "ALTER TABLE app.t MODIFY COLUMN `w.z` UInt64 DEFAULT b;",
+    ]
+
+
+# ALTER's cycle check reads `w.a` as the column `w.a` or `w`, never `a`, so
+# the new `b` no longer reads `a` and its MODIFY releases the cycle (#799).
+def test_a_lambda_parameter_use_does_not_read_the_column_named_by_its_last_part() -> None:
+    assert _sqls(
+        [_t([{"name": "a", "type": "UInt64"}, {"name": "b", "type": "UInt64", "default": _expr("a")}])],
+        [_t([
+            {"name": "a", "type": "UInt64", "default": _expr("b")},
+            {"name": "b", "type": "UInt64", "default": _expr("arraySum(arrayMap(w -> w.a, [tuple(1)::Tuple(a UInt64)]))")},
+        ])],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT arraySum(arrayMap(w -> w.a, [tuple(1)::Tuple(a UInt64)]));",
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;",
     ]
 
 
@@ -1661,6 +1746,44 @@ def test_repairs_cycles_whose_breakers_read_many_other_columns() -> None:
     assert _order_of(previous, next_)[:2] == ["t.b000", "t.a000"]
 
 
+def test_repairs_cycles_whose_breakers_wait_for_one_long_chain_of_statements() -> None:
+    # Every breaker ``b_i`` waits for the 128 changes of the ``p`` chain, which
+    # do not wait for ``a_i``. The search from ``a_i``'s end stops at once, so
+    # the checks do not walk the chain again for each cycle (#829).
+    previous, next_ = _shared_chain(512)
+    order = _order_of(previous, next_)
+    assert order[0] == "t.p0127"
+    for i in range(128):
+        assert order.index(f"t.b{i:04d}") < order.index(f"t.a{i:04d}")
+    assert _cycle_repair_work.units == 6011
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "order"),
+    [
+        (
+            [_u("a"), _u("b", "c + z"), _u("c", "d"), _u("d", "c"), _u("z", "a")],
+            [_u("a", "b"), _u("b", "id"), _u("c", "d"), _u("d", "c"), _u("z", "id")],
+            ["t.a", "t.b", "t.z"],
+        ),
+        (
+            [_u("a"), _u("b", "z"), _u("c", "a"), _u("z", "b + c")],
+            [_u("a", "z"), _u("b", "p"), _u("c", "id"), _u("p", "id"), _u("z", "id")],
+            ["t.a", "t.c", "t.p", "t.b", "t.z"],
+        ),
+    ],
+    ids=["unchanged columns", "changed columns"],
+)
+def test_keeps_the_sorted_order_when_the_old_defaults_read_each_other_in_a_cycle(
+    before: list[dict[str, Any]], after: list[dict[str, Any]], order: list[str]
+) -> None:
+    # An old schema whose defaults read each other in a cycle (ClickHouse
+    # refuses one) cannot be replayed, so the table keeps its sorted order: a
+    # cycle among unchanged single reads (``c``, ``d``) and one the walk meets
+    # again (``b``, ``z``).
+    assert _order_of([_t(before)], [_t(after)]) == order
+
+
 @pytest.mark.parametrize(
     ("expression", "name"),
     [
@@ -1750,9 +1873,43 @@ _REPAIRED = ["t.b", "t.a", "t.c"]
 @pytest.mark.parametrize(
     ("extra", "order"),
     [
-        pytest.param([_u("APPLY"), _u("extra", "toUInt64(APPLY)")], _FALLBACK, id="a bare APPLY"),
-        pytest.param([_u("join"), _u("extra", "toUInt64(join)")], _FALLBACK, id="a bare JOIN"),
-        pytest.param([_u("placing"), _u("extra", "toUInt64(placing)")], _FALLBACK, id="a bare PLACING"),
+        pytest.param([_u("APPLY"), _u("extra", "toUInt64(APPLY)")], _REPAIRED, id="a bare APPLY"),
+        pytest.param([_u("join"), _u("extra", "toUInt64(join)")], _REPAIRED, id="a bare JOIN"),
+        pytest.param([_u("placing"), _u("extra", "toUInt64(placing)")], _REPAIRED, id="a bare PLACING"),
+        pytest.param(
+            [_u("left"), _u("RIGHT"), _u("extra", "left + RIGHT")], _REPAIRED, id="bare left and RIGHT"
+        ),
+        pytest.param(
+            [_u("format"), _u("union"), _u("extra", "plus(format, -union)")],
+            _REPAIRED,
+            id="bare format and union",
+        ),
+        pytest.param(
+            [_u("offset"), _u("step"), _u("Final"), _u("extra", "offset * step = Final")],
+            _REPAIRED,
+            id="bare offset, step and Final",
+        ),
+        pytest.param(
+            [_u("settings"), _u("sample"), _u("extra", "CAST(settings AS UInt64) + sample::UInt64")],
+            _REPAIRED,
+            id="bare settings and sample",
+        ),
+        pytest.param(
+            [_u("extra", "toUInt64(left(toString(id), 1)) + toUInt64(RIGHT(toString(id), 1))")],
+            _REPAIRED,
+            id="calls to left and RIGHT",
+        ),
+        pytest.param(
+            [_u("extra", "length(format('{}-{}', toString(id), 'x'))")], _REPAIRED, id="a call to format"
+        ),
+        pytest.param(
+            [_u("left"), _u("extra", "toUInt64(left(toString(left), 1))")],
+            _REPAIRED,
+            id="a call to left with a left column",
+        ),
+        pytest.param([_u("offset"), _u("extra", "id offset")], _FALLBACK, id="a query word after an operand"),
+        pytest.param([_u("values"), _u("extra", "(values - (1))")], _FALLBACK, id="a bare values"),
+        pytest.param([_u("extra", "toUInt64((values(id)))")], _FALLBACK, id="a call to values"),
         pytest.param([_u("APPLY"), _u("extra", "toUInt64(`APPLY`)")], _REPAIRED, id="a quoted APPLY"),
         pytest.param(
             [_u("extra", "length(eXTrAcT('abc', 'a'))")], _FALLBACK, id="eXTrAcT with string arguments"
@@ -1782,10 +1939,12 @@ _REPAIRED = ["t.b", "t.a", "t.c"]
 def test_query_words_and_unit_calls_keep_the_sorted_order(
     extra: list[dict[str, Any]], order: list[str]
 ) -> None:
-    # A bare query or join word, and a call to a function whose arguments can
-    # be units or keywords (in any case, with any arguments), keep the sorted
-    # order. A quoted name is a column read, and other calls, in any case,
-    # keep the repair.
+    # A call to a function whose arguments can be units or keywords (in any
+    # case, with any arguments) keeps the sorted order. A bare query or join
+    # word reads its column and a call to one is a function, as ClickHouse 26.3
+    # parses them, so both keep the repair; such a word after an operand does
+    # not, nor does `values` (a VALUES subquery from 26.4). A quoted name is a column read, and other calls, in any case, keep
+    # the repair.
     assert _order_of(
         [_t([*_CYCLE_BEFORE, *extra])], [_t([*_CYCLE_AFTER, *extra])]
     ) == order
@@ -1837,6 +1996,17 @@ def test_a_quoted_all_is_a_read_of_the_column_with_that_name() -> None:
         [_t([_u("a"), _u("aa"), _u("ab", "a"), _u("all", "ab")])],
         [_t([_u("a", "`all` + 1"), _u("aa", "a + 1"), _u("ab", "5"), _u("all", "5")])],
     ) == ["t.aa", "t.ab", "t.a", "t.all"]
+
+
+def test_a_bare_left_on_the_cycle_is_a_read_of_its_column() -> None:
+    # ClickHouse 26.3 reads a bare `left` as the column: main's order fails
+    # with code 174 when `a DEFAULT left + 1` closes a -> left -> c -> a.
+    # Either `c` or `left` breaks it, so the first in key order, `c`, runs
+    # first.
+    assert _order_of(
+        [_t([_u("a"), _u("c", "a"), _u("left", "c")])],
+        [_t([_u("a", "left + 1"), _u("c", "id"), _u("left", "id")])],
+    ) == ["t.c", "t.a", "t.left"]
 
 
 def test_a_quoted_not_is_no_read_of_a_column_with_that_name() -> None:
@@ -1900,19 +2070,43 @@ def _chain_and_fan_in() -> tuple[_Schema, _Schema]:
     )
 
 
-# The work and the plan at the edge of the work budget, the same as in the TS
-# tests (planner-dependency-order.test.ts). Nine cycles through one long chain
-# of unchanged defaults: with 85 links the table is repaired, with 86 it runs
-# out of work and keeps the sorted order.
+def _fan_in(m: int) -> tuple[_Schema, _Schema]:
+    # ``m`` cycles ``a_i`` -> ``b_i`` -> ``c000`` -> ... -> ``c029`` -> ``z`` -> ``a_i``.
+    k = range(m)
+    links = [[f"c{i:03d}", f"c{i + 1:03d}" if i + 1 < 30 else "z"] for i in range(30)]
+    total = " + ".join(f"a{i:03d}" for i in k)
+    return (
+        [*[[f"a{i:03d}", None] for i in k], *[[f"b{i:03d}", "c000"] for i in k], *links,
+         ["z", f"{total} + id"]],
+        [*[[f"a{i:03d}", f"b{i:03d}"] for i in k], *[[f"b{i:03d}", "id"] for i in k], *links,
+         ["z", "id"]],
+    )
+
+
+# The work and the plan near the edge of the work budget, the same as in the
+# TS tests (planner-dependency-order.test.ts). Nine cycles through one long
+# chain of unchanged defaults are repaired whatever its length: the walks skip
+# the chain (#829). Cycles through one chain whose end reads every cycle's
+# column still cost the cycles squared: 50 are repaired, 60 run out of work and
+# keep the sorted order.
 _BUDGET_EDGE: dict[str, tuple[tuple[_Schema, _Schema], int, str, str]] = {
     "nine cycles through 449 links": (
-        _nine_cycles(449), 12368, "a", "5c58cc444894b01d886f233b2aaaec79d85b591ad579b526333465e37d8b8bcd"
+        _nine_cycles(449), 1292, "c", "7ec17a4b49e8dcdf3beceb5adb5914cee3504df90dd047e9d72b95808538147a"
     ),
     "nine cycles through 85 links": (
-        _nine_cycles(85), 3632, "c", "7ec17a4b49e8dcdf3beceb5adb5914cee3504df90dd047e9d72b95808538147a"
+        _nine_cycles(85), 564, "c", "7ec17a4b49e8dcdf3beceb5adb5914cee3504df90dd047e9d72b95808538147a"
     ),
     "nine cycles through 86 links": (
-        _nine_cycles(86), 3656, "a", "5c58cc444894b01d886f233b2aaaec79d85b591ad579b526333465e37d8b8bcd"
+        _nine_cycles(86), 566, "c", "7ec17a4b49e8dcdf3beceb5adb5914cee3504df90dd047e9d72b95808538147a"
+    ),
+    "30 cycles through 30 links": (
+        _fan_in(30), 1807, "b000", "c9b8ec508f9b1e19693d8da1e7138fd8055abfd4a2ce8d638c8e7093d593879e"
+    ),
+    "50 cycles through 30 links": (
+        _fan_in(50), 3967, "b000", "734d0b6c25b51d293c74327216b4fea5a1c11fe13660488ec1f084c3bbfde145"
+    ),
+    "60 cycles through 30 links": (
+        _fan_in(60), 4648, "a000", "ee8a4528f50e4af7107b205dbfc26ae7b2dd7bd945d8654f3f2074c9603f2cad"
     ),
     "a chain and a fan-in": (
         _chain_and_fan_in(), 1816, "m", "f0ea844653d573b9fd93c11b98a1cf6f6e2f31d10c03d08aa9ee0572f4d8fd36"

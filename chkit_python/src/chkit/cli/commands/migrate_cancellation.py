@@ -763,15 +763,16 @@ def _kill_recorded_queries(conn: _Control, identity: QueryIdentity, ids: list[st
 def _assert_replace_grants(conn: _Control, obligations: list[RecoveryObligation]) -> None:
     """The replace needs CREATE TABLE and DROP TABLE on each target, directly or via roles."""
     rows = conn.query(
-        "SELECT access_type, database, table, is_partial_revoke FROM system.grants "
+        "SELECT access_type, ifNull(database, '') AS database, "
+        "ifNull(table, '') AS table, is_partial_revoke FROM system.grants "
         "WHERE (user_name = currentUser() OR role_name IN "
         "(SELECT role_name FROM system.enabled_roles)) AND access_type IN "
         "('ALL', 'CREATE', 'CREATE TABLE', 'DROP', 'DROP TABLE') AND column IS NULL"
     )
 
     def covers(row: dict[str, Any], table: QueryTarget) -> bool:
-        return (row.get("database") in (None, table.database)
-                and row.get("table") in (None, table.name))
+        return (row.get("database") in (None, "", table.database)
+                and row.get("table") in (None, "", table.name))
 
     def allowed(access: set[str], table: QueryTarget) -> bool:
         matching = [row for row in rows if row.get("access_type") in access and covers(row, table)]

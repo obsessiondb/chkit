@@ -9,7 +9,7 @@ import { createFixture, WORKSPACE_ROOT } from './testkit.test'
 
 type Envelope = { ok: boolean; command: string; error: { code: string; message: string } }
 
-const INGEST_PLUGIN_ENTRY = join(WORKSPACE_ROOT, 'packages/plugin-ingest/src/index.ts')
+const INGEST_PLUGIN_ENTRY = join(WORKSPACE_ROOT, 'packages/plugin-sync/src/index.ts')
 
 function runCli(args: string[]) {
   return spawnWithTimeout(['node', join(WORKSPACE_ROOT, 'packages/cli/dist/bin/chkit.js'), ...args], { cwd: WORKSPACE_ROOT })
@@ -68,7 +68,7 @@ describe('@chkit/cli usage-error --json envelopes (#4)', () => {
   test('well-known plugin command without the plugin emits a JSON envelope', async () => {
     const fixture = await createFixture()
     try {
-      for (const command of ['codegen', 'ingest']) {
+      for (const command of ['codegen', 'ingest', 'sync']) {
         const result = runCli([command, '--config', fixture.configPath, '--json'])
         expect(result.exitCode).toBe(1)
         const envelope = JSON.parse(result.stdout) as Envelope
@@ -93,7 +93,7 @@ describe('@chkit/cli usage-error --json envelopes (#4)', () => {
       const human = runCli(['ingest', 'statsu', '--config', fixture.configPath])
       expect(human.exitCode).toBe(1)
       expect(human.stderr).toContain('Unknown ingest command "statsu"')
-      expect(human.stdout).toContain('chkit ingest <command> [options]')
+      expect(human.stdout).toContain('chkit sync <command> [options]')
 
       const forwarded = runCli(['plugin', 'ingest', 'statsu', '--config', fixture.configPath, '--json'])
       expect(forwarded.exitCode).toBe(1)
@@ -101,7 +101,12 @@ describe('@chkit/cli usage-error --json envelopes (#4)', () => {
 
       const bare = runCli(['ingest', '--config', fixture.configPath])
       expect(bare.exitCode).toBe(0)
-      expect(bare.stdout).toContain('chkit ingest <command> [options]')
+      expect(bare.stdout).toContain('chkit sync <command> [options]')
+
+      const help = runCli(['--help-plugins', '--config', fixture.configPath])
+      expect(help.exitCode).toBe(0)
+      expect(help.stdout).toContain('Plugin: sync')
+      expect(help.stdout).not.toContain('Plugin: ingest')
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }
@@ -139,11 +144,11 @@ describe('@chkit/cli usage-error --json envelopes (#4)', () => {
   test('a plugin command rejects an unknown short flag and keeps dash-leading values (#491)', async () => {
     const fixture = await createIngestFixture()
     try {
-      const shortcut = runCli(['ingest', 'list', '-x', '--config', fixture.configPath, '--json'])
+      const shortcut = runCli(['sync', 'list', '-x', '--config', fixture.configPath, '--json'])
       expect(shortcut.exitCode).toBe(1)
-      expect(JSON.parse(shortcut.stdout)).toMatchObject({ ok: false, command: 'ingest', error: { code: 'usage', message: 'Unknown flag: -x' } })
+      expect(JSON.parse(shortcut.stdout)).toMatchObject({ ok: false, command: 'sync', error: { code: 'usage', message: 'Unknown flag: -x' } })
 
-      const forwarded = runCli(['plugin', 'ingest', 'list', '-x', '--config', fixture.configPath, '--json'])
+      const forwarded = runCli(['plugin', 'sync', 'list', '-x', '--config', fixture.configPath, '--json'])
       expect(forwarded.exitCode).toBe(1)
       expect(JSON.parse(forwarded.stdout)).toMatchObject({ ok: false, error: 'Unknown flag: -x' })
 
@@ -170,8 +175,8 @@ describe('@chkit/cli usage-error --json envelopes (#4)', () => {
 
       const help = runCli(['ingest', 'run', '--help', '--config', fixture.configPath])
       expect(help.exitCode).toBe(0)
-      expect(help.stdout).toContain('chkit ingest run [options]')
-      for (const flag of ['--tag <tag>', '--backfill <id>', '--from <timestamp>', '--to <timestamp>', '--max-duration <seconds>']) {
+      expect(help.stdout).toContain('chkit sync run [options]')
+      for (const flag of ['--tag <tag>', '--backfill <id>', '--from <timestamp>', '--to <timestamp>', '--max-duration <seconds>', '--retries <count>']) {
         expect(help.stdout).toContain(flag)
       }
       expect(help.stdout).not.toContain('--apply')

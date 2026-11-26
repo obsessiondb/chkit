@@ -1,4 +1,4 @@
-import { rawTable, type SourceContext } from '@chkit/plugin-ingest'
+import { rawTable, type SourceContext } from '@chkit/plugin-sync'
 
 import { createGitHubClient, toGitHubRows } from '../client.js'
 import type { GitHubConfig } from '../config.js'

@@ -46,7 +46,8 @@ import {
 async function buildSqlCanonicalizer(
   db: ClickHouseExecutor,
   pairs: Array<{ expected: TableDefinition; actual: IntrospectedTable }>,
-  objectQueries: string[]
+  objectQueries: string[],
+  storedQueryPairs: Array<readonly [string, string]>
 ): Promise<SqlCanonicalizer | undefined> {
   const expressions: string[] = []
   const queries: string[] = [...objectQueries]
@@ -69,7 +70,7 @@ async function buildSqlCanonicalizer(
     // One after the other: the CLI's executor is bound to one HTTP session, and
     // ClickHouse rejects a second query while the session is busy.
     const expressionMap = await canonicalizeSqlFragments(db, expressions, { wrap: true, onRegistryUnavailable })
-    const queryMap = await canonicalizeSqlFragments(db, queries, { wrap: false, onRegistryUnavailable })
+    const queryMap = await canonicalizeSqlFragments(db, queries, { wrap: false, storedQueryPairs, onRegistryUnavailable })
     return {
       expression: (fragment) => expressionMap.get(fragment) ?? null,
       query: (fragment) => queryMap.get(fragment) ?? null,
@@ -229,7 +230,12 @@ export async function buildDriftPayload(
     [
       ...viewPairs.flatMap(({ expected, actual }) => collectViewSqlQueries(expected, actual)),
       ...dictionaryPairs.flatMap(({ queries }) => (queries ? [queries.expected, queries.actual] : [])),
-    ]
+    ],
+    viewPairs.flatMap(({ expected, actual }) => {
+      const queries = collectViewSqlQueries(expected, actual)
+      const [left, right] = queries
+      return left && right ? [[left, right] as const] : []
+    })
   )
   const tableDrift = pairs
     .map(({ expected, actual }) => compareTableShape(expected, actual, canonicalizer, configuredIndexGranularity(config)))

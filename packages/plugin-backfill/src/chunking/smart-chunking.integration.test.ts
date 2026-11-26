@@ -177,10 +177,10 @@ function evaluateClause(clause: string, row: FixtureRow): boolean {
   match = clause.match(/^(\w+) < unhex\('([0-9a-f]*)'\)$/i)
   if (match) return compareLatin1(String(row[match[1]] ?? ''), Buffer.from(match[2], 'hex').toString('latin1')) < 0
 
-  match = clause.match(/^(\w+) >= '([^']+)'$/)
+  match = clause.match(/^(\w+) >= CAST\('([^']+)', '[^']+'\)$/)
   if (match) return comparePrimitive(row[match[1]], match[2]) >= 0
 
-  match = clause.match(/^(\w+) < '([^']+)'$/)
+  match = clause.match(/^(\w+) < CAST\('([^']+)', '[^']+'\)$/)
   if (match) return comparePrimitive(row[match[1]], match[2]) < 0
 
   match = clause.match(/^(\w+) >= (-?\d+(?:\.\d+)?)$/)
@@ -446,6 +446,6 @@ describe('smart chunking integration', () => {
 
     const sql = buildSqlForChunk(plan, requireChunk(comboChunks[0], 'numeric combo chunk'))
     expect(sql).toContain('account >=')
-    expect(sql).toContain("seq >= '")
+    expect(sql).toContain("seq >= CAST('")
   })
 })
