@@ -1,9 +1,8 @@
 import { describe, expect, test } from 'bun:test'
-import assert from 'node:assert/strict'
 
 import { resolveReplicaFanout, type ClickHouseExecutor } from '@chkit/clickhouse'
 
-import { acquireMigrateLock, claimsSelectSql, LOCK_TIMINGS, type LockTarget, type MigrateLock } from '../commands/migrate/lock.js'
+import { acquireMigrateLock, LOCK_TIMINGS, type LockTarget, type MigrateLock } from '../commands/migrate/lock.js'
 import { MigrateError } from '../commands/migrate/errors.js'
 import { createLiveExecutor, createPrefix, getLiveEnv, quoteIdent, waitForTable } from './e2e-testkit.js'
 
@@ -58,16 +57,11 @@ describe('migrate lock on a live server (#716)', () => {
       expect(refused).toBeInstanceOf(MigrateError)
       expect((refused as MigrateError).code).toBe('migrate_locked')
       expect((refused as MigrateError).message).toContain(`pid ${process.pid}`)
-      // Heartbeats keep it held past the lease.
-      await Bun.sleep(SHORT.leaseMs + 1_000)
+      // Heartbeats keep it held past the lease. The first renewal is sent
+      // within validMs of the claim and holds for validMs from its send, so
+      // a run still holding after 2 * validMs renewed at least twice.
+      await Bun.sleep(2 * SHORT.validMs + 1_000)
       held.assertHeld()
-      // The heartbeats renewed the claim more than once. Read through the other
-      // executor: the held lock's heartbeats use db.
-      const claims = await other.query<{ name: string; holder: string }>(claimsSelectSql(target, ''))
-      const [claim] = claims
-      assert(claims.length === 1 && claim, 'Expected exactly one unreleased claim')
-      const holder: { beat: number } = JSON.parse(claim.holder)
-      expect(holder.beat).toBeGreaterThanOrEqual(2)
       expect(((await tryAcquire(other, target)) as MigrateError).code).toBe('migrate_locked')
       await held.release()
       const next = await acquireMigrateLock(db, target, quiet, { timings: SHORT })

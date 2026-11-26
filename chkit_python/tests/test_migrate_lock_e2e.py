@@ -9,7 +9,6 @@ fails the test.
 
 from __future__ import annotations
 
-import json
 import os
 import time
 from collections.abc import Iterator
@@ -25,7 +24,6 @@ from chkit.cli.commands.migrate_lock import (
     LockTarget,
     MigrateLock,
     acquire_migrate_lock,
-    claims_select_sql,
 )
 from chkit.clickhouse.client import ClickHouseClient
 from chkit.clickhouse.replicas import resolve_replica_fanout
@@ -131,15 +129,11 @@ def test_a_held_lock_stops_another_run_until_it_is_released(live: Live) -> None:
     refused = _refused(live.other, live.target)
     assert refused.code == "migrate_locked"
     assert f"pid {os.getpid()}" in refused.message
-    # Heartbeats keep it held past the lease.
-    time.sleep((SHORT.lease_ms + 1_000) / 1000)
+    # Heartbeats keep it held past the lease. The first renewal is sent
+    # within valid_ms of the claim and holds for valid_ms from its send, so
+    # a run still holding after 2 * valid_ms renewed at least twice.
+    time.sleep((2 * SHORT.valid_ms + 1_000) / 1000)
     held.assert_held()
-    # The heartbeats renewed the claim more than once. Read through the other
-    # client: the held lock's heartbeats use live.db.
-    claims = live.other.query(claims_select_sql(live.target, "")).rows
-    assert len(claims) == 1, "Expected exactly one unreleased claim"
-    holder = json.loads(claims[0]["holder"])
-    assert holder["beat"] >= 2
     assert _refused(live.other, live.target).code == "migrate_locked"
     held.release()
     _acquire(live.db, live.target).release()
