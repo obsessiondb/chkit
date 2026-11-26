@@ -11,7 +11,10 @@ import { createLiveExecutor, createPrefix, getLiveEnv, quoteIdent, waitForTable 
 // request, so these runs check that every acknowledged claim is read back.
 
 const TIMEOUT_MS = 180_000
-const SHORT = { ...LOCK_TIMINGS, leaseMs: 12_000, validMs: 6_000, heartbeatMs: 1_000, observeMarginMs: 2_000, attempts: 1 }
+// Two consecutive heartbeat write+read-back cycles plus the interval must fit
+// within validMs on a remote replicated target. Keep the lease longer so the
+// expiry test's crashed run has lapsed by the time its claim expires.
+const SHORT = { ...LOCK_TIMINGS, leaseMs: 25_000, validMs: 20_000, heartbeatMs: 1_000, observeMarginMs: 2_000, attempts: 1 }
 const quiet = { log: () => {} }
 
 async function withTarget(

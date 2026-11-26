@@ -35,10 +35,13 @@ from tests.e2e_testkit import (
     wait_for_table_on_every_replica,
 )
 
+# Two consecutive heartbeat write+read-back cycles plus the interval must fit
+# within valid_ms on a remote replicated target. Keep the lease longer so the
+# expiry test's crashed run has lapsed by the time its claim expires.
 SHORT = replace(
     LOCK_TIMINGS,
-    lease_ms=12_000,
-    valid_ms=6_000,
+    lease_ms=25_000,
+    valid_ms=20_000,
     heartbeat_ms=1_000,
     observe_margin_ms=2_000,
     attempts=1,
