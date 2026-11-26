@@ -195,6 +195,19 @@ def test_unsupported_settings_are_recorded_for_refusal(settings: dict[str, Any])
     assert json.loads(client.checksum)["kind"] == "unsupported"
 
 
+@pytest.mark.parametrize("settings", [
+    {"max_threads": 1}, {"async_insert": "0"}, {"wait_for_async_insert": "1"},
+    {"async_insert": "false", "wait_for_async_insert": "TRUE"},
+])
+def test_durable_insert_settings_keep_an_insert_cancellable(settings: dict[str, Any]) -> None:
+    # #790: chkit's defaults, in any spelling, keep the statement stored when it returns.
+    lock = FakeLock()
+    client = IntentClient(lock, "none")
+    tracker = QueryTracker(client, TARGET, IDENTITY, lock)  # type: ignore[arg-type]
+    tracker.command(CONTEXT, "forward", CONTEXT.forward_sql, settings)
+    assert json.loads(client.checksum)["kind"] == "insert"
+
+
 def test_async_intent_keeps_its_existing_id_and_is_noncancellable() -> None:
     lock = FakeLock()
     client = IntentClient(lock, "none")

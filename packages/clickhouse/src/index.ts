@@ -673,6 +673,40 @@ export function wrapConnectionError(error: unknown, url: string, username?: stri
 	throw error
 }
 
+/**
+ * A submit that provably never sent its request (#800): its TCP connect was
+ * refused, or its host name did not resolve. The server never saw the query.
+ */
+export class SubmitNotSentError extends Error {
+	readonly submitNotSent = true
+	constructor(message: string, options?: ErrorOptions) {
+		super(message, options)
+		this.name = 'SubmitNotSentError'
+	}
+}
+
+export function isSubmitNotSentError(error: unknown): boolean {
+	return error instanceof Error && (error as { submitNotSent?: unknown }).submitNotSent === true
+}
+
+/**
+ * Whether a request failed before it wrote a byte (#800). Only the socket's
+ * own connect failing with ECONNREFUSED, or the host lookup failing, shows
+ * that: a request is written only once its socket connected, and a socket
+ * reused from the pool neither looks up nor connects. A reset, a timeout or
+ * an HTTP response may follow a request the server read.
+ */
+export function failedBeforeSending(error: unknown): boolean {
+	if (!(error instanceof Error)) return false
+	// Node's connect to every address of a host (autoSelectFamily).
+	if (error instanceof AggregateError) {
+		return error.errors.length > 0 && error.errors.every(failedBeforeSending)
+	}
+	const { code, syscall } = error as NodeJS.ErrnoException
+	if (syscall === 'getaddrinfo') return true
+	return code === 'ECONNREFUSED' && syscall === 'connect'
+}
+
 export function isUnknownDatabaseError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false
 	if (!('code' in error)) return false
@@ -821,11 +855,21 @@ const PROGRESS_SETTINGS: ClickHouseSettings = {
 	http_headers_progress_interval_ms: '30000',
 }
 
-// Sent with writes only (command and insert): no asynchronous INSERTs, and
-// progress headers that keep a long migration's connection alive.
-const WRITE_SETTINGS: ClickHouseSettings = {
-	async_insert: 0,
-	...PROGRESS_SETTINGS,
+// A write is stored when it returns: no asynchronous INSERT, and one that a
+// table's own async_insert setting still makes asynchronous waits for its
+// flush (#790). These are defaults: a caller's own value of either is sent as
+// written. They go after the caller's other settings, since the server
+// applies a request's settings in order and a settings profile among them
+// would otherwise change them.
+function withDurableInsertSettings(settings: ClickHouseSettings | undefined): ClickHouseSettings {
+	const { async_insert, wait_for_async_insert, ...rest } = settings ?? {}
+	return { ...rest, async_insert: async_insert ?? 0, wait_for_async_insert: wait_for_async_insert ?? 1 }
+}
+
+// Sent with writes only (command and insert): stored writes, and progress
+// headers that keep a long migration's connection alive.
+function writeSettings(settings: ClickHouseSettings | undefined): ClickHouseSettings {
+	return withDurableInsertSettings({ ...PROGRESS_SETTINGS, ...settings })
 }
 
 // A readonly = 1 user cannot change any setting: ClickHouse rejects a query
@@ -947,7 +991,7 @@ export function createExecutorWithClient(
 
 	async function command(sql: string, settings?: ClickHouseSettings, check?: () => void, beforeAttempt?: () => Promise<string>): Promise<void> {
 		const { query_id: _ignored, ...trackedSettings } = settings ?? {}
-		const commandSettings: ClickHouseSettings = beforeAttempt ? { ...WRITE_SETTINGS, ...trackedSettings } : { ...WRITE_SETTINGS, ...settings }
+		const commandSettings = writeSettings(beforeAttempt ? trackedSettings : settings)
 		check?.()
 		let queryId: string | undefined
 		if (beforeAttempt) {
@@ -980,7 +1024,9 @@ export function createExecutorWithClient(
 					...credentialOptions(config),
 					application: CHKIT_APPLICATION_ID,
 					request_timeout: NO_REQUEST_TIMEOUT,
-					clickhouse_settings: { wait_end_of_query: 1, async_insert: 0 },
+					// The command's own settings carry the durable insert settings,
+					// last; a client default would put them before a profile (#790).
+					clickhouse_settings: { wait_end_of_query: 1 },
 					log: SILENT_CLIENT_LOG,
 				})
 				try {
@@ -1181,7 +1227,7 @@ export function createExecutorWithClient(
 					values: params.stream ? Readable.from(params.values) : params.values,
 					format: 'JSONEachRow',
 					...(isNonEmpty(params.columns) ? { columns: params.columns } : {}),
-					clickhouse_settings: { ...WRITE_SETTINGS, ...params.settings },
+					clickhouse_settings: writeSettings(params.settings),
 				})
 				assertStreamedQuerySucceeded({
 					response_headers: result.response_headers,
@@ -1239,12 +1285,21 @@ export function createExecutorWithClient(
 				await target.command({
 					query: sql,
 					query_id: id,
-					...(settings ? { clickhouse_settings: clickhouseSettings } : {}),
+					// Stored when it finishes, as a command is: an asynchronous INSERT
+					// would finish while its rows are still buffered (#790).
+					clickhouse_settings: withDurableInsertSettings(clickhouseSettings),
 					...(submitOptions?.signal ? { abort_signal: submitOptions.signal } : {}),
 				})
 			} catch (error) {
 				// A refused request was never written, whatever the driver says.
 				if (recorded?.refused() || isSendNotAdmitted(error)) throw sendNotAdmittedError()
+				// The client sends each request once (#767), so a failure before
+				// its first byte proves the query was never sent (#800). A submit
+				// with an admission has its own proof (#765), as chkit-py's
+				// submit_once does: it is left as it was.
+				if (!admission && failedBeforeSending(error)) {
+					throw new SubmitNotSentError(formatConnectionError(error, config.url, config.username) ?? String(error), { cause: error })
+				}
 				wrapConnectionError(error, config.url, config.username)
 			} finally {
 				if (admission) {

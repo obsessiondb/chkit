@@ -1,0 +1,5 @@
+---
+"chkit": patch
+---
+
+`generate` now also repairs the order of default-cycle changes in tables that call `left()`, `right()` or `format()`, or read columns named like query words such as `left`, `format` or `offset`.

@@ -1,6 +1,6 @@
 {
   "name": "@chkit/plugin-sync",
-  "version": "0.2.0-beta.18",
+  "version": "0.2.0-beta.19",
   "description": "Scheduled API sync into ClickHouse with journaled checkpoints for chkit",
   "license": "MIT",
   "author": "ObsessionDB",

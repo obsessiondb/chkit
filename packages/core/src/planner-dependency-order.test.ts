@@ -10,8 +10,11 @@ import {
   view,
 } from './index'
 import type { ColumnDefinition, SchemaDefinition } from './index'
+import type { MigrationOperation } from './index'
 import { buildDependencyGraph, orderByDependencies } from './object-dependencies.js'
-import { columnDefaultReads } from './planner.js'
+import { cycleRepairWork } from './column-cycle-repair.js'
+import { orderColumnStatements } from './column-order.js'
+import { columnDefaultReads, columnRenameKey } from './column-reads.js'
 
 const appTable = (name: string, columns: ColumnDefinition[] = [{ name: 'id', type: 'UInt64' }]) =>
   table({ database: 'app', name, columns, engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'] })
@@ -1228,6 +1231,436 @@ describe('planDiff orders MODIFY read releases and table TTL changes (#769)', ()
   })
 })
 
+describe('planDiff orders a column type change against the expressions that read the column (#814)', () => {
+  const t = (columns: ColumnDefinition[], extra: { ttl?: string } = {}) =>
+    table({
+      database: 'app',
+      name: 't',
+      columns: [{ name: 'id', type: 'UInt64' }, ...columns],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+      ...extra,
+    })
+  const sqls = (previous: SchemaDefinition[], next: SchemaDefinition[]) =>
+    planDiff(previous, next).operations.map((op) => op.sql)
+
+  test('changes the type after the MODIFY whose new DEFAULT stops reading the column', () => {
+    expect(
+      sqls(
+        [t([{ name: 'a', type: 'String' }, { name: 'b', type: 'UInt64', default: { expression: 'length(a)' } }])],
+        [t([{ name: 'a', type: 'UInt64' }, { name: 'b', type: 'UInt64', default: { expression: '0' } }])]
+      )
+    ).toEqual(['ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT 0;', 'ALTER TABLE app.t MODIFY COLUMN `a` UInt64;'])
+  })
+
+  test('changes the type after the DROP of a column whose ALIAS reads it', () => {
+    expect(
+      sqls(
+        [t([{ name: 'a', type: 'String' }, { name: 'b', type: 'UInt64', defaultKind: 'ALIAS', default: { expression: 'length(a)' } }])],
+        [t([{ name: 'a', type: 'UInt64' }])]
+      )
+    ).toEqual(['ALTER TABLE app.t DROP COLUMN IF EXISTS `b`;', 'ALTER TABLE app.t MODIFY COLUMN `a` UInt64;'])
+  })
+
+  test('runs the MODIFY and the ADD whose new DEFAULT starts reading the column after its type change', () => {
+    expect(
+      sqls(
+        [t([{ name: 'b', type: 'UInt64', default: { expression: '0' } }, { name: 'z', type: 'String' }])],
+        [
+          t([
+            { name: 'b', type: 'UInt64', default: { expression: 'z + 1' } },
+            { name: 'c', type: 'UInt64', defaultKind: 'MATERIALIZED', default: { expression: 'z * 2' } },
+            { name: 'z', type: 'UInt64' },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `z` UInt64;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT z + 1;',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `c` UInt64 MATERIALIZED z * 2;',
+    ])
+  })
+
+  // No order of the two MODIFYs applies when both DEFAULTs need their own type of `a`.
+  test('keeps key order when the old and the new DEFAULT both read the column', () => {
+    expect(
+      sqls(
+        [t([{ name: 'a', type: 'String' }, { name: 'b', type: 'UInt64', default: { expression: 'length(a)' } }])],
+        [t([{ name: 'a', type: 'UInt64' }, { name: 'b', type: 'UInt64', default: { expression: 'a + 1' } }])]
+      )
+    ).toEqual(['ALTER TABLE app.t MODIFY COLUMN `a` UInt64;', 'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT a + 1;'])
+  })
+
+  // Moving MODIFY `a` behind `b` must not move it behind `z`, whose new
+  // DEFAULT needs the new type and which ran after it before.
+  test('a statement whose old and new DEFAULT both read the column keeps its side of the type change', () => {
+    expect(
+      sqls(
+        [
+          t([
+            { name: 'a', type: 'String' },
+            { name: 'b', type: 'UInt64', default: { expression: 'length(a)' } },
+            { name: 'z', type: 'UInt64', default: { expression: 'length(toString(a))' } },
+          ]),
+        ],
+        [
+          t([
+            { name: 'a', type: 'UInt64' },
+            { name: 'b', type: 'UInt64', default: { expression: '0' } },
+            { name: 'z', type: 'UInt64', default: { expression: 'a + 1' } },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT 0;',
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64;',
+      'ALTER TABLE app.t MODIFY COLUMN `z` UInt64 DEFAULT a + 1;',
+    ])
+  })
+
+  // `b` would wait for `a`, `z` for `b`, and `a` already waits for `z`: the
+  // edge the sort already satisfies goes in, the other is left out.
+  test('keeps the sorted order when two type-change edges conflict', () => {
+    expect(
+      sqls(
+        [t([{ name: 'a', type: 'UInt64', default: { expression: 'toUInt64(b)' } }, { name: 'b', type: 'UInt8' }])],
+        [
+          t([
+            { name: 'a', type: 'UInt64', default: { expression: 'z' } },
+            { name: 'b', type: 'UInt16' },
+            { name: 'z', type: 'UInt64', default: { expression: 'toUInt64(b)' } },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt16;',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `z` UInt64 DEFAULT toUInt64(b);',
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT z;',
+    ])
+  })
+
+  // Holding `a` and `b` behind `x` would run `c DEFAULT a` while the old
+  // `a DEFAULT b` and `b DEFAULT c` stand, so the sorted order stays.
+  test('keeps the sorted order when the type-change edges would close a cycle of expressions', () => {
+    expect(
+      sqls(
+        [
+          t([
+            { name: 'a', type: 'UInt64', default: { expression: 'b' } },
+            { name: 'b', type: 'UInt64', default: { expression: 'c' } },
+            { name: 'c', type: 'UInt64', default: { expression: '0' } },
+            { name: 'x', type: 'UInt32' },
+          ]),
+        ],
+        [
+          t([
+            { name: 'a', type: 'UInt64', default: { expression: 'x' } },
+            { name: 'b', type: 'UInt64', default: { expression: 'x' } },
+            { name: 'c', type: 'UInt64', default: { expression: 'a' } },
+            { name: 'x', type: 'UInt64' },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT x;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT x;',
+      'ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT a;',
+      'ALTER TABLE app.t MODIFY COLUMN `x` UInt64;',
+    ])
+  })
+
+  // The TTL edges would run `b` first, and the unchanged `c` would then add
+  // two DateTimes: type changes keep their order, so the sorted order stays.
+  test('keeps the sorted order when it would reorder two type changes', () => {
+    expect(
+      sqls(
+        [
+          t(
+            [
+              { name: 'a', type: 'DateTime' },
+              { name: 'b', type: 'UInt32' },
+              { name: 'c', type: 'String', default: { expression: 'toString(a + b)' } },
+            ],
+            { ttl: 'toDateTime(toUInt32(a))' }
+          ),
+        ],
+        [
+          t(
+            [
+              { name: 'a', type: 'UInt32' },
+              { name: 'b', type: 'DateTime' },
+              { name: 'c', type: 'String', default: { expression: 'toString(a + b)' } },
+            ],
+            { ttl: 'toDateTime(toUInt32(b))' }
+          ),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt32;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` DateTime;',
+      'ALTER TABLE app.t MODIFY TTL toDateTime(toUInt32(b));',
+    ])
+  })
+
+  // The unchanged `c DEFAULT if(id = 0, a, b)` sees the types of `a` and `b`
+  // in the order their changes run, so that order stays.
+  test('type changes keep their order among themselves', () => {
+    expect(
+      sqls(
+        [
+          t([
+            { name: 'a', type: 'Int64' },
+            { name: 'b', type: 'UInt32' },
+            { name: 'c', type: 'UInt64', default: { expression: 'if(id = 0, a, b)' } },
+            { name: 'd', type: 'UInt64', default: { expression: 'toUInt64(a)' } },
+          ]),
+        ],
+        [
+          t([
+            { name: 'a', type: 'UInt32' },
+            { name: 'b', type: 'UInt64' },
+            { name: 'c', type: 'UInt64', default: { expression: 'if(id = 0, a, b)' } },
+            { name: 'd', type: 'UInt64', default: { expression: '0' } },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `d` UInt64 DEFAULT 0;',
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt32;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64;',
+    ])
+  })
+
+  // Each ADD COLUMN appends its column, so moving `a` behind the type change
+  // and past the ADD of `b` would change the table's column order.
+  test('keeps the sorted order when it would change the order of the ADD COLUMNs', () => {
+    expect(
+      sqls(
+        [t([{ name: 'z', type: 'UInt32' }])],
+        [
+          t([
+            { name: 'z', type: 'UInt64' },
+            { name: 'a', type: 'UInt64', default: { expression: 'toUInt64(z)' } },
+            { name: 'b', type: 'String' },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT toUInt64(z);',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `b` String;',
+      'ALTER TABLE app.t MODIFY COLUMN `z` UInt64;',
+    ])
+  })
+
+  // Moving ADD `n` and ADD `k` behind the type change would run ADD `k`
+  // while `k.x` exists, which ClickHouse skips: ADDs and DROPs keep their order.
+  test('keeps the sorted order when it would move an ADD past a DROP', () => {
+    expect(
+      sqls(
+        [
+          t([
+            { name: 'a', type: 'UInt64', default: { expression: 'length(`k.x`)' } },
+            { name: 'k.x', type: 'Array(UInt32)' },
+            { name: 'z', type: 'UInt32' },
+          ]),
+        ],
+        [
+          t([
+            { name: 'a', type: 'UInt64', default: { expression: 'z' } },
+            { name: 'k', type: 'UInt64', default: { expression: 'n' } },
+            { name: 'n', type: 'UInt64' },
+            { name: 'z', type: 'UInt64' },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT z;',
+      'ALTER TABLE app.t DROP COLUMN IF EXISTS `k.x`;',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `n` UInt64;',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `k` UInt64 DEFAULT n;',
+      'ALTER TABLE app.t MODIFY COLUMN `z` UInt64;',
+    ])
+  })
+
+  test('changes the type after the table TTL stops reading the column', () => {
+    expect(
+      sqls(
+        [t([{ name: 'a', type: 'String' }], { ttl: 'toDateTime(id) + toIntervalDay(length(a))' })],
+        [t([{ name: 'a', type: 'UInt64' }], { ttl: 'toDateTime(id) + INTERVAL 1 DAY' })]
+      )
+    ).toEqual(['ALTER TABLE app.t MODIFY TTL toDateTime(id) + INTERVAL 1 DAY;', 'ALTER TABLE app.t MODIFY COLUMN `a` UInt64;'])
+  })
+
+  // Moving MODIFY `a` behind the TTL change would move it past the ADD INDEX
+  // that sits between them, so the sorted order stays.
+  test('keeps the sorted order when a statement would move past another ALTER', () => {
+    const indexed = t([{ name: 'a', type: 'UInt64' }], { ttl: 'toDateTime(id) + INTERVAL 1 DAY' })
+    expect(
+      sqls(
+        [t([{ name: 'a', type: 'String' }], { ttl: 'toDateTime(id) + toIntervalDay(length(a))' })],
+        [{ ...indexed, indexes: [{ name: 'idx', expression: 'a', type: 'minmax', granularity: 1 }] }]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64;',
+      'ALTER TABLE app.t ADD INDEX IF NOT EXISTS `idx` (a) TYPE minmax GRANULARITY 1;',
+      'ALTER TABLE app.t MODIFY TTL toDateTime(id) + INTERVAL 1 DAY;',
+    ])
+  })
+
+  test('a table with a column rename keeps its order', () => {
+    const previous = [t([{ name: 'a', type: 'String' }, { name: 'b', type: 'UInt64', default: { expression: 'length(a)' } }, { name: 'old', type: 'UInt64' }])]
+    const next = [t([{ name: 'a', type: 'UInt64' }, { name: 'b', type: 'UInt64', default: { expression: '0' } }, { name: 'new', type: 'UInt64' }])]
+    const rename = { database: 'app', table: 't', from: 'old', to: 'new' }
+    const operations = [
+      { type: 'alter_table_modify_column', key: 'table:app.t:column:a', risk: 'caution', sql: 'MODIFY a' },
+      { type: 'alter_table_modify_column', key: 'table:app.t:column:b', risk: 'caution', sql: 'MODIFY b' },
+      { type: 'alter_table_rename_column', key: columnRenameKey(rename), risk: 'caution', sql: 'RENAME' },
+    ] satisfies MigrationOperation[]
+    expect(orderColumnStatements(operations, { previous, next }, [rename]).map((op) => op.sql)).toEqual(['MODIFY a', 'MODIFY b', 'RENAME'])
+    expect(orderColumnStatements(operations, { previous, next }, []).map((op) => op.sql)).toEqual(['MODIFY b', 'MODIFY a', 'RENAME'])
+  })
+})
+
+// Each expected read below is what ClickHouse 26.3 reads: a DROP COLUMN of a
+// column it reads is refused (#805).
+describe('columnDefaultReads skips keywords and alias names (#805)', () => {
+  const columns = ['and', 'as', 'c', 'else', 'end', 'from', 'id', 'interval', 'is', 'like', 'nan', 'not', 'null', 'NULL', 's', 'then', 'true', 'ts', 'when', 'x']
+  const readsOf = (expression: string, extra: string[] = []) => {
+    const definition = table({
+      database: 'app',
+      name: 't',
+      columns: [
+        ...[...columns, ...extra].map((name) => ({ name, type: 'UInt64' })),
+        { name: 'v', type: 'UInt64', default: { expression } },
+      ],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+    const reads = columnDefaultReads([definition]).get('table:app.t:column:v') ?? new Set<string>()
+    return [...reads].map((key) => key.slice('table:app.t:column:'.length)).sort()
+  }
+
+  test.each<[string, string[]]>([
+    ['case when x = 1 then 2 else 3 end', ['x']],
+    ['case x when 1 then 2 end', ['when', 'x']],
+    ['CASE x WHEN 1 THEN 2 END + 0', ['x']],
+    ['if(x is null, 1, 2)', ['x']],
+    ['if(x is not null, 1, 2)', ['x']],
+    ['not x', ['x']],
+    ['toUInt64(not (x = 1))', ['x']],
+    ['x not in (1, 2)', ['x']],
+    ['ifNull(null, 1) + ifNull(NULL, 1)', []],
+    ['if(true, 1, 2) + toUInt64(isNaN(nan))', []],
+    ['length(substring(toString(s) from 1 for 2))', ['s']],
+    ['toUInt64(extract(day from ts))', ['ts']],
+    ["length(trim(both ' ' from toString(s)))", ['s']],
+    ['x and 1', ['x']],
+    ['x between 1 and 2', ['x']],
+    ['toUInt64(x as c)', ['x']],
+    ['toUInt64(x AS `c`)', ['x']],
+    ['(x + 1 as c) * 2', ['x']],
+  ])('keyword: %s reads %p', (expression, expected) => {
+    expect(readsOf(expression)).toEqual(expected)
+  })
+
+  test.each<[string, string[]]>([
+    ['end + 1', ['end']],
+    ['toUInt64(when)', ['when']],
+    ['is + 1', ['is']],
+    ['x and and', ['and', 'x']],
+    ['toUInt64(as)', ['as']],
+    ['case when end = 1 then 2 end', ['end']],
+    ['case when x = 1 then end else 3 end', ['end', 'x']],
+    ['case when x = 1 then then else else end', ['else', 'then', 'x']],
+    ['case when x = 1 then 2 else 3 end + end', ['end', 'x']],
+    ['toUInt64(substring(toString(s) from from))', ['from', 's']],
+    ['ifNull(`null`, 1)', ['null']],
+    ['toUInt64(`true`)', ['true']],
+    ['toUInt64(`not`)', ['not']],
+    ['toUInt64(c as c)', ['c']],
+    ['(x + 1 as c) * c', ['c', 'x']],
+    // A column named like a prefix keyword may be that keyword: the name after it is still read.
+    ['toUInt64(toDateTime(0) + interval end day)', ['end', 'interval']],
+    ['arraySum(arrayMap(interval -> toUInt64(toDateTime(0) + interval end day), [1]))', ['end']],
+    ["length(extract(interval end day > interval 0 day ? 'a' : 'b', '.'))", ['end', 'interval']],
+    ['arraySum(arrayMap(and -> 1 and end, [1]))', ['end']],
+    ["arraySum(arrayMap(both -> both not like end, ['x']))", ['end', 'like']],
+    ['toUInt8(t.x and end)', ['and', 'end', 'x']],
+    // Unclear positions keep the read: after a lambda parameter, and before a single `=`.
+    ['arraySum(arrayMap(i -> i is null, [x]))', ['is', 'x']],
+    ['toUInt8(null = 1)', ['null']],
+    // An alias named `case` (`s AS case`) is no CASE keyword.
+    ['length(concat(toString(s) AS case, substring(case from then)))', ['from', 's', 'then']],
+    ["length(extract(interval from day > interval 0 day ? 'a' : 'b', '.'))", ['from', 'interval']],
+  ])('column: %s reads %p', (expression, expected) => {
+    expect(readsOf(expression)).toEqual(expected)
+  })
+
+  // With a column named `case`, a bare `case` keeps its read: ClickHouse reads
+  // the column wherever CASE does not parse (`INTERVAL case DAY`, `case when`
+  // with the alias `when`), and chkit does not tell the two apart.
+  test.each<[string, string[]]>([
+    ['case', ['case']],
+    ['case + 1', ['case']],
+    ['case when case = 1 then 2 end', ['case', 'when']],
+    ['case global in (1, 2)', ['case']],
+    ["case regexp 'x'", ['case']],
+    ['toUInt64(toDateTime(0) + interval case day)', ['case', 'interval']],
+    ['length(substring(case c, 1))', ['c', 'case']],
+    ['length(substring(case when, 1))', ['case', 'when']],
+    ['toUInt64(toDateTime(0) + interval case when day)', ['case', 'interval', 'when']],
+    ['case when x = 1 then 2 else 3 end', ['case', 'when', 'x']],
+    ['length(substring(case when from then))', ['case', 'from', 'then', 'when']],
+  ])('column case: %s reads %p', (expression, expected) => {
+    expect(readsOf(expression, ['case'])).toEqual(expected)
+  })
+
+  test('a DROP COLUMN runs after the dropped column that reads it when a CASE names that column', () => {
+    const before = appTable('t', [
+      { name: 'id', type: 'UInt64' },
+      { name: 'a', type: 'UInt64', default: { expression: 'case when id = 1 then 2 else 3 end' } },
+      { name: 'end', type: 'UInt64', default: { expression: 'a + 1' } },
+    ])
+    expect(objectOps([before], [appTable('t')])).toEqual([
+      'alter_table_drop_column table:app.t:column:end',
+      'alter_table_drop_column table:app.t:column:a',
+    ])
+  })
+
+  test.each<[string, string, string]>([
+    ['case', "case TO DISK 'default'", "ts TO DISK 'default'"],
+    ['case', 'case DELETE', 'ts DELETE'],
+    ['null', 'ts GROUP BY id SET null = max(x)', 'ts GROUP BY id SET x = max(x)'],
+  ])('a TTL that reads the column %s changes before it is dropped: %s', (column, before, after) => {
+    const columns: ColumnDefinition[] = [
+      { name: 'id', type: 'UInt64' },
+      { name: 'ts', type: 'DateTime' },
+      { name: 'x', type: 'UInt64' },
+    ]
+    const withTtl = (extra: ColumnDefinition[], ttl: string) =>
+      table({ database: 'app', name: 't', columns: [...columns, ...extra], engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'], ttl })
+    expect(objectOps([withTtl([{ name: column, type: 'DateTime' }], before)], [withTtl([], after)])).toEqual([
+      'alter_table_modify_ttl table:app.t:ttl',
+      `alter_table_drop_column table:app.t:column:${column}`,
+    ])
+  })
+
+  test('a TTL that reads a column after a column named INTERVAL changes before that column is dropped', () => {
+    const columns = [
+      { name: 'id', type: 'UInt64' },
+      { name: 'ts', type: 'DateTime' },
+      { name: 'interval', type: 'UInt64' },
+    ]
+    const withTtl = (extra: ColumnDefinition[], ttl: string) =>
+      table({ database: 'app', name: 't', columns: [...columns, ...extra], engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'], ttl })
+    expect(
+      objectOps([withTtl([{ name: 'end', type: 'UInt64' }], 'ts + interval end day')], [withTtl([], 'ts + interval 1 day')])
+    ).toEqual(['alter_table_modify_ttl table:app.t:ttl', 'alter_table_drop_column table:app.t:column:end'])
+  })
+})
+
 describe('columnDefaultReads skips lambda parameters and CAST types (#768)', () => {
   const columns = ['a', 'arr', 'c', 'id', 'n.x', 'threshold', 'UInt64', 'x', 'y']
   const readsOf = (expression: string) => {
@@ -1293,5 +1726,754 @@ describe('columnDefaultReads skips lambda parameters and CAST types (#768)', () 
     ['a::', ['a']],
   ])('incomplete: %s reads %p', (expression, expected) => {
     expect(readsOf(expression)).toEqual(expected)
+  })
+})
+
+describe('planDiff moves a breaker before the MODIFY that closes a temporary cycle (#775)', () => {
+  const t = (columns: ColumnDefinition[]) =>
+    table({
+      database: 'app',
+      name: 't',
+      columns: [{ name: 'id', type: 'UInt64' }, ...columns],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+  const u = (name: string, expression?: string, extra: Partial<ColumnDefinition> = {}): ColumnDefinition => ({
+    name,
+    type: 'UInt64',
+    ...(expression === undefined ? {} : { default: { expression } }),
+    ...extra,
+  })
+  const sqls = (previous: SchemaDefinition[], next: SchemaDefinition[]) =>
+    planDiff(previous, next).operations.map((op) => op.sql)
+
+  // `a DEFAULT b` closes `a` → `b` → `c` → `a`; either `b` or `c` breaks it.
+  test('runs the first breaker in key order before the MODIFY that would close the cycle', () => {
+    expect(sqls([t([u('a'), u('b', 'c'), u('c', 'a')])], [t([u('a', 'b'), u('b', 'id'), u('c', 'id')])])).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT id;',
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;',
+      'ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;',
+    ])
+  })
+
+  // `a DEFAULT b` and `b DEFAULT c` close `a` → `b` → `c` → `a` together, so
+  // whichever runs second waits for `c` to drop its read of `a`.
+  test('removes the breaking DEFAULT before the second of two MODIFYs that close a cycle', () => {
+    expect(sqls([t([u('a'), u('b'), u('c', 'a')])], [t([u('a', 'b'), u('b', 'c'), u('c')])])).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;',
+      'ALTER TABLE app.t MODIFY COLUMN `c` REMOVE DEFAULT;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT c;',
+      'ALTER TABLE app.t MODIFY COLUMN `c` UInt64;',
+    ])
+  })
+
+  // `b` breaks `a` → `d` → `b` → `a` but closes `b` → `d` → `b` itself, so
+  // `d` runs before `b`, and `b` before `a`.
+  test('moves another breaker before a breaker that would close a cycle itself', () => {
+    expect(
+      sqls(
+        [t([u('a', '1'), u('b', 'a'), u('c'), u('d', 'b + c')])],
+        [t([u('a', 'c + d'), u('b', 'c + d'), u('c'), u('d', '1')])]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `d` UInt64 DEFAULT 1;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT c + d;',
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT c + d;',
+    ])
+  })
+
+  // The REMOVE DEFAULT breaks the cycle; the REMOVE COMMENT after it does not.
+  test('the breaker is the REMOVE DEFAULT, not the comment removal of the same column', () => {
+    expect(
+      sqls([t([u('a'), u('b', 'c', { comment: 'x' }), u('c', 'a')])], [t([u('a', 'b'), u('b'), u('c', 'id')])])
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `b` REMOVE DEFAULT;',
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` REMOVE COMMENT;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64;',
+      'ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;',
+    ])
+  })
+
+  // `c` reads `a` only until it changes, and `a` reads `b` only after it:
+  // the key order never holds the cycle, so nothing moves.
+  test('keeps key order when no statement closes a cycle', () => {
+    expect(sqls([t([u('a'), u('b'), u('c', 'a')])], [t([u('a', 'b'), u('b', 'id'), u('c', 'id')])])).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT id;',
+      'ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;',
+    ])
+  })
+
+  // Each column reads the one before it and changes to read the one two
+  // places ahead, so every MODIFY waits for a breaker. Four times the columns
+  // take about four times the work; a quadratic repair would take sixteen.
+  test('repairs a wide table whose every MODIFY closes a cycle with work that grows with its width', () => {
+    const name = (i: number) => `c${String(i).padStart(4, '0')}`
+    const plan = (count: number) => {
+      const before = Array.from({ length: count }, (_, i) => u(name(i), i === 0 ? '1' : name(i - 1)))
+      const after = Array.from({ length: count }, (_, i) => u(name(i), i + 2 < count ? name(i + 2) : '1'))
+      const operations = planDiff([t(before)], [t(after)]).operations
+      return { units: cycleRepairWork.units, first: operations.slice(0, 3).map((op) => op.key.slice('table:app.t:column:'.length)) }
+    }
+    const narrow = plan(1200)
+    const wide = plan(4800)
+    expect(wide.first).toEqual(['c4798', 'c4797', 'c4796'])
+    expect(narrow.units).toBeGreaterThan(0)
+    expect(wide.units).toBeLessThanOrEqual(5 * narrow.units)
+  })
+
+  // Each expression reads `day` after an INTERVAL. The reads keep it, so the
+  // ADD of `day` runs first.
+  test.each([
+    "now() + INTERVAL '1 day' > toDateTime(id) AND day",
+    'toUInt64(now() + INTERVAL CASE WHEN day THEN 1 ELSE 2 END HOUR)',
+  ])('adds the column that %s reads after an INTERVAL first', (expression) => {
+    expect(sqls([t([])], [t([u('a', expression), { name: 'day', type: 'UInt8' }])])).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `day` UInt8;',
+      `ALTER TABLE app.t ADD COLUMN IF NOT EXISTS \`a\` UInt64 DEFAULT ${expression};`,
+    ])
+  })
+
+  // `interval.x` reads the column `interval`, so its ADD runs first.
+  test('adds a column named interval before the expression that reads it', () => {
+    expect(
+      sqls([t([])], [t([u('a', 'tuple(interval.x day).1'), { name: 'interval', type: 'Tuple(x UInt64)' }])])
+    ).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `interval` Tuple(x UInt64);',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT tuple(interval.x day).1;',
+    ])
+  })
+
+  // The reads take each INTERVAL unit for a column (`day`, `month`, `hour`),
+  // so these tables seem to close a cycle `a` → `month` → `z` → `a`. A table
+  // with INTERVAL keeps its sorted order: `month` still runs after the ALIAS
+  // that calls `length(month)` on the old String, and `a` changes to String
+  // before the ALIAS `length(a)` is added.
+  test('keeps the sorted order of a table whose expression has an INTERVAL', () => {
+    expect(
+      sqls(
+        [
+          t([
+            u('a', 'toUInt64(toDateTime(id) + INTERVAL 1 day)'),
+            u('day', 'length(month)', { defaultKind: 'ALIAS' }),
+            { name: 'month', type: 'String', default: { expression: 'toString(z)' } },
+            u('z', 'a'),
+          ]),
+        ],
+        [
+          t([
+            u('a', 'toUInt64(toDateTime(id) + INTERVAL 1 month)'),
+            u('day', 'a', { defaultKind: 'ALIAS' }),
+            u('month', 'id'),
+            u('z', 'id'),
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT toUInt64(toDateTime(id) + INTERVAL 1 month);',
+      'ALTER TABLE app.t MODIFY COLUMN `day` UInt64 ALIAS a;',
+      'ALTER TABLE app.t MODIFY COLUMN `month` UInt64 DEFAULT id;',
+      'ALTER TABLE app.t MODIFY COLUMN `z` UInt64 DEFAULT id;',
+    ])
+    expect(
+      sqls(
+        [t([u('a'), { name: 'hour', type: 'String', default: { expression: 'toString(z)' } }, u('z', 'length(toString(a))')])],
+        [
+          t([
+            { name: 'a', type: 'String', default: { expression: 'toString(toDateTime(id) + INTERVAL CASE WHEN id > 0 THEN 1 ELSE 2 END hour)' } },
+            u('guard', 'length(a)', { defaultKind: 'ALIAS' }),
+            u('hour', 'id'),
+            u('z', 'id'),
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `a` String DEFAULT toString(toDateTime(id) + INTERVAL CASE WHEN id > 0 THEN 1 ELSE 2 END hour);',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `guard` UInt64 ALIAS length(a);',
+      'ALTER TABLE app.t MODIFY COLUMN `hour` UInt64 DEFAULT id;',
+      'ALTER TABLE app.t MODIFY COLUMN `z` UInt64 DEFAULT id;',
+    ])
+  })
+
+  const cycleBefore = [u('a'), u('b', 'c'), u('c', 'a')]
+  const cycleAfter = [u('a', 'b'), u('b', 'id'), u('c', 'id')]
+  const named = (name: string, columns: ColumnDefinition[]) =>
+    table({
+      database: 'app',
+      name,
+      columns: [{ name: 'id', type: 'UInt64' }, ...columns],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+
+  // `when` inside the CASE is read as a column, so `u` keeps its sorted
+  // order, while `t` is still repaired.
+  test('keeps the sorted order of a table whose expression has a CASE and repairs the other table', () => {
+    expect(
+      sqls(
+        [named('t', cycleBefore), named('u', [...cycleBefore, u('when', 'zz'), u('zz', 'case when id > 0 then 1 else 0 end')])],
+        [named('t', cycleAfter), named('u', cycleAfter)]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT id;',
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;',
+      'ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;',
+      'ALTER TABLE app.u MODIFY COLUMN `a` UInt64 DEFAULT b;',
+      'ALTER TABLE app.u MODIFY COLUMN `b` UInt64 DEFAULT id;',
+      'ALTER TABLE app.u MODIFY COLUMN `c` UInt64 DEFAULT id;',
+      'ALTER TABLE app.u DROP COLUMN IF EXISTS `when`;',
+      'ALTER TABLE app.u DROP COLUMN IF EXISTS `zz`;',
+    ])
+  })
+
+  // An alias makes the reads uncertain; the AS of a CAST does not.
+  test.each<[string, string[]]>([
+    ['identity(id AS v)', ['a', 'b', 'c']],
+    ['CAST(id AS UInt64)', ['b', 'a', 'c']],
+  ])('with c DEFAULT %s, the MODIFYs run in the order %p', (expression, order) => {
+    const before = [u('a'), u('b', 'c'), u('c', 'a')]
+    const after = [u('a', 'b'), u('b', 'id'), u('c', expression)]
+    expect(planDiff([t(before)], [t(after)]).operations.map((op) => op.key.slice('table:app.t:column:'.length))).toEqual(order)
+  })
+
+  // `p` and `q` read each other in the new schema, so their ADDs form a
+  // cycle among the prerequisites. ADD `p` replays, then ADD `q` closes
+  // `p` → `q` → `p`, which no statement breaks: the group is replayed back,
+  // `u` keeps its sorted order, and `t` is still repaired.
+  test('keeps the sorted order of a table whose cycle no statement breaks and repairs the other table', () => {
+    expect(
+      sqls([named('t', cycleBefore), named('u', [])], [named('t', cycleAfter), named('u', [u('p', 'q'), u('q', 'p')])])
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT id;',
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;',
+      'ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;',
+      'ALTER TABLE app.u ADD COLUMN IF NOT EXISTS `p` UInt64 DEFAULT q;',
+      'ALTER TABLE app.u ADD COLUMN IF NOT EXISTS `q` UInt64 DEFAULT p;',
+    ])
+  })
+
+  // The column order of a plan, as `table.column` without the database.
+  const orderOf = (previous: SchemaDefinition[], next: SchemaDefinition[]) =>
+    planDiff(previous, next).operations.map((op) => {
+      const at = op.key.lastIndexOf(':column:')
+      return `${op.key.slice('table:app.'.length, at)}.${op.key.slice(at + ':column:'.length)}`
+    })
+  const text = (name: string, expression: string): ColumnDefinition => ({ name, type: 'String', default: { expression } })
+
+  // `a` gets a new DEFAULT; the ALIAS `b` calls `length(a)`. Each expression
+  // for `a` reads `month` or `date` only seemingly, so these tables keep their
+  // sorted order. No column changes its type, so none is ordered by one (#814).
+  test.each<[string, string, ColumnDefinition]>([
+    ["toString(date '2024-01-01')", 'date', text('date', 'toString(id)')],
+    ['toString(arrayMap(`as` -> tuple(id as month).1, [id])[1])', 'month', text('month', 'toString(id)')],
+    ['CAST(arrayMap(lambda(tuple(month), month), [id])[1] AS String)', 'month', text('month', 'toString(id)')],
+  ])('with a DEFAULT %s, the table keeps its sorted order', (expression, name, changed) => {
+    expect(
+      orderOf(
+        [t([{ name: 'a', type: 'String' }, text(name, 'toString(z)'), u('z', 'length(toString(a))')])],
+        [t([text('a', expression), u('b', 'length(a)', { defaultKind: 'ALIAS' }), changed, u('z', 'id')])]
+      )
+    ).toEqual(['t.a', 't.b', `t.${name}`, 't.z'])
+  })
+
+  // Two reads of `a` close cycles that share columns; each cycle's breakers
+  // count, so the first breaker in key order runs first in both ports.
+  test.each<[string, SchemaDefinition[], SchemaDefinition[], string[]]>([
+    [
+      'cycles through m',
+      [t([u('a'), u('b', 'm'), u('c', 'b'), u('e', 'm'), u('f', 'e'), u('m', 'a')])],
+      [t([u('a', 'f + c'), u('b', 'z'), u('c', 'id'), u('e', 'id'), u('f', 'id'), u('m', 'a'), u('z', 'id')])],
+      ['t.c', 't.e', 't.f', 't.z', 't.b', 't.a'],
+    ],
+    [
+      'cycles through y',
+      [t([u('a'), u('b'), u('c', 'y'), u('y', 'a'), u('z', 'b')])],
+      [t([u('a', 'z'), u('b', 'y + c'), u('c', 'zz'), u('y', 'id'), u('z', 'id'), u('zz')])],
+      ['t.a', 't.y', 't.z', 't.zz', 't.c', 't.b'],
+    ],
+  ])('with two %s, every breaker counts', (_, previous, next, order) => {
+    expect(orderOf(previous, next)).toEqual(order)
+  })
+
+  // A table named like another table's column keys (`t:column_archive`,
+  // `t:column:other`) is still a table of its own.
+  test('a table whose name has :column is a table of its own', () => {
+    const archive = 't:column_archive'
+    expect(
+      orderOf(
+        [named(archive, [u('a'), text('month', 'toString(z)'), u('z', 'length(toString(a))')])],
+        [named(archive, [text('a', 'toString(toDateTime(id) + INTERVAL 1 month)'), u('b', 'length(a)', { defaultKind: 'ALIAS' }), u('month', 'id'), u('z', 'id')])]
+      )
+    ).toEqual([`${archive}.a`, `${archive}.b`, `${archive}.month`, `${archive}.z`])
+    expect(
+      orderOf([named('t', cycleBefore), named(archive, [])], [named('t', cycleAfter), named(archive, [u('p', 'q'), u('q', 'p')])])
+    ).toEqual(['t.b', 't.a', 't.c', `${archive}.p`, `${archive}.q`])
+    const other = 't:column:other'
+    const interval = [u('k', 'toUInt64(toDateTime(id) + INTERVAL 1 DAY)')]
+    expect(orderOf([named(other, cycleBefore), named('t', interval)], [named(other, cycleAfter), named('t', interval)])).toEqual([
+      `${other}.b`,
+      `${other}.a`,
+      `${other}.c`,
+    ])
+  })
+
+  // Old and new reads that form no cycle are not replayed at all: `groups`
+  // sends every `a` and `z` through the `b` chain.
+  test.each<[string, (n: number) => [ColumnDefinition[], ColumnDefinition[]]]>([
+    [
+      'groups',
+      (n) => {
+        const name = (prefix: string, i: number) => `${prefix}${String(i).padStart(5, '0')}`
+        const range = Array.from({ length: n }, (_, i) => i)
+        return [
+          [...range.map((i) => u(name('a', i))), ...range.map((i) => u(name('b', i))), ...range.map((i) => u(name('z', i)))],
+          [
+            ...range.map((i) => u(name('a', i), i === 0 ? `greatest(${range.map((j) => name('z', j)).join(', ')})` : name('a', i - 1))),
+            ...range.map((i) => u(name('b', i), i === 0 ? 'id' : name('b', i - 1))),
+            ...range.map((i) => u(name('z', i), name('b', n - 1))),
+          ],
+        ]
+      },
+    ],
+  ])('does no repair work on the acyclic %s fixture', (_, columns) => {
+    const [before, after] = columns(2000)
+    planDiff([t(before)], [t(after)])
+    expect(cycleRepairWork.units).toBe(0)
+  })
+
+  // A bare NULL is a literal even when a column is named `null`, so these
+  // tables close no cycle: the ALIAS `b` runs after `a` changes. Only a
+  // quoted `null` reads the column. In the first plan `a` changes its type
+  // and the old DEFAULT of `z` reads it, so `z` changes first (#814). Read as
+  // a column, `null`, whose type changes too, would have to change before
+  // `a`: that reorders the type changes, so the plan would keep its sorted
+  // order. In the second plan no column changes its type, so none is
+  // ordered by one.
+  test('a bare NULL is no read of a column named null', () => {
+    expect(
+      orderOf(
+        [t([u('a'), text('null', 'toString(z)'), u('z', 'length(toString(a))')])],
+        [t([text('a', "ifNull(null, '')"), u('b', "match(a, 'x')", { type: 'UInt8', defaultKind: 'ALIAS' }), u('null', 'id'), u('z', 'id')])]
+      )
+    ).toEqual(['t.z', 't.a', 't.b', 't.null'])
+    expect(
+      orderOf(
+        [t([{ name: 'a', type: 'String' }, u('b', 'length(`null`)', { defaultKind: 'ALIAS' }), text('null', 'toString(z)'), u('z', 'length(toString(a))')])],
+        [t([text('a', 'toString(ifNull(null, 1))'), u('b', 'length(a)', { defaultKind: 'ALIAS' }), text('null', 'toString(id)'), u('z', 'id')])]
+      )
+    ).toEqual(['t.a', 't.b', 't.null', 't.z'])
+    expect(
+      orderOf([t([u('a'), u('b', 'c'), u('c', '`null`'), u('null', 'a')])], [t([u('a', 'b'), u('b', 'id'), u('c', 'id'), u('null', 'a')])])
+    ).toEqual(['t.b', 't.a', 't.c'])
+  })
+
+  // Table `t:column:other` with column `a` and table `t` with column
+  // `other:column:a` give the same key; the unchanged `t` leaves the other
+  // table's repair alone.
+  test('a key that also names an unchanged column of another table keeps the repair', () => {
+    const other = 't:column:other'
+    expect(
+      orderOf([named(other, cycleBefore), named('t', [u('other:column:a')])], [named(other, cycleAfter), named('t', [u('other:column:a')])])
+    ).toEqual([`${other}.b`, `${other}.a`, `${other}.c`])
+  })
+
+  // Literals and casts the parser accepts leave the table's repair alone;
+  // a cast it cannot parse, or a subquery, keeps the sorted order.
+  test.each<[string, ColumnDefinition, string[]]>([
+    ["hex(x'CAFE')", text('extra', "hex(x'CAFE')"), ['t.b', 't.a', 't.c']],
+    ["bin(b'0101')", text('extra', "bin(b'0101')"), ['t.b', 't.a', 't.c']],
+    ['0xFF + 0b11', u('extra', '0xFF + 0b11'), ['t.b', 't.a', 't.c']],
+    ['CAST(id AS Nullable(UInt64))', u('extra', 'CAST(id AS Nullable(UInt64))'), ['t.b', 't.a', 't.c']],
+    ["CAST(id AS Enum8('a' = 1, 'b' = -2))", u('extra', "CAST(id AS Enum8('a' = 1, 'b' = -2))"), ['t.b', 't.a', 't.c']],
+    ['id::Tuple(a UInt64, b Array(String))', u('extra', 'id::Tuple(a UInt64, b Array(String))'), ['t.b', 't.a', 't.c']],
+    ["CAST(id AS DateTime64(3, 'UTC'))", u('extra', "CAST(id AS DateTime64(3, 'UTC'))"), ['t.b', 't.a', 't.c']],
+    ['CAST(id AS id ? a : b)', u('extra', 'CAST(id AS id ? a : b)'), ['t.a', 't.b', 't.c']],
+    ['id::UInt64([a], {b:UInt64}, a -> b)', u('extra', 'id::UInt64([a], {b:UInt64}, a -> b)'), ['t.a', 't.b', 't.c']],
+    ['toString((SELECT (1)))', u('extra', 'toString((SELECT (1)))'), ['t.a', 't.b', 't.c']],
+  ])('with an unchanged DEFAULT %s, the MODIFYs run in the order %p', (_, extra, order) => {
+    expect(orderOf([t([...cycleBefore, extra])], [t([...cycleAfter, extra])])).toEqual(order)
+  })
+
+  // Each table is replayed on its own with its own budget, so many tables,
+  // tables whose cycles no statement breaks, a prerequisite chain every
+  // breaker check walks, and breakers that read many other columns cost work
+  // that grows with the plan: four times the size takes at most about four
+  // times the work.
+  test.each<[string, (tables: number) => [SchemaDefinition[], SchemaDefinition[]]]>([
+    [
+      'tables whose cycle no statement breaks',
+      (tables) => {
+        const range = Array.from({ length: tables }, (_, i) => `t${i}`)
+        return [
+          range.map((name) => named(name, [u('a'), u('null', 'z'), u('z', 'a')])),
+          range.map((name) => named(name, [u('a'), u('null', 'z'), u('p', 'q'), u('q', 'p'), u('z', 'a')])),
+        ]
+      },
+    ],
+    [
+      'tables whose reads have a cycle the sorted order never closes',
+      (tables) => {
+        const m = 300
+        const pad = (prefix: string, i: number) => `${prefix}${String(i).padStart(4, '0')}`
+        const range = Array.from({ length: m }, (_, i) => i)
+        const greatest = `greatest(${range.map((i) => pad('a', i)).join(', ')})`
+        const c = range.map((i) => u(pad('c', i), i + 1 < m ? pad('c', i + 1) : 'h'))
+        const names = Array.from({ length: tables / 256 }, (_, k) => `t${k}`)
+        return [
+          names.map((name) =>
+            named(name, [...range.map((i) => u(pad('a', i))), ...range.map((i) => u(pad('b', i), i + 1 < m ? pad('b', i + 1) : 'z')), ...c, u('h', greatest), u('z')])
+          ),
+          names.map((name) =>
+            named(name, [...range.map((i) => u(pad('a', i), pad('b', 0))), ...range.map((i) => u(pad('b', i), '1')), ...c, u('h', greatest), u('z', pad('c', 0))])
+          ),
+        ]
+      },
+    ],
+    [
+      'a prerequisite chain that every breaker check walks',
+      (size) => {
+        const n = size / 4
+        const pad = (p: string, i: number) => `${p}${String(i).padStart(4, '0')}`
+        const range = Array.from({ length: n }, (_, i) => i)
+        const before: ColumnDefinition[] = []
+        const after: ColumnDefinition[] = []
+        for (const i of range) {
+          before.push(u(pad('a', i)), u(pad('b', i), pad('z', i)), u(pad('z', i), pad('a', i)))
+          after.push(u(pad('a', i), pad('b', i)), u(pad('b', i), pad('p', 0)), u(pad('z', i), 'id'))
+        }
+        for (const j of range) {
+          before.push(u(pad('p', j), j === 0 ? range.map((i) => pad('b', i)).join(' + ') : pad('p', j - 1)))
+          after.push(u(pad('p', j), j + 1 < n ? pad('p', j + 1) : 'id'))
+        }
+        return [[t(before)], [t(after)]]
+      },
+    ],
+    [
+      'breakers that read many other columns',
+      (size) => {
+        const extras = Array.from({ length: 30 }, (_, i) => u(`p${String(i).padStart(3, '0')}`))
+        const tail = extras.map((column) => ` + ${column.name}`).join('')
+        const before: ColumnDefinition[] = [...extras]
+        const after: ColumnDefinition[] = [...extras]
+        for (let i = 0; i < size / 32; i += 1) {
+          const g = (x: string) => x + String(i).padStart(3, '0')
+          before.push(u(g('a')), u(g('b'), g('c') + tail), u(g('c'), g('a') + tail))
+          after.push(u(g('a'), g('b') + tail), u(g('b'), `id${tail}`), u(g('c'), `id${tail}`))
+        }
+        return [[t(before)], [t(after)]]
+      },
+    ],
+  ])('plans %s with work that grows with its size', (_, schemas) => {
+    const work = (size: number) => {
+      const [previous, next] = schemas(size)
+      planDiff(previous, next)
+      return cycleRepairWork.units
+    }
+    const narrow = work(512)
+    const wide = work(2048)
+    expect(narrow).toBeGreaterThan(0)
+    expect(wide).toBeLessThanOrEqual(5 * narrow)
+  })
+
+  // A table with breakers that read many other columns still has enough work
+  // to repair all its cycles.
+  test('repairs cycles whose breakers read many other columns', () => {
+    const extras = Array.from({ length: 30 }, (_, i) => u(`p${String(i).padStart(3, '0')}`))
+    const tail = extras.map((column) => ` + ${column.name}`).join('')
+    const before: ColumnDefinition[] = [...extras]
+    const after: ColumnDefinition[] = [...extras]
+    for (let i = 0; i < 20; i += 1) {
+      const g = (x: string) => x + String(i).padStart(3, '0')
+      before.push(u(g('a')), u(g('b'), g('c') + tail), u(g('c'), g('a') + tail))
+      after.push(u(g('a'), g('b') + tail), u(g('b'), `id${tail}`), u(g('c'), `id${tail}`))
+    }
+    const order = orderOf([t(before)], [t(after)])
+    expect(order.slice(0, 2)).toEqual(['t.b000', 't.a000'])
+  })
+
+  // Every breaker `b_i` waits for the 128 changes of the `p` chain, which do
+  // not wait for `a_i`. The search from `a_i`'s end stops at once, so the
+  // checks do not walk the chain again for each cycle (#829).
+  test('repairs cycles whose breakers wait for one long chain of statements', () => {
+    const pad = (p: string, i: number) => `${p}${String(i).padStart(4, '0')}`
+    const range = Array.from({ length: 128 }, (_, i) => i)
+    const before: ColumnDefinition[] = []
+    const after: ColumnDefinition[] = []
+    for (const i of range) {
+      before.push(u(pad('a', i)), u(pad('b', i), pad('z', i)), u(pad('z', i), pad('a', i)))
+      after.push(u(pad('a', i), pad('b', i)), u(pad('b', i), pad('p', 0)), u(pad('z', i), 'id'))
+    }
+    for (const j of range) {
+      before.push(u(pad('p', j), j === 0 ? range.map((i) => pad('b', i)).join(' + ') : pad('p', j - 1)))
+      after.push(u(pad('p', j), j + 1 < 128 ? pad('p', j + 1) : 'id'))
+    }
+    const order = orderOf([t(before)], [t(after)])
+    expect(order[0]).toBe('t.p0127')
+    for (const i of range) expect(order.indexOf(`t.${pad('b', i)}`)).toBeLessThan(order.indexOf(`t.${pad('a', i)}`))
+    expect(cycleRepairWork.units).toBe(6011)
+  })
+
+  // An old schema whose defaults read each other in a cycle (ClickHouse
+  // refuses one) cannot be replayed, so the table keeps its sorted order: a
+  // cycle among unchanged single reads (`c`, `d`) and one the walk meets
+  // again (`b`, `z`).
+  test.each<[string, ColumnDefinition[], ColumnDefinition[], string[]]>([
+    [
+      'unchanged columns',
+      [u('a'), u('b', 'c + z'), u('c', 'd'), u('d', 'c'), u('z', 'a')],
+      [u('a', 'b'), u('b', 'id'), u('c', 'd'), u('d', 'c'), u('z', 'id')],
+      ['t.a', 't.b', 't.z'],
+    ],
+    [
+      'changed columns',
+      [u('a'), u('b', 'z'), u('c', 'a'), u('z', 'b + c')],
+      [u('a', 'z'), u('b', 'p'), u('c', 'id'), u('p', 'id'), u('z', 'id')],
+      ['t.a', 't.c', 't.p', 't.b', 't.z'],
+    ],
+  ])('keeps the sorted order when the old defaults of %s read each other in a cycle', (_, before, after, order) => {
+    expect(orderOf([t(before)], [t(after)])).toEqual(order)
+  })
+
+  // The unit of `date_add`, `dateDiff` and the like, a bare NOT and a bare
+  // SELECT are not reads even when a column has that name, so these tables
+  // keep their sorted order: the ALIAS `b` runs after `a` changes. `a` keeps
+  // its type, so no type change orders `z` (#814).
+  test.each<[string, string, string]>([
+    ['date_add', 'toString(date_add(day, if(true, 1, 0), toDateTime(id)))', 'day'],
+    ['not', 'toString(not - toInt64(id))', 'not'],
+  ])('a bare %s word is no read of a column with that name', (_, expression, name) => {
+    expect(
+      orderOf(
+        [t([{ name: 'a', type: 'String' }, u(name, 'z'), u('z', 'length(toString(a))')])],
+        [t([text('a', expression), u('b', "match(a, 'x')", { type: 'UInt8', defaultKind: 'ALIAS' }), u(name, 'id'), u('z', 'id')])]
+      )
+    ).toEqual(['t.a', 't.b', `t.${name}`, 't.z'])
+  })
+
+  // `a` keeps its type, so no type change orders `c` (#814).
+  test('a dateDiff unit is no read of a column with that name', () => {
+    expect(
+      orderOf(
+        [t([u('a'), u('b'), text('c', 'a'), text('hour', 'c')])],
+        [t([u('a', 'dateDiff(hour, toDateTime(0), toDateTime(id))'), u('b', 'a + 1'), text('c', "'x'"), text('hour', "'y'")])]
+      )
+    ).toEqual(['t.a', 't.b', 't.c', 't.hour'])
+  })
+
+  test('a bare SELECT keeps the sorted order even with a column of that name', () => {
+    const extra = [u('SELECT'), u('extra', 'toUInt64((SELECT + 1))')]
+    expect(orderOf([t([...cycleBefore, ...extra])], [t([...cycleAfter, ...extra])])).toEqual(['t.a', 't.b', 't.c'])
+  })
+
+  // A quoted Tuple element name is part of the type, in both casts.
+  test.each(['CAST(tuple(id) AS Tuple(`a-b` UInt64))', 'tuple(id)::Tuple(`a-b` UInt64)'])(
+    'an unchanged DEFAULT %s keeps the repair',
+    (expression) => {
+      const extra = { name: 'extra', type: 'Tuple(`a-b` UInt64)', default: { expression } }
+      expect(orderOf([t([...cycleBefore, extra])], [t([...cycleAfter, extra])])).toEqual(['t.b', 't.a', 't.c'])
+    }
+  )
+
+  // A deeply nested cast is not parsed, and an unchanged table is not looked at.
+  test('a deeply nested cast in an unchanged table plans nothing', () => {
+    const nested = `CAST(id AS ${'Array('.repeat(1050)}UInt64${')'.repeat(1050)})`
+    const deep = { name: 'deep', type: 'String', default: { expression: nested } }
+    expect(planDiff([t([u('a'), deep])], [t([u('a'), deep])]).operations).toEqual([])
+  })
+
+  // Column `x:column:a` of `t` and column `a` of `t:column:x` share a key,
+  // but their statements are keyed by column (#801), so no prerequisite links
+  // the two tables. `t:column:x` keeps its sorted order because of its
+  // INTERVAL; `t` is still repaired: `MODIFY y` runs before the MODIFY of
+  // `x:column:a` that would close the cycle through `y` and `z`.
+  test('a shared key does not link two tables, so the other table is still repaired', () => {
+    const interval = u('k', 'toUInt64(toDateTime(id) + INTERVAL 1 day)')
+    const previous = [named('t', [u('x:column:a'), u('y', 'z'), u('z', '`x:column:a`')]), named('t:column:x', [u('b', '1'), interval])]
+    const next = [named('t', [u('x:column:a', 'y'), u('y', 'id'), u('z', 'id')]), named('t:column:x', [u('a'), u('b', 'id'), interval])]
+    expect(planDiff(previous, next).operations.map((op) => op.sql)).toEqual([
+      'ALTER TABLE app.`t:column:x` ADD COLUMN IF NOT EXISTS `a` UInt64;',
+      'ALTER TABLE app.`t:column:x` MODIFY COLUMN `b` UInt64 DEFAULT id;',
+      'ALTER TABLE app.t MODIFY COLUMN `y` UInt64 DEFAULT id;',
+      'ALTER TABLE app.t MODIFY COLUMN `x:column:a` UInt64 DEFAULT y;',
+      'ALTER TABLE app.t MODIFY COLUMN `z` UInt64 DEFAULT id;',
+    ])
+  })
+
+  // A call to a function whose arguments can be units or keywords (in any
+  // case, with any arguments) keeps the sorted order. A bare query or join
+  // word reads its column and a call to one is a function, as ClickHouse 26.3
+  // parses them, so both keep the repair; such a word after an operand does
+  // not, nor does `values` (a VALUES subquery from 26.4). A quoted name is a column read, and other calls, in any case, keep
+  // the repair.
+  test.each<[string, ColumnDefinition[], string[]]>([
+    ['a bare APPLY', [u('APPLY'), u('extra', 'toUInt64(APPLY)')], ['t.b', 't.a', 't.c']],
+    ['a bare JOIN', [u('join'), u('extra', 'toUInt64(join)')], ['t.b', 't.a', 't.c']],
+    ['a bare PLACING', [u('placing'), u('extra', 'toUInt64(placing)')], ['t.b', 't.a', 't.c']],
+    ['bare left and RIGHT', [u('left'), u('RIGHT'), u('extra', 'left + RIGHT')], ['t.b', 't.a', 't.c']],
+    ['bare format and union', [u('format'), u('union'), u('extra', 'plus(format, -union)')], ['t.b', 't.a', 't.c']],
+    ['bare offset, step and Final', [u('offset'), u('step'), u('Final'), u('extra', 'offset * step = Final')], ['t.b', 't.a', 't.c']],
+    ['bare settings and sample', [u('settings'), u('sample'), u('extra', 'CAST(settings AS UInt64) + sample::UInt64')], ['t.b', 't.a', 't.c']],
+    ['calls to left and RIGHT', [u('extra', 'toUInt64(left(toString(id), 1)) + toUInt64(RIGHT(toString(id), 1))')], ['t.b', 't.a', 't.c']],
+    ['a call to format', [u('extra', "length(format('{}-{}', toString(id), 'x'))")], ['t.b', 't.a', 't.c']],
+    ['a call to left with a left column', [u('left'), u('extra', 'toUInt64(left(toString(left), 1))')], ['t.b', 't.a', 't.c']],
+    ['a query word after an operand', [u('offset'), u('extra', 'id offset')], ['t.a', 't.b', 't.c']],
+    ['a bare values', [u('values'), u('extra', '(values - (1))')], ['t.a', 't.b', 't.c']],
+    ['a call to values', [u('extra', 'toUInt64((values(id)))')], ['t.a', 't.b', 't.c']],
+    ['a quoted APPLY', [u('APPLY'), u('extra', 'toUInt64(`APPLY`)')], ['t.b', 't.a', 't.c']],
+    ['eXTrAcT with string arguments', [u('extra', "length(eXTrAcT('abc', 'a'))")], ['t.a', 't.b', 't.c']],
+    ['dateDiff with a string unit', [u('extra', "toUInt64(dateDiff('day', toDateTime(id), toDateTime(id)))")], ['t.a', 't.b', 't.c']],
+    ['a nested DATEDIFF', [u('extra', "abs(plus(1, DATEDIFF('day', toDateTime(id), toDateTime(id))))")], ['t.a', 't.b', 't.c']],
+    ['date_part', [u('extra', "toUInt64(date_part('day', toDateTime(id)))")], ['t.a', 't.b', 't.c']],
+    ['a quoted extract column', [u('extract'), u('extra', 'toUInt64(`extract`)')], ['t.b', 't.a', 't.c']],
+    ['a mixed-case LENGTH', [u('extra', 'LENGTH(toString(id))')], ['t.b', 't.a', 't.c']],
+    ['a call to position', [u('extra', "toUInt64(position('abc', 'b'))")], ['t.b', 't.a', 't.c']],
+  ])('with %s in an unchanged DEFAULT, the MODIFYs run in the order %p', (_, extra, order) => {
+    expect(orderOf([t([...cycleBefore, ...extra])], [t([...cycleAfter, ...extra])])).toEqual(order)
+  })
+
+  // ALTER's cycle check reads a quoted `true`, `false`, `inf`, `nan` or
+  // `infinity` as a literal, and ClickHouse stores a quoted `not` before an
+  // operand as NOT, so an expression with one keeps the sorted order. A
+  // quoted `null`, and a quoted name of any other keyword, reads its column:
+  // on ClickHouse 26.3, of the 388 one-word `system.keywords`, only `not`,
+  // `true` and `false` escaped ALTER's cycle check in eleven positions.
+  test.each<[string, string[]]>([
+    ['true', ['t.a', 't.b', 't.c']],
+    ['FALSE', ['t.a', 't.b', 't.c']],
+    ['Inf', ['t.a', 't.b', 't.c']],
+    ['nan', ['t.a', 't.b', 't.c']],
+    ['infinity', ['t.a', 't.b', 't.c']],
+    ['not', ['t.a', 't.b', 't.c']],
+    ['NoT', ['t.a', 't.b', 't.c']],
+    ['null', ['t.b', 't.a', 't.c']],
+    ['all', ['t.b', 't.a', 't.c']],
+    ['ALL', ['t.b', 't.a', 't.c']],
+    ['select', ['t.b', 't.a', 't.c']],
+  ])('with a quoted %s in an unchanged DEFAULT, the MODIFYs run in the order %p', (name, order) => {
+    const extra = [u(name), u('extra', `toUInt64(\`${name}\`)`)]
+    expect(orderOf([t([...cycleBefore, ...extra])], [t([...cycleAfter, ...extra])])).toEqual(order)
+  })
+
+  // `toUInt64(`true`)` reads no column, so `a` does not read the column
+  // `true`: the table keeps its sorted order, where `b DEFAULT a + 1` runs
+  // after `a` changes. `a` keeps its type, so no type change orders `c` (#814).
+  test('a quoted true is no read of a column with that name', () => {
+    expect(
+      orderOf(
+        [t([u('a'), u('b'), text('c', 'a'), text('true', 'c')])],
+        [t([u('a', 'toUInt64(`true`)'), u('b', 'a + 1'), text('c', "'x'"), text('true', "'y'")])]
+      )
+    ).toEqual(['t.a', 't.b', 't.c', 't.true'])
+  })
+
+  // ALTER's cycle check reads a quoted `all` as the column (ClickHouse 26.3
+  // rejects main's order with code 174), so the table is repaired.
+  test('a quoted all is a read of the column with that name', () => {
+    expect(
+      orderOf(
+        [t([u('a'), u('aa'), u('ab', 'a'), u('all', 'ab')])],
+        [t([u('a', '`all` + 1'), u('aa', 'a + 1'), u('ab', '5'), u('all', '5')])]
+      )
+    ).toEqual(['t.aa', 't.ab', 't.a', 't.all'])
+  })
+
+  // ClickHouse 26.3 reads a bare `left` as the column: main's order fails
+  // with code 174 when `a DEFAULT left + 1` closes a -> left -> c -> a.
+  // Either `c` or `left` breaks it, so the first in key order, `c`, runs
+  // first.
+  test('a bare left on the cycle is a read of its column', () => {
+    expect(
+      orderOf([t([u('a'), u('c', 'a'), u('left', 'c')])], [t([u('a', 'left + 1'), u('c', 'id'), u('left', 'id')])])
+    ).toEqual(['t.c', 't.a', 't.left'])
+  })
+
+  // ClickHouse stores `` `not` + 1 `` as `NOT 1`, so `a` does not read the
+  // column `not` and the table keeps its sorted order. `a` keeps its type, so
+  // no type change orders `c` (#814).
+  test('a quoted not is no read of a column with that name', () => {
+    expect(
+      orderOf(
+        [t([u('a'), u('b'), text('c', 'a'), u('not', 'length(c)')])],
+        [t([u('a', '`not` + 1'), u('b', 'a + 1'), text('c', "'x'"), u('not', '5')])]
+      )
+    ).toEqual(['t.a', 't.b', 't.c', 't.not'])
+  })
+
+  // Every read the replay looks at uses work, also the reads a change keeps.
+  test('charges the reads a MODIFY keeps', () => {
+    const work = (width: number) => {
+      const p = Array.from({ length: width }, (_, i) => `p${String(i).padStart(5, '0')}`)
+      const sum = p.join(' + ')
+      const columns = p.map((name) => u(name))
+      expect(orderOf([t([u('a', sum), u('b', 'a'), ...columns])], [t([u('a', `${sum} + b`), u('b', 'id'), ...columns])])).toEqual(['t.b', 't.a'])
+      return cycleRepairWork.units
+    }
+    const narrow = work(1)
+    expect(work(4096)).toBeGreaterThan(narrow + 4096)
+  })
+
+  test('charges the reads a replayed MODIFY removes', () => {
+    const w = Array.from({ length: 256 }, (_, i) => u(`w${String(i).padStart(3, '0')}`))
+    const sum = w.map((column) => column.name).join(' + ')
+    planDiff([t([u('b', `z + ${sum}`), u('z'), ...w])], [t([u('b', '1'), u('z', 'b'), ...w])])
+    expect(cycleRepairWork.units).toBeGreaterThan(256)
+  })
+
+  // The work and the plan near the edge of the work budget, the same in
+  // chkit-py under every hash seed (test_planner_dependency_order.py). Nine
+  // cycles through one long chain of unchanged defaults are repaired whatever
+  // its length: the walks skip the chain (#829). Cycles through one chain
+  // whose end reads every cycle's column still cost the cycles squared: 50
+  // are repaired, 60 run out of work and keep the sorted order.
+  const nineCycles = (chain: number): [ColumnDefinition[], ColumnDefinition[]] => {
+    const pad = (p: string, i: number) => p + String(i).padStart(3, '0')
+    const k = Array.from({ length: 9 }, (_, i) => i)
+    const links = Array.from({ length: chain }, (_, i) => u(pad('kc', i), i + 1 < chain ? pad('kc', i + 1) : 'kz'))
+    const sum = k.map((i) => pad('ka', i)).join(' + ')
+    return [
+      [u('a', 'toUInt64(false)'), u('b', 'c'), u('c', 'a'), u('d', 'b'), u('null', 'a'), u('false', 'b'),
+        ...k.map((i) => u(pad('ka', i))), ...k.map((i) => u(pad('kb', i), 'kc000')), u('j'), ...links, u('kz', `${sum} + id + j`)],
+      [u('a', 'b'), u('b', 'ifNull(null, 0) + d'), u('c', 'id'), u('d', 'id'), u('null', 'a'), u('false', 'b'),
+        ...k.map((i) => u(pad('ka', i), pad('kb', i))), ...k.map((i) => u(pad('kb', i), 'id')), u('j'), ...links, u('kz', 'id')],
+    ]
+  }
+  const chainAndFanIn = (): [ColumnDefinition[], ColumnDefinition[]] => {
+    const pad = (p: string, i: number) => p + String(i).padStart(3, '0')
+    const p = Array.from({ length: 315 }, (_, i) => u(pad('p', i), i + 1 < 315 ? pad('p', i + 1) : undefined))
+    const y = Array.from({ length: 20 }, (_, i) => pad('y_b', i))
+    return [
+      [u('m', 'x'), u('null', 'toUInt64(true)'), u('true', 'x'), u('x', 'z'), u('z', '`null`'), u('q'), u('p', 'p000'), ...p,
+        ...y.map((name) => u(name, 'y_c')), u('y_c', 'y_a'), u('y_a')],
+      [u('m', 'id'), u('null', 'x'), u('true', 'x'), u('x', 'ifNull(null, p + q + m)'), u('z', 'id'), u('q'), u('p', 'p000'), ...p,
+        ...y.map((name) => u(name, 'id')), u('y_c', 'id'), u('y_a', y.join(' + '))],
+    ]
+  }
+  // `m` cycles `a_i` → `b_i` → `c000` → … → `c029` → `z` → `a_i`.
+  const fanIn = (m: number): [ColumnDefinition[], ColumnDefinition[]] => {
+    const pad = (p: string, i: number) => p + String(i).padStart(3, '0')
+    const k = Array.from({ length: m }, (_, i) => i)
+    const links = Array.from({ length: 30 }, (_, i) => u(pad('c', i), i + 1 < 30 ? pad('c', i + 1) : 'z'))
+    return [
+      [...k.map((i) => u(pad('a', i))), ...k.map((i) => u(pad('b', i), 'c000')), ...links, u('z', `${k.map((i) => pad('a', i)).join(' + ')} + id`)],
+      [...k.map((i) => u(pad('a', i), pad('b', i))), ...k.map((i) => u(pad('b', i), 'id')), ...links, u('z', 'id')],
+    ]
+  }
+  test.each<[string, () => [ColumnDefinition[], ColumnDefinition[]], number, string, string]>([
+    ['nine cycles through 449 links', () => nineCycles(449), 1291, 'c', '7fc14481e96d7b6347bd4aabe0c280403a5d8ed4e4da69854070032d1b5dc098'],
+    ['nine cycles through 85 links', () => nineCycles(85), 563, 'c', '7fc14481e96d7b6347bd4aabe0c280403a5d8ed4e4da69854070032d1b5dc098'],
+    ['nine cycles through 86 links', () => nineCycles(86), 565, 'c', '7fc14481e96d7b6347bd4aabe0c280403a5d8ed4e4da69854070032d1b5dc098'],
+    ['a chain and a fan-in', chainAndFanIn, 1808, 'm', 'f0ea844653d573b9fd93c11b98a1cf6f6e2f31d10c03d08aa9ee0572f4d8fd36'],
+    ['30 cycles through 30 links', () => fanIn(30), 1807, 'b000', 'c9b8ec508f9b1e19693d8da1e7138fd8055abfd4a2ce8d638c8e7093d593879e'],
+    ['50 cycles through 30 links', () => fanIn(50), 3967, 'b000', '734d0b6c25b51d293c74327216b4fea5a1c11fe13660488ec1f084c3bbfde145'],
+    ['60 cycles through 30 links', () => fanIn(60), 4648, 'a000', 'ee8a4528f50e4af7107b205dbfc26ae7b2dd7bd945d8654f3f2074c9603f2cad'],
+  ])('plans %s with the same work and SQL as chkit-py', (_, columns, units, first, digest) => {
+    const [before, after] = columns()
+    const sql = planDiff([t(before)], [t(after)]).operations.map((op) => op.sql)
+    expect(cycleRepairWork.units).toBe(units)
+    expect(sql[0]).toStartWith(`ALTER TABLE app.t MODIFY COLUMN \`${first}\` `)
+    expect(new Bun.CryptoHasher('sha256').update(sql.join('\n')).digest('hex')).toBe(digest)
   })
 })

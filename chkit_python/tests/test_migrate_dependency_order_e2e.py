@@ -362,6 +362,17 @@ _COLUMN_CHANGES: list[dict[str, Any]] = [
         "columns": ["id", "x"],
     },
     {
+        # #805: reading the CASE's `end` as the column `end` made the two DROPs
+        # a cycle, so `a` was dropped first: Cannot drop column `a`, because
+        # column `end` depends on it.
+        "label": "casekeyword",
+        "before": f"{{'name': 'a', 'type': 'UInt64', {_e('case when id = 1 then 2 else 3 end')}}}, "
+        f"{{'name': 'end', 'type': 'UInt64', {_e('a + 1')}}}",
+        "after": "{'name': 'x', 'type': 'UInt64'}",
+        "order": ["column:end", "column:a"],
+        "columns": ["id", "x"],
+    },
+    {
         # Passes on main too; it fails when the ADD and the RENAME move while
         # the MODIFY of `d` keeps its slot before the ADD of `c`.
         "label": "modaddrename",
@@ -418,6 +429,22 @@ _COLUMN_CHANGES: list[dict[str, Any]] = [
         "order": ["column:y", "ttl", "column:x"],
         "columns": ["id", "y"],
     },
+    # #814: these fail on ClickHouse 26.3 in key order with code 43, since
+    # ClickHouse checks every expression against a column's new type.
+    {
+        "label": "typerelease",
+        "before": f"{{'name': 'a', 'type': 'String'}}, {{'name': 'b', 'type': 'UInt64', {_e('length(a)')}}}",
+        "after": f"{{'name': 'a', 'type': 'UInt64'}}, {{'name': 'b', 'type': 'UInt64', {_e('0')}}}",
+        "order": ["column:b", "column:a"],
+        "columns": ["a", "b", "id"],
+    },
+    {
+        "label": "typeprovide",
+        "before": "{'name': 'z', 'type': 'String'}",
+        "after": f"{{'name': 'b', 'type': 'UInt64', {_e('z + 1')}}}, {{'name': 'z', 'type': 'UInt64'}}",
+        "order": ["column:z", "column:b"],
+        "columns": ["b", "id", "z"],
+    },
     {
         "label": "ttlremove",
         "before": "{'name': 'x', 'type': 'DateTime'}",
@@ -466,6 +493,48 @@ _COLUMN_CHANGES: list[dict[str, Any]] = [
         f"{{'name': 'b', 'type': 'UInt64', {_e('a')}}}, {{'name': 'c', 'type': 'UInt64', {_e('id')}}}",
         "order": ["column:a", "column:b"],
         "columns": ["a", "b", "c", "id"],
+    },
+    # #775: in key order each of these fails with `Cyclic alias detected`: a
+    # MODIFY closes a cycle that more than one other MODIFY could break first.
+    {
+        "label": "breakany",
+        "before": "{'name': 'a', 'type': 'UInt64'}, "
+        f"{{'name': 'b', 'type': 'UInt64', {_e('c')}}}, {{'name': 'c', 'type': 'UInt64', {_e('a')}}}",
+        "after": f"{{'name': 'a', 'type': 'UInt64', {_e('b')}}}, "
+        f"{{'name': 'b', 'type': 'UInt64', {_e('id')}}}, {{'name': 'c', 'type': 'UInt64', {_e('id')}}}",
+        "order": ["column:b", "column:a", "column:c"],
+        "columns": ["a", "b", "c", "id"],
+    },
+    {
+        "label": "breaktwo",
+        "before": "{'name': 'a', 'type': 'UInt64'}, {'name': 'b', 'type': 'UInt64'}, "
+        f"{{'name': 'c', 'type': 'UInt64', {_e('a')}}}",
+        "after": f"{{'name': 'a', 'type': 'UInt64', {_e('b')}}}, "
+        f"{{'name': 'b', 'type': 'UInt64', {_e('c')}}}, {{'name': 'c', 'type': 'UInt64'}}",
+        "order": ["column:a", "column:c", "column:b"],
+        "columns": ["a", "b", "c", "id"],
+    },
+    {
+        "label": "breakcomment",
+        "before": "{'name': 'a', 'type': 'UInt64'}, "
+        f"{{'name': 'b', 'type': 'UInt64', {_e('c')}, 'comment': 'x'}}, "
+        f"{{'name': 'c', 'type': 'UInt64', {_e('a')}}}",
+        "after": f"{{'name': 'a', 'type': 'UInt64', {_e('b')}}}, "
+        f"{{'name': 'b', 'type': 'UInt64'}}, {{'name': 'c', 'type': 'UInt64', {_e('id')}}}",
+        "order": ["column:b", "column:a", "column:c"],
+        "columns": ["a", "b", "c", "id"],
+    },
+    # #827: ClickHouse rewrites the expressions that read a renamed column, so
+    # the rename keeps `x` (now `y`) on the cycle a -> b -> x -> a.
+    {
+        "label": "breakrename",
+        "before": "{'name': 'a', 'type': 'UInt64'}, "
+        f"{{'name': 'b', 'type': 'UInt64', {_e('x')}}}, {{'name': 'x', 'type': 'UInt64', {_e('a')}}}",
+        "after": f"{{'name': 'a', 'type': 'UInt64', {_e('b')}}}, "
+        f"{{'name': 'b', 'type': 'UInt64', {_e('id')}}}, {{'name': 'y', 'type': 'UInt64', {_e('a')}}}",
+        "rename": "x=y",
+        "order": ["column:b", "column:a", "column_rename:x:y"],
+        "columns": ["a", "b", "id", "y"],
     },
 ]
 

@@ -14,6 +14,7 @@ MigrateErrorCode = Literal[
     "migration_not_found",
     "migration_not_in_progress",
     "migration_already_applied",
+    "mark_refused",
     "retry_mismatch",
     "in_progress_checksum_mismatch",
     "statement_split_changed",
@@ -26,6 +27,7 @@ MigrateErrorCode = Literal[
     "async_outcome_unknown",
     "async_attempt_unfenced",
     "async_needs_lock",
+    "insert_settings_fixed",
 ]
 
 EMPTY_MIGRATIONS_SUMMARY = (
