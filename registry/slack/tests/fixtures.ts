@@ -1,4 +1,4 @@
-import type { Fetch } from '@chkit/plugin-ingest'
+import type { Fetch } from '@chkit/plugin-sync'
 
 import { slackConfig } from '../config.js'
 

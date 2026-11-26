@@ -7,6 +7,8 @@ tooling) needs, re-exported from one module.
 from __future__ import annotations
 
 from chkit_plugin_backfill.async_backfill import (
+    CHECKPOINT_VERSION,
+    BackfillInterruptedError,
     BackfillResult,
     execute_backfill,
     sync_progress,
@@ -20,6 +22,7 @@ from chkit_plugin_backfill.chunking.planner import generate_chunk_plan
 from chkit_plugin_backfill.chunking.sql import (
     build_chunk_execution_sql,
     build_where_clause_from_chunk,
+    delivery_override_warning,
     inject_sort_key_filter,
     rewrite_select_columns,
 )
@@ -66,9 +69,11 @@ from chkit_plugin_backfill.types import (
 )
 
 __all__ = [
+    "CHECKPOINT_VERSION",
     "CHKIT_BACKFILL_LOGGER_CATEGORY",
     "CHKIT_LOGGER_CATEGORY",
     "BackfillChunkState",
+    "BackfillInterruptedError",
     "BackfillPlanState",
     "BackfillProgress",
     "BackfillResult",
@@ -95,6 +100,7 @@ __all__ = [
     "build_where_clause_from_chunk",
     "confirm_backfill_submission",
     "decode_chunk_plan_from_persistence",
+    "delivery_override_warning",
     "encode_chunk_plan_for_persistence",
     "execute_backfill",
     "generate_chunk_plan",

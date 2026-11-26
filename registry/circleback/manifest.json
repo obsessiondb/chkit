@@ -5,8 +5,8 @@
   "title": "Circleback",
   "description": "Five independent Circleback raw resource streams with complete full reads, transcript availability evidence, and native relationships.",
   "dependencies": [
-    "@chkit/core@^0.2.0-beta.12",
-    "@chkit/plugin-ingest@^0.2.0-beta.12",
+    "@chkit/core@^0.2.0-beta.19",
+    "@chkit/plugin-sync@^0.2.0-beta.19",
     "zod@^4.3.6"
   ],
   "files": [
@@ -38,8 +38,14 @@
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.3.1",
+      "version": "0.3.2",
       "changelog": [
+        {
+          "version": "0.3.2",
+          "changes": [
+            "Use the `@chkit/plugin-sync` package and `chkit sync` commands with chkit 0.2.0-beta.19 or later."
+          ]
+        },
         {
           "version": "0.3.1",
           "changes": [
@@ -84,8 +90,8 @@
       "logo": "https://chkit.obsessiondb.com/logos/circleback.svg",
       "language": "typescript",
       "license": "MIT",
-      "chkit": "^0.2.0-beta.12",
-      "ingest": "^0.2.0-beta.12",
+      "chkit": "^0.2.0-beta.19",
+      "ingest": "^0.2.0-beta.19",
       "clickhouse": ">=25.3.0",
       "root": "src/integrations/circleback",
       "entry": "index.ts",
@@ -185,7 +191,7 @@
       "views": [],
       "sync": {
         "description": "Each resource fully reads its own provider collection and records independent successful completion after writes. Interrupted reads restart at the first page. Transcripts own complete meeting discovery and revisit late availability on unchanged old meetings.",
-        "schedule": "Run bunx chkit ingest run --tag provider:circleback from a scheduler.",
+        "schedule": "Run bunx chkit sync run --tag provider:circleback from a scheduler.",
         "deletions": "Absent resources remain stored. Transcript 403 and 404 responses update explicit read outcomes without deleting prior successful content; neither proves deletion or temporary processing."
       }
     }

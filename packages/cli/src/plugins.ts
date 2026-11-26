@@ -75,7 +75,8 @@ export interface PluginRuntime {
     },
     plan: MigrationPlan,
   ): Promise<MigrationPlan>
-  runOnBeforeApply(context: ChxOnBeforeApplyContext): Promise<string[]>
+  /** `signal` aborted (Ctrl-C) starts no further hook. */
+  runOnBeforeApply(context: ChxOnBeforeApplyContext, signal?: AbortSignal): Promise<string[]>
   runOnAfterApply(context: ChxOnAfterApplyContext): Promise<void>
   runOnCheck(
     context: Omit<ChxOnCheckContext, 'options' | 'tableScope'> & {

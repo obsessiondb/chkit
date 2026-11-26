@@ -106,14 +106,19 @@ export NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,::1"
 export no_proxy="$NO_PROXY"
 
 cp test/infra/clickhouse.xml /etc/clickhouse-server/config.d/chkit-ci.xml
-if ! curl --noproxy '*' -fsS --max-time 2 --user default:chkit-ci \
+# The embedded Keeper and the replica path defaults in clickhouse.xml apply only
+# on a (re)start, not on SYSTEM RELOAD CONFIG.
+if curl --noproxy '*' -fsS --max-time 2 --user default:chkit-ci \
   "$CLICKHOUSE_URL/?query=SELECT%201" >/dev/null 2>&1; then
+  service clickhouse-server restart
+else
   service clickhouse-server start
 fi
+# Ready once Keeper answers too, as the compose healthcheck checks.
 chkit_ready=false
 for attempt in $(seq 1 60); do
   if curl --noproxy '*' -fsS --max-time 2 --user default:chkit-ci \
-    "$CLICKHOUSE_URL/?query=SELECT%201" >/dev/null 2>&1; then
+    "$CLICKHOUSE_URL/?query=SELECT%20count()%20FROM%20system.zookeeper%20WHERE%20path%20%3D%20'%2F'" >/dev/null 2>&1; then
     chkit_ready=true
     break
   fi
@@ -124,7 +129,6 @@ if [ "$chkit_ready" != true ]; then
   echo 'ClickHouse failed to become ready.' >&2
   exit 1
 fi
-clickhouse-client --host 127.0.0.1 --password chkit-ci --query 'SYSTEM RELOAD CONFIG'
 
 bun install --frozen-lockfile
 # Install chkit_python's Python and dev tools while the network is available.

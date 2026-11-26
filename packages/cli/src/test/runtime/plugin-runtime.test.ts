@@ -246,3 +246,45 @@ describe('resolveContext', () => {
     expect(events).toEqual(['getContext:first', 'getContext:broken', 'close:first'])
   })
 })
+
+describe('onBeforeApply', () => {
+  test('starts no further hook once the signal is aborted (Ctrl-C, #816)', async () => {
+    const controller = new AbortController()
+    const ran: string[] = []
+    const first: ChxPlugin = {
+      manifest: { name: 'first', apiVersion: 1 },
+      hooks: {
+        onBeforeApply: async () => {
+          ran.push('first')
+          controller.abort(new Error('interrupted'))
+        },
+      },
+    }
+    const second: ChxPlugin = {
+      manifest: { name: 'second', apiVersion: 1 },
+      hooks: {
+        onBeforeApply: () => {
+          ran.push('second')
+        },
+      },
+    }
+    const config = makeConfig([first, second])
+    const runtime = await loadPluginRuntime({ config, configPath: '/fake/clickhouse.config.ts', cliVersion: '1.0.0' })
+
+    const applied = runtime.runOnBeforeApply(
+      {
+        command: 'migrate',
+        config,
+        tableScope: { enabled: false, matchedTables: [], matchCount: 0 },
+        flags: {},
+        migration: 'm.sql',
+        sql: 'SELECT 1',
+        statements: ['SELECT 1'],
+      },
+      controller.signal,
+    )
+
+    await expect(applied).rejects.toThrow('interrupted')
+    expect(ran).toEqual(['first'])
+  })
+})

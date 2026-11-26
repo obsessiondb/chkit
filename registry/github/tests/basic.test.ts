@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
-import { HttpError, runIngestion, selectStreams, type Page, type SourceContext } from '@chkit/plugin-ingest'
-import { createMemoryDestination, createMemoryJournal, createSourceContext } from '@chkit/plugin-ingest/testing'
+import { HttpError, runIngestion, selectStreams, type Page, type SourceContext } from '@chkit/plugin-sync'
+import { createMemoryDestination, createMemoryJournal, createSourceContext } from '@chkit/plugin-sync/testing'
 
 import { createGitHubPipeline, githubPipeline } from '../index.js'
 import { githubConfig, type GitHubConfig } from '../config.js'

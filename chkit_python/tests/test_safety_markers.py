@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+from typing import Any
+
 import pytest
 
 from chkit.cli.safety_markers import (
     DestructiveOperationMarker,
+    MigrationOperationSummary,
     NonSelectBarrier,
     ScannedDestructiveStatement,
     collect_destructive_operation_markers,
     collect_unmarked_destructive_statements,
     extract_executable_statements,
     extract_migration_operation_summaries,
+    extract_statement_operations,
     find_non_select_barriers,
     is_select_statement,
     migration_contains_danger_operation,
@@ -391,3 +397,75 @@ def test_find_non_select_barriers_ignores_other_modes() -> None:
     assert find_non_select_barriers(
         extract_executable_statements(sql), extract_migration_operation_summaries(sql)
     ) == []
+
+
+# ---------- extract_statement_operations (#831) ----------
+# test/fixtures/statement-operations.json is shared with TS
+# (packages/cli/src/test/runtime/safety-markers.test.ts): both ports pair the
+# same marker with each statement.
+
+_STATEMENT_OPERATIONS: dict[str, Any] = json.loads(
+    (Path(__file__).resolve().parents[2] / "test/fixtures/statement-operations.json").read_text(
+        encoding="utf-8"
+    )
+)
+
+
+def _fields(op: MigrationOperationSummary | None) -> dict[str, Any] | None:
+    if op is None:
+        return None
+    return {
+        "type": op.type,
+        "key": op.key,
+        "risk": op.risk,
+        "mode": op.mode,
+        "beforeRetry": op.before_retry,
+    }
+
+
+@pytest.mark.parametrize(
+    "case", [pytest.param(case, id=case["name"]) for case in _STATEMENT_OPERATIONS["cases"]]
+)
+def test_statement_operations_shared_cases(case: dict[str, Any]) -> None:
+    sql = case["sql"]
+    statements = extract_executable_statements(sql)
+    assert [_fields(op) for op in extract_statement_operations(sql)] == case["operations"]
+    assert len(case["operations"]) == len(statements)
+    # What a release before #831 paired with each statement.
+    ordered = extract_migration_operation_summaries(sql)
+    legacy = [_fields(ordered[i]) if i < len(ordered) else None for i in range(len(statements))]
+    assert legacy == (case["operations"] if case["legacy"] == "same" else case["legacy"])
+
+
+def test_unmarked_drop_before_a_marked_statement_still_needs_allow_destructive() -> None:
+    sql = "\n".join(
+        [
+            "DROP TABLE app.old;",
+            "-- operation: create_table key=table:app.t risk=safe",
+            "CREATE TABLE app.t (id UInt64) ENGINE = MergeTree ORDER BY id;",
+        ]
+    )
+    assert scan_destructive_sql_statements(sql) == [
+        ScannedDestructiveStatement(type="drop_table", statement="DROP TABLE app.old;")
+    ]
+
+
+def test_danger_marker_after_a_byte_order_mark_still_needs_allow_destructive() -> None:
+    sql = "\ufeff-- operation: drop_table key=table:app.t risk=danger\nDROP TABLE app.t;"
+    assert [m.type for m in collect_destructive_operation_markers("m.sql", sql)] == ["drop_table"]
+
+
+def test_barrier_after_an_unmarked_statement_is_checked_at_its_own_statement() -> None:
+    sql = "\n".join(
+        [
+            "INSERT INTO app.t VALUES (1);",
+            "-- operation: insert_barrier key=table:app.t risk=safe mode=barrier",
+            "SELECT 1 AS query_id;",
+        ]
+    )
+    assert (
+        find_non_select_barriers(
+            extract_executable_statements(sql), extract_statement_operations(sql)
+        )
+        == []
+    )

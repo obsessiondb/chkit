@@ -31,8 +31,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from chkit.core.sql_lexer import SQLToken, is_trivia, tokenize_sql
-from chkit.core.sql_splitter import extract_executable_statements
+from chkit.core.sql_lexer import SQLToken, is_trivia, js_regex, js_trim, tokenize_sql
+from chkit.core.sql_splitter import (
+    extract_executable_statements,
+    extract_executable_statements_with_comments,
+)
 
 __all__ = [
     "DestructiveOperationMarker",
@@ -44,6 +47,7 @@ __all__ = [
     "collect_unmarked_destructive_statements",
     "extract_executable_statements",
     "extract_migration_operation_summaries",
+    "extract_statement_operations",
     "find_non_select_barriers",
     "is_select_statement",
     "migration_contains_danger_operation",
@@ -59,9 +63,12 @@ _PREVIEW_TRUNCATE_LEN = 117
 
 _BEFORE_RETRY_PREFIX = "-- before-retry:"
 
+# JavaScript's ``\s`` and trim, so both ports read the same markers (#831).
 _OPERATION_LINE = re.compile(
-    r"^([a-z_]+)\s+key=(.+?)\s+risk=([a-z_]+)(?:\s+mode=([a-z_]+))?$"
+    js_regex(r"^([a-z_]+)\s+key=(.+?)\s+risk=([a-z_]+)(?:\s+mode=([a-z_]+))?$")
 )
+_OPERATION_PREFIX = re.compile(js_regex(r"^-- operation:\s*"))
+_TRAILING_SEMICOLON = re.compile(js_regex(r";\s*$"))
 
 _OBJECT_KEY_RE = re.compile(
     r"\b(?:TABLE|VIEW|DATABASE|DICTIONARY)\s+(?:IF\s+EXISTS\s+)?`?([\w.]+)`?",
@@ -143,9 +150,9 @@ def migration_contains_danger_operation(sql: str) -> bool:
 def _extract_destructive_operation_summaries(sql: str) -> list[str]:
     out: list[str] = []
     for raw_line in sql.split("\n"):
-        line = raw_line.strip()
+        line = js_trim(raw_line)
         if line.startswith("-- operation:") and "risk=danger" in line:
-            out.append(re.sub(r"^-- operation:\s*", "", line))
+            out.append(_OPERATION_PREFIX.sub("", line))
     return out
 
 
@@ -170,17 +177,17 @@ def _parse_operation_line(
 
 
 def _strip_trailing_semicolon(value: str) -> str:
-    return re.sub(r";\s*$", "", value).strip()
+    return js_trim(_TRAILING_SEMICOLON.sub("", value))
 
 
 def extract_migration_operation_summaries(sql: str) -> list[MigrationOperationSummary]:
     """Parse every ``-- operation:`` block in ``sql`` with its before-retry SQL."""
-    lines = [line.strip() for line in sql.split("\n")]
+    lines = [js_trim(line) for line in sql.split("\n")]
     summaries: list[MigrationOperationSummary] = []
     for i, line in enumerate(lines):
         if not line.startswith("-- operation:"):
             continue
-        summary = re.sub(r"^-- operation:\s*", "", line)
+        summary = _OPERATION_PREFIX.sub("", line)
 
         before_retry: str | None = None
         for j in range(i + 1, len(lines)):
@@ -191,7 +198,7 @@ def extract_migration_operation_summaries(sql: str) -> list[MigrationOperationSu
                 break
             if nxt.startswith(_BEFORE_RETRY_PREFIX):
                 before_retry = _strip_trailing_semicolon(
-                    nxt[len(_BEFORE_RETRY_PREFIX) :].strip()
+                    js_trim(nxt[len(_BEFORE_RETRY_PREFIX) :])
                 )
                 if before_retry == "":
                     before_retry = None
@@ -201,6 +208,41 @@ def extract_migration_operation_summaries(sql: str) -> list[MigrationOperationSu
         if parsed is not None:
             summaries.append(parsed)
     return summaries
+
+
+def extract_statement_operations(sql: str) -> list[MigrationOperationSummary | None]:
+    """The ``-- operation:`` marker of each statement of ``sql`` (#831).
+
+    One entry per statement of ``extract_executable_statements(sql)``, None
+    for a statement without one. A marker belongs to the statement after it,
+    so a statement without a marker leaves the markers of the others where
+    they are. Where several markers come before one statement, as when a
+    statement above it was commented out, the last one counts; a marker after
+    the last statement, or one that does not parse, marks nothing. The
+    marker's ``-- before-retry:`` line follows it in the same run of comment
+    lines.
+    """
+    return [
+        _statement_operation(statement.comment_blocks)
+        for statement in extract_executable_statements_with_comments(sql)
+    ]
+
+
+def _statement_operation(comment_blocks: list[list[str]]) -> MigrationOperationSummary | None:
+    for block in reversed(comment_blocks):
+        at = next(
+            (i for i in range(len(block) - 1, -1, -1) if block[i].startswith("-- operation:")),
+            None,
+        )
+        if at is None:
+            continue
+        before_retry: str | None = None
+        line = next((x for x in block[at + 1 :] if x.startswith(_BEFORE_RETRY_PREFIX)), None)
+        if line is not None:
+            value = _strip_trailing_semicolon(js_trim(line[len(_BEFORE_RETRY_PREFIX) :]))
+            before_retry = value or None
+        return _parse_operation_line(_OPERATION_PREFIX.sub("", block[at]), before_retry)
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,10 +255,11 @@ class NonSelectBarrier:
 
 
 def find_non_select_barriers(
-    statements: Sequence[str], operations: Sequence[MigrationOperationSummary]
+    statements: Sequence[str], operations: Sequence[MigrationOperationSummary | None]
 ) -> list[NonSelectBarrier]:
-    """The statements marked ``mode=barrier`` that are not a SELECT (#634); the
-    n-th operation marker belongs to the n-th statement.
+    """The statements marked ``mode=barrier`` that are not a SELECT (#634);
+    ``operations`` has the marker of each statement, as
+    ``extract_statement_operations`` returns them.
 
     The barrier read runs its statement as a query, once and then every
     second, and nothing waits for a change it makes to reach the other
@@ -470,16 +513,16 @@ def _extract_object_key(statement: str) -> str:
 def scan_destructive_sql_statements(sql: str) -> list[ScannedDestructiveStatement]:
     """Defense-in-depth scan: flag destructive SQL with no matching planner marker.
 
-    Generated migrations emit exactly one ``-- operation:`` marker per
-    statement, in order (the 1:1 invariant relied on by apply). A
-    marker-covered position is trusted to the planner's risk
-    classification. Only marker-less positions are flagged.
+    Generated migrations emit an ``-- operation:`` marker before each
+    statement. A marker-covered statement is trusted to the planner's risk
+    classification. Only statements without a marker of their own are
+    flagged (#831), anywhere in the file.
     """
     statements = extract_executable_statements(sql)
-    operations = extract_migration_operation_summaries(sql)
+    operations = extract_statement_operations(sql)
     found: list[ScannedDestructiveStatement] = []
     for i, statement in enumerate(statements):
-        if i < len(operations):
+        if operations[i] is not None:
             continue
         type_ = _classify_destructive_statement(statement)
         if type_ is not None:

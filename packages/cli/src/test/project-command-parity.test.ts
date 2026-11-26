@@ -220,6 +220,40 @@ describe('commands in a project match chkit-py (#776)', () => {
     }
   }, 60_000)
 
+  test('a disabled obsessiondb plugin is not configured, and its help still prints', async () => {
+    const project = await createProject({
+      imports: withObsessionDB.imports,
+      list: '{ ...obsessiondb(), enabled: false }',
+    })
+    // Guard: a disabled registration next to an enabled one adds no second plugin.
+    const both = await createProject({
+      imports: withObsessionDB.imports,
+      list: '{ ...obsessiondb(), enabled: false }, obsessiondb()',
+    })
+    try {
+      for (const args of [['obsessiondb', '--help'], ['obsessiondb', 'login', '--help']]) {
+        const help = both.run(args)
+        expect([args, help.exitCode, help.stderr]).toEqual([args, 0, ''])
+      }
+      const message = 'ObsessionDB plugin is not configured. Add it to config.plugins first.'
+      for (const args of [['obsessiondb'], ['obsessiondb', 'login']]) {
+        const result = project.run(args)
+        expect([args, result.exitCode, result.stdout, result.stderr.trim()]).toEqual([args, 1, '', message])
+      }
+      for (const [args, usage] of [
+        [['obsessiondb', '--help'], 'chkit obsessiondb <command> [options]'],
+        [['obsessiondb', 'login', '--help'], 'chkit obsessiondb login [options]'],
+      ] as const) {
+        const help = project.run(args)
+        expect([args, help.exitCode, help.stderr]).toEqual([args, 0, ''])
+        expect(help.stdout).toContain(usage)
+      }
+    } finally {
+      await project.cleanup()
+      await both.cleanup()
+    }
+  }, 60_000)
+
   test('an unknown service subcommand prints one message', async () => {
     for (const plugins of [undefined, withObsessionDB]) {
       const project = await createProject(plugins)
@@ -243,6 +277,33 @@ describe('commands in a project match chkit-py (#776)', () => {
       })
       expect([json.exitCode, json.stderr]).toEqual([1, ''])
       expect(JSON.parse(json.stdout)).toEqual({ schemaVersion: 1, message: 'Unknown service subcommand "nosuch".' })
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  }, 60_000)
+
+  test('service with no subcommand prints one usage message (#781)', async () => {
+    const message = 'Usage: chkit plugin obsessiondb service <list|select|claim|alias> [args]'
+    for (const plugins of [undefined, withObsessionDB]) {
+      const project = await createProject(plugins)
+      try {
+        const text = project.run(['obsessiondb', 'service'])
+        expect([text.exitCode, text.stdout, text.stderr]).toEqual([1, `${message}\n`, ''])
+        const json = project.run(['obsessiondb', 'service', '--json'])
+        expect([json.exitCode, json.stderr]).toEqual([1, ''])
+        expect(JSON.parse(json.stdout)).toEqual({ schemaVersion: 1, message })
+      } finally {
+        await project.cleanup()
+      }
+    }
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-project-parity-empty-'))
+    try {
+      const json = spawnWithTimeout(['bun', entry, 'obsessiondb', 'service', '--json'], {
+        cwd: dir,
+        env: { HOME: dir, XDG_CONFIG_HOME: dir },
+      })
+      expect([json.exitCode, json.stderr]).toEqual([1, ''])
+      expect(JSON.parse(json.stdout)).toEqual({ schemaVersion: 1, message })
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

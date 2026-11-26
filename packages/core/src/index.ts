@@ -20,14 +20,10 @@ export {
   definitionKey,
   type CanonicalizeOptions,
 } from './canonical.js'
-export {
-  columnRenameKey,
-  isColumnStatement,
-  orderColumnStatements,
-  planDiff,
-  type ColumnRename,
-  type ColumnStatementDefinitions,
-} from './planner.js'
+export { planDiff } from './planner.js'
+export { isColumnStatement, orderColumnStatements } from './column-order.js'
+export type { ColumnStatementDefinitions } from './column-cycle-repair.js'
+export { columnRenameKey, type ColumnRename } from './column-reads.js'
 export {
   AUTO_MINMAX_INDEX_PREFIX,
   DEFAULT_INDEX_GRANULARITY,
@@ -109,7 +105,9 @@ export { createPluginRunner, wrapPluginRun, type PluginRunContext } from './plug
 export {
   splitSqlStatements,
   extractExecutableStatements,
+  extractExecutableStatementsWithComments,
   extractLegacyExecutableStatements,
+  type ExecutableStatementWithComments,
 } from './sql-splitter.js'
 export { statementFingerprint } from './sql-fingerprint.js'
 export { parseJsonEachRow, parseJsonEachRowLine, roundTripNumber } from './exact-json.js'

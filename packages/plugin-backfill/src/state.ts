@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, readdir, rename } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
 import type { ResolvedChxConfig } from '@chkit/core'
@@ -99,9 +99,53 @@ function decodePlan(plan: BackfillPlanState): BackfillPlanState {
   }
 }
 
+/** Write `value` to a temporary file beside `filePath`, sync it, rename it
+ *  over `filePath`, then sync the directory, so neither a crash nor a power
+ *  loss leaves a truncated file or brings back the previous one (the run
+ *  checkpoint holds the only record of a replay's query id, #765). */
 export async function writeJson(filePath: string, value: unknown): Promise<void> {
-  await mkdir(dirname(filePath), { recursive: true })
-  await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
+  await mkdirDurably(dirname(filePath))
+  const tmpPath = `${filePath}.${randomBytes(6).toString('hex')}.tmp`
+  await writeFileDurably(tmpPath, `${JSON.stringify(value, null, 2)}\n`)
+  await rename(tmpPath, filePath)
+  await syncDirectory(dirname(filePath))
+}
+
+/**
+ * `mkdir -p dir`, then sync the parent of each directory it created, so a
+ * power loss cannot drop a new `runs/` with the checkpoint in it (#765).
+ */
+export async function mkdirDurably(dir: string): Promise<void> {
+  const missing: string[] = []
+  for (let current = resolve(dir); !existsSync(current); current = dirname(current)) {
+    missing.push(current)
+    if (dirname(current) === current) break
+  }
+  await mkdir(dir, { recursive: true })
+  for (const created of missing.reverse()) await syncDirectory(dirname(created))
+}
+
+/** Write `content` to a new file at `filePath` and sync it to disk. */
+export async function writeFileDurably(filePath: string, content: string): Promise<void> {
+  const handle = await open(filePath, 'w')
+  try {
+    await handle.writeFile(content, 'utf8')
+    await handle.sync()
+  } finally {
+    await handle.close()
+  }
+}
+
+/** Sync a directory, so a rename or link in it survives a power loss.
+ *  Windows cannot open a directory for that, and needs no such sync. */
+export async function syncDirectory(dir: string): Promise<void> {
+  if (process.platform === 'win32') return
+  const handle = await open(dir, 'r')
+  try {
+    await handle.sync()
+  } finally {
+    await handle.close()
+  }
 }
 
 export async function readPlan(input: {

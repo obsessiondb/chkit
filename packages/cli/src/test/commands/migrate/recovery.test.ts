@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
+import { statementFingerprint } from '@chkit/core'
+
 import {
   emptyMigrationsError,
   inProgressChecksumMismatchError,
@@ -19,7 +21,12 @@ import {
   type StatementIdentity,
 } from '../../../commands/migrate/recovery.js'
 import type { MigrationRowState, OperationState } from '../../../runtime/journal-store.js'
-import type { MigrationOperationSummary } from '../../../runtime/safety-markers.js'
+import {
+  extractExecutableStatements,
+  extractMigrationOperationSummaries,
+  extractStatementOperations,
+  type MigrationOperationSummary,
+} from '../../../runtime/safety-markers.js'
 
 function summary(type: string, key: string): MigrationOperationSummary {
   return { type, key, risk: 'safe', mode: 'sync', beforeRetry: null, summary: `${type} key=${key} risk=safe` }
@@ -111,7 +118,7 @@ describe('statementIdentity', () => {
     const operations = [summary('create_table', 'table:db.a')]
     expect(statementIdentity(operations, 0)).toEqual({ type: 'create_table', key: 'table:db.a', marked: true })
     expect(statementIdentity(operations, 1)).toEqual({ type: 'sql_statement', key: 'statement:1', marked: false })
-    expect(statementIdentities(operations, [undefined, undefined])).toHaveLength(2)
+    expect(statementIdentities(operations, [undefined, undefined], operations)).toHaveLength(2)
   })
 })
 
@@ -142,7 +149,7 @@ describe('verifyRetryEdit', () => {
   })
 
   test('matches unmarked statements by position and counts them', () => {
-    const unmarked = statementIdentities([], [undefined, undefined, undefined])
+    const unmarked = statementIdentities([], [undefined, undefined, undefined], [])
     const result = verifyRetryEdit(
       [
         op(0, 'completed', { type: 'sql_statement', key: 'statement:0' }),
@@ -432,6 +439,133 @@ describe('rebaseInProgressState', () => {
       appliedAt: '2026-09-29T01:00:00.000',
       operations: [op(0, 'completed', A), op(1, 'failed', B)],
     })
+  })
+})
+
+// Releases before #831 paired the n-th marker with the n-th statement, and the
+// journal names the marker they gave each statement. After an upgrade, a
+// --retry of such an in-progress migration still matches those records.
+describe('records written with the markers paired by order (#831)', () => {
+  const file = (failing: string) =>
+    [
+      'CREATE TABLE db.a (id UInt64) ENGINE = MergeTree ORDER BY id;',
+      '-- operation: load_table_data key=table:db.a risk=caution mode=async',
+      'INSERT INTO db.a SELECT number FROM numbers(10);',
+      failing,
+    ].join('\n')
+  const edited = file('SELECT 2;')
+  const fileIdentities = (sql: string) =>
+    statementIdentities(
+      extractStatementOperations(sql),
+      extractExecutableStatements(sql).map(() => undefined),
+      extractMigrationOperationSummaries(sql),
+    )
+  // What the earlier release recorded: statement 1 ran as the load, statement 2 unmarked.
+  const recorded = [
+    op(0, 'completed', LOAD, 'q-0'),
+    op(1, 'completed', { type: 'sql_statement', key: 'statement:1' }),
+    op(2, 'failed', { type: 'sql_statement', key: 'statement:2' }),
+  ]
+
+  test('the statements keep their own markers now', () => {
+    expect(fileIdentities(edited).map(({ type, key }) => ({ type, key }))).toEqual([
+      { type: 'sql_statement', key: 'statement:0' },
+      LOAD,
+      { type: 'sql_statement', key: 'statement:2' },
+    ])
+  })
+
+  test('--retry accepts the completed statements under the marker they were recorded with', () => {
+    expect(verifyRetryEdit(recorded, fileIdentities(edited))).toEqual({
+      ok: true,
+      completed: 2,
+      unmarkedCompleted: 1,
+      positionOnlyCompleted: 1,
+      resumeIndex: 2,
+    })
+  })
+
+  test('a recorded marker that neither pairing gives the statement is still refused', () => {
+    const result = verifyRetryEdit([op(0, 'completed', A)], fileIdentities(edited))
+    expect(result.ok).toBe(false)
+  })
+
+  test('the old pairing is checked as a whole, so a shared marker keeps its count', () => {
+    const shared = '-- operation: alter_table_modify_column key=table:db.t:column:f risk=caution'
+    // The REMOVE DEFAULT that completed was deleted; only the MODIFY after it is left.
+    const sql = ['SELECT 0;', shared, 'ALTER TABLE db.t MODIFY COLUMN f UInt64;'].join('\n')
+    const result = verifyRetryEdit(
+      [op(0, 'completed', MODIFY_F), op(1, 'completed', MODIFY_F), op(2, 'failed', MODIFY_F)],
+      fileIdentities(sql),
+    )
+    expect(result.ok).toBe(false)
+  })
+
+  test('a failed record that only the old pairing matches is dropped on the re-key, so its statement gets no before-retry', () => {
+    const sql = [
+      '-- operation: load_table_data key=table:db.a risk=caution',
+      '-- INSERT INTO db.a SELECT bad;',
+      '/* replacement */',
+      '-- operation: load_table_data key=table:db.b risk=caution',
+      '-- before-retry: TRUNCATE TABLE db.b',
+      'INSERT INTO db.b SELECT 1;',
+    ].join('\n')
+    const state: MigrationRowState = {
+      name: 'm.sql',
+      appliedAt: '2026-09-29 00:11:11.000',
+      checksum: 'old',
+      chkitVersion: '0.2.0-test',
+      migrationCompleted: false,
+      operations: [op(0, 'failed', LOAD)],
+    }
+    const rebased = rebaseInProgressState(state, { checksum: 'new', identities: fileIdentities(sql), appliedAt: 'T' })
+    expect(rebased.operations).toEqual([])
+  })
+
+  test('a failed attempt of the same SQL under the old pairing stays recorded, so its statement gets its before-retry', () => {
+    const sql = [
+      'SELECT 0;',
+      '-- operation: load_table_data key=table:db.a risk=caution',
+      '-- before-retry: TRUNCATE TABLE db.a',
+      'INSERT INTO db.a SELECT number FROM numbers(10);',
+      '-- edited',
+    ].join('\n')
+    const fingerprints = extractExecutableStatements(sql).map(statementFingerprint)
+    const failed = { ...op(1, 'failed', { type: 'sql_statement', key: 'statement:1' }), fingerprint: fingerprints[1] ?? '' }
+    const state: MigrationRowState = {
+      name: 'm.sql',
+      appliedAt: '2026-09-29 00:11:11.000',
+      checksum: 'old',
+      chkitVersion: '0.2.0-test',
+      migrationCompleted: false,
+      operations: [op(0, 'completed', LOAD), failed],
+    }
+    const identities = statementIdentities(extractStatementOperations(sql), fingerprints, extractMigrationOperationSummaries(sql))
+    expect(verifyRetryEdit(state.operations, identities)).toMatchObject({ ok: true, resumeIndex: 1 })
+    expect(rebaseInProgressState(state, { checksum: 'new', identities, appliedAt: 'T' }).operations).toEqual([
+      op(0, 'completed', LOAD),
+      failed,
+    ])
+    // A record of other SQL is another statement's attempt.
+    const other = { ...failed, fingerprint: 'other' }
+    expect(rebaseInProgressState({ ...state, operations: [other] }, { checksum: 'new', identities, appliedAt: 'T' }).operations).toEqual([])
+  })
+
+  test('a started async attempt recorded under the old pairing stays recorded on the re-key', () => {
+    const state: MigrationRowState = {
+      name: 'm.sql',
+      appliedAt: '2026-09-29 00:11:11.000',
+      checksum: 'old',
+      chkitVersion: '0.2.0-test',
+      migrationCompleted: false,
+      operations: [op(0, 'started', LOAD, 'q-0')],
+    }
+    const rebased = rebaseInProgressState(state, {
+      checksum: 'new',
+      identities: fileIdentities(edited),
+      appliedAt: '2026-09-29T01:00:00.000',
+    })
+    expect(rebased.operations).toEqual([op(0, 'started', LOAD, 'q-0')])
   })
 })
 

@@ -9,8 +9,8 @@ bunx chkit check
 bunx chkit generate --name add_google_meet
 # Review the migration before applying it.
 bunx chkit migrate --apply
-bunx chkit ingest run --tag provider:google-meet
-bunx chkit ingest status --tag provider:google-meet
+bunx chkit sync run --tag provider:google-meet
+bunx chkit sync status --tag provider:google-meet
 ```
 
 ## Resources and streams
@@ -27,8 +27,8 @@ One installation pipeline contains six independent streams and destinations:
 Every child stream discovers its own conferences. Sessions also discover participants; entries also discover transcripts. Select resources independently, in any order. Parent publication does not wait for children.
 
 ```sh
-bunx chkit ingest run --tag provider:google-meet --tag resource:transcript-entries
-bunx chkit ingest run --tag provider:google-meet --tag resource:participant-sessions
+bunx chkit sync run --tag provider:google-meet --tag resource:transcript-entries
+bunx chkit sync run --tag provider:google-meet --tag resource:participant-sessions
 ```
 
 `pipeline.ts` binds configuration, strategies and destinations. `sources/resources.ts` contains ordinary resource traversal; `client.ts` validates requests and uses `paginate`. The plugin owns request retries, cancellation, destination acknowledgement and checkpoint persistence.
@@ -66,7 +66,7 @@ Missing, inaccessible or expired resources do not imply deletion. Google removes
 Backfill bounds select conference end times, not child modification times. All children of selected conferences are read. Reuse the same backfill ID and bounds to resume; changed bounds require a new ID.
 
 ```sh
-bunx chkit ingest run --tag provider:google-meet --backfill october --from 2026-10-01T00:00:00Z --to 2026-10-05T00:00:00Z
+bunx chkit sync run --tag provider:google-meet --backfill october --from 2026-10-01T00:00:00Z --to 2026-10-05T00:00:00Z
 ```
 
 Version 0.2.0 preserves the existing conference/transcript destinations and adds participant, session, recording and entry tables. Entries are separate rows rather than embedded transcript arrays. New row IDs include `sourceId`; legacy provider-name IDs remain until an explicit identity/data migration. Keep old rows as archives or migrate them deliberately.

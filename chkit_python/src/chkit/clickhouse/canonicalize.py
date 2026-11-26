@@ -6,10 +6,12 @@ Port of ``packages/clickhouse/src/canonicalize.ts`` (#195).
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, TypedDict
 
 from chkit.core.sql_lexer import is_trivia, js_regex, js_trim, tokenize_sql
+
+from .sql_udf import SQLUDF, expand_sql_udfs, parse_sql_udf
 
 # Keep each batched query well under ClickHouse's default max_query_size
 # (262144 bytes) so a large schema doesn't overflow a single query — which would
@@ -28,20 +30,25 @@ class FunctionRegistry(TypedDict):
     lowercased name, but only for names ClickHouse resolves case-insensitively.
     """
 
+    sql_udfs: dict[str, SQLUDF]
     exact: dict[str, str]
     insensitive: dict[str, str]
 
 
 def build_function_registry(rows: Sequence[Mapping[str, Any]]) -> FunctionRegistry:
+    sql_udfs: dict[str, SQLUDF] = {}
     exact: dict[str, str] = {}
     insensitive: dict[str, str] = {}
     for row in rows:
         name = str(row["name"])
+        definition = parse_sql_udf(str(row.get("create_query") or ""))
+        if definition is not None:
+            sql_udfs[name] = definition
         canonical = str(row["alias_to"]) or name
         exact[name] = canonical
         if row["case_insensitive"]:
             insensitive[name.lower()] = canonical
-    return {"exact": exact, "insensitive": insensitive}
+    return {"exact": exact, "insensitive": insensitive, "sql_udfs": sql_udfs}
 
 
 def _load_function_registry(client: Any, on_unavailable: Any = None) -> FunctionRegistry:
@@ -54,7 +61,10 @@ def _load_function_registry(client: Any, on_unavailable: Any = None) -> Function
     safer than lowercasing case-sensitive names.
     """
     try:
-        rows = client.query("SELECT name, case_insensitive, alias_to FROM system.functions").rows
+        rows = client.query(
+            "SELECT name, case_insensitive, alias_to, "
+            "if(isValidUTF8(create_query), create_query, '') AS create_query FROM system.functions"
+        ).rows
     except Exception as error:
         if on_unavailable is not None:
             on_unavailable(error)
@@ -101,6 +111,7 @@ def canonicalize_sql_fragments(
     fragments: Sequence[str],
     *,
     wrap: bool,
+    stored_query_pairs: Sequence[tuple[str, str]] = (),
     on_registry_unavailable: Any = None,
 ) -> dict[str, str]:
     """Map each fragment to the exact form ClickHouse stores it in.
@@ -111,6 +122,9 @@ def canonicalize_sql_fragments(
     resolved through the server's ``system.functions`` registry, since the
     server canonicalizes their case and aliases on write but the formatter
     does not (#729).
+
+    ``stored_query_pairs`` additionally analyzes differing view queries through
+    the server storage rewrite path; unavailable analysis retains both forms.
 
     ``wrap`` distinguishes a scalar expression (wrapped as ``SELECT 0, <expr>``,
     prefix stripped back off; after ``0,`` a leading ``all`` or ``distinct``
@@ -130,9 +144,11 @@ def canonicalize_sql_fragments(
 
     registry = _load_function_registry(client, on_registry_unavailable)
     if not wrap:
-        return _format_fragments(
+        result = _format_fragments(
             client, unique, "formatQuerySingleLineOrNull(fragment)", None, registry
         )
+        _normalize_stored_query_pairs(client, stored_query_pairs, result, registry)
+        return result
 
     result = _format_fragments(
         client,
@@ -219,3 +235,71 @@ def _quote_literal(value: str) -> str:
 def _strip_prefix(formatted: str, prefix: re.Pattern[str]) -> str | None:
     match = prefix.match(formatted)
     return js_trim(match.group(1)) if match else None
+
+
+def _normalize_stored_query_pairs(
+    client: Any,
+    pairs: Sequence[tuple[str, str]],
+    result: dict[str, str],
+    registry: FunctionRegistry,
+) -> None:
+    # Normalize by initial formatted value, so shared view queries cannot
+    # receive different rewrites depending on their pair's position.
+    original = dict(result)
+    candidates: dict[str, str] = {}
+    for pair in pairs:
+        for query in pair:
+            canonical = original.get(js_trim(query))
+            if not canonical or canonical in candidates:
+                continue
+            expanded = expand_sql_udfs(canonical, registry["sql_udfs"])
+            if expanded is not None and (expanded != canonical or _has_with_clause(canonical)):
+                candidates[canonical] = expanded
+    if not candidates:
+        return
+    try:
+        formatted = _format_fragments(
+            client, list(dict.fromkeys(candidates.values())),
+            "formatQuerySingleLineOrNull(fragment)", None, registry
+        )
+        normalized: dict[str, str] = {}
+        for canonical, expanded in candidates.items():
+            value = formatted.get(expanded)
+            if value:
+                normalized[canonical] = value
+        explained = _explain_with_queries(client, normalized.values())
+        syntax = _format_fragments(
+            client, list(dict.fromkeys(explained.values())),
+            "formatQuerySingleLineOrNull(fragment)", None, registry
+        )
+        for canonical, value in normalized.items():
+            explanation = explained.get(value)
+            if explanation:
+                normalized[canonical] = syntax.get(explanation, value)
+        for raw, canonical in original.items():
+            if canonical in normalized:
+                result[raw] = normalized[canonical]
+    except Exception:
+        pass  # Keep the initial formatter results if the server cannot reformat.
+
+
+def _explain_with_queries(client: Any, queries: Iterable[str]) -> dict[str, str]:
+    explained: dict[str, str] = {}
+    for query in queries:
+        if not _has_with_clause(query) or query in explained:
+            continue
+        try:
+            rows = client.query("EXPLAIN SYNTAX oneline=1 " + query).rows
+            text = js_trim("\n".join(str(row["explain"]) for row in rows))
+            if text and "\ufffd" not in text:
+                explained[query] = text
+        except Exception:
+            pass  # Retain valid scalar expansion when analysis is unavailable.
+    return explained
+
+
+def _has_with_clause(sql: str) -> bool:
+    return any(
+        token.kind == "identifier" and token.text.upper() == "WITH"
+        for token in tokenize_sql(sql)
+    )

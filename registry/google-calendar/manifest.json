@@ -5,8 +5,8 @@
   "title": "Google Calendar",
   "description": "Editable Google Calendar API ingestion with journaled checkpoints and raw ClickHouse tables.",
   "dependencies": [
-    "@chkit/core@^0.2.0-beta.12",
-    "@chkit/plugin-ingest@^0.2.0-beta.12",
+    "@chkit/core@^0.2.0-beta.19",
+    "@chkit/plugin-sync@^0.2.0-beta.19",
     "zod@^4.3.6"
   ],
   "files": [
@@ -50,8 +50,14 @@
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.3.1",
+      "version": "0.3.2",
       "changelog": [
+        {
+          "version": "0.3.2",
+          "changes": [
+            "Use the `@chkit/plugin-sync` package and `chkit sync` commands with chkit 0.2.0-beta.19 or later."
+          ]
+        },
         {
           "version": "0.3.1",
           "changes": [
@@ -96,8 +102,8 @@
       "logo": "https://chkit.obsessiondb.com/logos/google-calendar.svg",
       "language": "typescript",
       "license": "MIT",
-      "chkit": "^0.2.0-beta.12",
-      "ingest": "^0.2.0-beta.12",
+      "chkit": "^0.2.0-beta.19",
+      "ingest": "^0.2.0-beta.19",
       "clickhouse": ">=25.3.0",
       "root": "src/integrations/google-calendar",
       "entry": "index.ts",
@@ -146,7 +152,7 @@
       "views": [],
       "sync": {
         "description": "Initial canonical event read followed by Google sync-token deltas. Acknowledged pages resume from journaled state.",
-        "schedule": "Run bunx chkit ingest run --tag provider:google-calendar from a scheduler.",
+        "schedule": "Run bunx chkit sync run --tag provider:google-calendar from a scheduler.",
         "deletions": "Cancellation payloads are retained. An expired token reboots provider progress without clearing raw observations; absent records are not reconciled."
       }
     }

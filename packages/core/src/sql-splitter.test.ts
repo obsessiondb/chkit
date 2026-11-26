@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import fixture from '../../../test/fixtures/sql-splitter.json'
 import {
   extractExecutableStatements,
+  extractExecutableStatementsWithComments,
   extractLegacyExecutableStatements,
   splitSqlStatements,
 } from './sql-splitter.js'
@@ -100,9 +101,10 @@ describe('extractExecutableStatements', () => {
   })
 
   // Contract relied on by migrate/apply.ts: `-- operation:` / `-- chkit-*`
-  // metadata comments are consumed separately (extractMigrationOperationSummaries
-  // reads the raw SQL); the executable stream must contain only real statements,
-  // with string-literal semicolons preserved.
+  // metadata comments are consumed separately (extractStatementOperations reads
+  // them per statement through extractExecutableStatementsWithComments, #831);
+  // the executable stream must contain only real statements, with
+  // string-literal semicolons preserved.
   test('drops migration-metadata comments and returns only executable statements', () => {
     const migration = [
       '-- chkit-migration-format: v1',
@@ -235,7 +237,33 @@ describe('extractExecutableStatements shared fixture', () => {
     test(name, () => {
       expect(extractExecutableStatements(sql)).toEqual(statements)
     })
+    // The markers of each statement are read with the same split (#831).
+    test(`${name}: the statements that carry their comments are the same`, () => {
+      expect(extractExecutableStatementsWithComments(sql).map((statement) => statement.sql)).toEqual(statements)
+    })
   }
+})
+
+describe('extractExecutableStatementsWithComments (#831)', () => {
+  test('gives each statement the comment lines before it, in runs that only whitespace separates', () => {
+    const sql = [
+      '-- header',
+      '',
+      '-- operation: a',
+      '-- before-retry: x',
+      'SELECT 1; -- after SQL',
+      '/* block */',
+      '-- operation: b',
+      'SELECT',
+      '-- inside',
+      '2;',
+      '-- trailing',
+    ].join('\n')
+    expect(extractExecutableStatementsWithComments(sql)).toEqual([
+      { sql: 'SELECT 1;', commentBlocks: [['-- header', '-- operation: a', '-- before-retry: x']] },
+      { sql: '/* block */\n\nSELECT\n\n2;', commentBlocks: [['-- operation: b'], ['-- inside']] },
+    ])
+  })
 })
 
 // The split before #562, which resume compares against: `legacyStatements`
