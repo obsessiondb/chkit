@@ -13,6 +13,8 @@ from typing import Any
 import pytest
 
 from chkit.core.canonical import canonicalize_definitions
+from chkit.core.column_cycle_repair import _cycle_repair_work
+from chkit.core.column_reads import _column_default_reads
 from chkit.core.model import (
     DictionaryDefinition,
     SchemaDefinition,
@@ -25,7 +27,7 @@ from chkit.core.model import (
     view,
 )
 from chkit.core.object_dependencies import build_dependency_graph, order_by_dependencies
-from chkit.core.planner import _column_default_reads, _cycle_repair_work, plan_diff
+from chkit.core.planner import plan_diff
 
 
 def app_table(name: str, columns: list[dict[str, Any]] | None = None) -> TableDefinition:
@@ -2119,7 +2121,8 @@ def test_plans_the_budget_edge_with_the_same_work_and_sql_as_ts_under_every_hash
     script = (
         "import hashlib, json, sys\n"
         "from chkit.core.model import table\n"
-        "from chkit.core.planner import _cycle_repair_work, plan_diff\n"
+        "from chkit.core.column_cycle_repair import _cycle_repair_work\n"
+        "from chkit.core.planner import plan_diff\n"
         "def t(columns):\n"
         "    return table(database='app', name='t', columns=[{'name': 'id', 'type': 'UInt64'}] + [\n"
         "        {'name': n, 'type': 'UInt64', **({} if e is None else {'default': {'expression': e}})}\n"
