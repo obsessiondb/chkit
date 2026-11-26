@@ -965,9 +965,11 @@ export const cycleRepairWork = { units: 0 }
  * broken where the reads are certain (#775). Each table is replayed on its
  * own, with its own work budget, and gives only edges that make a closing
  * statement wait for a breaker (`breakClosedCycles`); one more sort with
- * those edges gives the order. A table is left out, and keeps its sorted
- * order, when it has a RENAME COLUMN in `renames` (the replay does not
- * rename), when one of its expressions is not plain (`plainReads`), when a
+ * those edges gives the order. A RENAME COLUMN keeps its column on the
+ * graph under the new name (`renamedColumns`). A table is left out, and
+ * keeps its sorted order, when a rename in `renames` is one
+ * `renamedColumns` does not model, when one of its expressions is not plain
+ * (`plainReads`), when a
  * statement's key could be one of its columns or another table's, when a
  * prerequisite links its statements to another table's (keys of two tables
  * can be the same), when no statement can break its cycle, or when its
@@ -991,7 +993,8 @@ function repairedOrder(
   )
   const columns = statementColumns(statements, definitions)
   const excluded = new Set(columns.ambiguous)
-  for (const rename of renames) excluded.add(tableId(rename.database, rename.table))
+  const renamed = renamedColumns(renames, definitions)
+  for (const table of renamed.excluded) excluded.add(table)
   // Statements connected through prerequisites. A connection to another
   // table's statement, or to a statement of no known table, leaves the
   // tables out: the repair must not move a statement of a table that keeps
@@ -1015,6 +1018,7 @@ function repairedOrder(
   if (active.size === 0) return sorted
   const oldPlain = plainFacts(definitions.previous, active)
   const newPlain = plainFacts(definitions.next, active)
+  for (const [table, graph] of oldPlain.plain) oldPlain.plain.set(table, renamedGraph(graph, renamed.ids))
   for (const table of [...oldPlain.uncertain, ...newPlain.uncertain]) active.delete(table)
   // Per table: the columns that may close a cycle, the size of its replay
   // (those columns and all their reads) and its old expressions.
@@ -1080,6 +1084,67 @@ function repairedOrder(
   const extended = prerequisites.map((before) => [...before])
   for (const [target, breaker] of added) extended[target]?.push(breaker)
   return groupOrder(extended, groups, groupOf)
+}
+
+/**
+ * How the cycle repair sees the `renames` (#827): ClickHouse rewrites every
+ * DEFAULT, MATERIALIZED and ALIAS expression that reads a renamed column to
+ * its new name, so a RENAME COLUMN releases the old name and provides the
+ * new one, and the column keeps its reads and readers. `ids` maps each old
+ * `columnId` to the new one, which the old expressions are read with. A
+ * rename that this does not model leaves its table out (`excluded`): one
+ * whose old name is still a column after the plan or whose new name was one
+ * before it, a name in two renames of the table, a name with a `.`
+ * (ClickHouse renames nested columns differently), or a keyword or literal
+ * word (in any case: ClickHouse 26.3 rewrites a read of a column renamed to
+ * `true` as the literal `true`, and one renamed to `not` as the operator).
+ */
+function renamedColumns(
+  renames: readonly ColumnRename[],
+  definitions: ColumnStatementDefinitions
+): { ids: Map<string, string>; excluded: Set<string> } {
+  const names = (defs: SchemaDefinition[]) => {
+    const byTable = new Map<string, Set<string>>()
+    for (const def of defs) {
+      if (def.kind === 'table') byTable.set(tableId(def.database, def.name), new Set(def.columns.map((column) => column.name)))
+    }
+    return byTable
+  }
+  const before = names(definitions.previous)
+  const after = names(definitions.next)
+  const ids = new Map<string, string>()
+  const excluded = new Set<string>()
+  const seen = new Map<string, Set<string>>()
+  const modelled = (name: string) => {
+    const lower = name.toLowerCase()
+    return !name.includes('.') && !LITERAL_WORDS.has(lower) && !EXPRESSION_KEYWORDS.has(lower)
+  }
+  for (const rename of renames) {
+    const table = tableId(rename.database, rename.table)
+    const used = seen.get(table) ?? new Set<string>()
+    seen.set(table, used)
+    const clean =
+      modelled(rename.from) &&
+      modelled(rename.to) &&
+      before.get(table)?.has(rename.from) === true &&
+      before.get(table)?.has(rename.to) === false &&
+      after.get(table)?.has(rename.to) === true &&
+      after.get(table)?.has(rename.from) === false &&
+      !used.has(rename.from) &&
+      !used.has(rename.to)
+    used.add(rename.from)
+    used.add(rename.to)
+    if (!clean) excluded.add(table)
+    ids.set(`${table}\u0000${rename.from}`, `${table}\u0000${rename.to}`)
+  }
+  return { ids, excluded }
+}
+
+/** `graph` (`columnId` → the `columnId`s it reads) with the columns `ids` renames under their new names. */
+function renamedGraph(graph: Map<string, Set<string>>, ids: ReadonlyMap<string, string>): Map<string, Set<string>> {
+  if (ids.size === 0) return graph
+  const name = (column: string) => ids.get(column) ?? column
+  return new Map([...graph].map(([column, reads]) => [name(column), new Set([...reads].map(name))]))
 }
 
 /**

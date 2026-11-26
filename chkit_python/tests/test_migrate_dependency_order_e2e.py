@@ -497,6 +497,18 @@ _COLUMN_CHANGES: list[dict[str, Any]] = [
         "order": ["column:b", "column:a", "column:c"],
         "columns": ["a", "b", "c", "id"],
     },
+    # #827: ClickHouse rewrites the expressions that read a renamed column, so
+    # the rename keeps `x` (now `y`) on the cycle a -> b -> x -> a.
+    {
+        "label": "breakrename",
+        "before": "{'name': 'a', 'type': 'UInt64'}, "
+        f"{{'name': 'b', 'type': 'UInt64', {_e('x')}}}, {{'name': 'x', 'type': 'UInt64', {_e('a')}}}",
+        "after": f"{{'name': 'a', 'type': 'UInt64', {_e('b')}}}, "
+        f"{{'name': 'b', 'type': 'UInt64', {_e('id')}}}, {{'name': 'y', 'type': 'UInt64', {_e('a')}}}",
+        "rename": "x=y",
+        "order": ["column:b", "column:a", "column_rename:x:y"],
+        "columns": ["a", "b", "id", "y"],
+    },
 ]
 
 
