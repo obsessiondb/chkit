@@ -107,6 +107,8 @@ export interface MigrateLock {
   /** Throws when the lock may no longer be held. */
   assertHeld(): void
   release(): Promise<void>
+  /** Set when release() could not write the release. */
+  readonly releaseFailed?: boolean
 }
 
 export interface LockDeps {
@@ -130,6 +132,12 @@ const DEFAULT_DEPS: Omit<LockDeps, 'log'> = {
 export function migrateLockDisabled(): boolean {
   const value = process.env.CHKIT_MIGRATE_LOCK?.trim().toLowerCase()
   return value === 'off' || value === '0' || value === 'false'
+}
+
+/** Whether CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK lets a run with the lock off submit async statements (#810). */
+export function asyncWithoutLockAccepted(): boolean {
+  const value = process.env.CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK?.trim().toLowerCase()
+  return value === '1' || value === 'true' || value === 'on'
 }
 
 function escapeSqlString(value: string): string {
@@ -470,6 +478,7 @@ function startHolding(
   let stopped = false
   let timer: ReturnType<typeof setTimeout> | undefined
   let inFlight: Promise<void> = Promise.resolve()
+  let releaseFailed = false
 
   function lapsed(at: number): boolean {
     return at - confirmedAt > timings.validMs
@@ -559,6 +568,9 @@ function startHolding(
           'another run may have taken the lock. Check the journal with chkit status, then run migrate again.',
       )
     },
+    get releaseFailed() {
+      return releaseFailed
+    },
     async release() {
       stopped = true
       if (timer) clearTimeout(timer)
@@ -569,6 +581,7 @@ function startHolding(
         await writeClaim(db, target, claim.name, holderJson(beat), { released: true })
         debug('migrate-lock', `released ${claim.name}`)
       } catch (error) {
+        releaseFailed = true
         deps.log(
           `⚠ Could not release the migrate lock (${error instanceof Error ? error.message : String(error)}); ` +
             `other runs can take it ${timings.leaseMs / 1000}s after this run's last heartbeat.`,

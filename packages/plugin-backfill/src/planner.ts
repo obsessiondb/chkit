@@ -4,7 +4,7 @@ import { parseCutoverMetadata, type CutoverMetadata, type MaterializedViewDefini
 import { loadSchemaDefinitions } from '@chkit/core/schema-loader'
 
 import { encodeChunkPlanForPersistence } from './chunking/boundary-codec.js'
-import { PINNED_INSERT_SETTINGS_SQL } from './chunking/sql.js'
+import { chunkInsertSettingsSql, compulsorySettingNames, type InsertSettings, PREFLIGHT_TOKEN } from './chunking/sql.js'
 import { generateChunkPlan } from './chunking/planner.js'
 import { findMvsForTarget, resolveMvReplaySource } from './detect.js'
 import { BackfillConfigError } from './errors.js'
@@ -115,20 +115,42 @@ export async function assertBackfillTargetSafe(input: {
 
 /**
  * Fail before anything is submitted when the server would refuse the
- * settings every chunk INSERT runs with (`PINNED_INSERT_SETTINGS`): a user
- * with `readonly = 1`, or a settings constraint on one of them.
+ * settings every chunk INSERT runs with in the plan's mode
+ * (`chunkInsertSettingsSql`, with a placeholder dedup token where the chunks
+ * carry one): a user with `readonly = 1`, or a settings constraint on one of
+ * them.
  */
 export async function assertPinnedInsertSettingsAccepted(input: {
   planId: string
   query: ClickHouseQuery
+  insertSettings?: InsertSettings
+  cutover?: boolean
+  token?: boolean
 }): Promise<void> {
+  const pinned = chunkInsertSettingsSql(input.insertSettings, { cutover: input.cutover, token: input.token ? PREFLIGHT_TOKEN : '' })
   try {
-    await input.query(`SELECT 1 SETTINGS ${PINNED_INSERT_SETTINGS_SQL}`)
+    await input.query(`SELECT 1 SETTINGS ${pinned}`)
   } catch (error) {
     throw new BackfillConfigError(
-      `Backfill plan ${input.planId}: the server refused the settings every chunk INSERT runs with (${PINNED_INSERT_SETTINGS_SQL}): ${error instanceof Error ? error.message : String(error)}. Nothing was submitted. Use a user allowed to set them (not readonly = 1, and no settings constraint on them).`,
+      `Backfill plan ${input.planId}: the server refused the settings every chunk INSERT runs with (${pinned}): ${error instanceof Error ? error.message : String(error)}. Nothing was submitted. Use a user allowed to set them (not readonly = 1, and no settings constraint on them).`,
     )
   }
+}
+
+/**
+ * The server's other names of the settings chkit writes on a chunk INSERT
+ * (`compulsorySettingNames`), from `system.settings.alias_for`. A server
+ * without that column, or a read that fails, gives none:
+ * `PINNED_SETTING_ALIASES` still applies.
+ */
+export async function readPinnedSettingAliases(query: ClickHouseQuery): Promise<Record<string, string>> {
+  const names = compulsorySettingNames().map((name) => `'${name}'`).join(', ')
+  const rows = await query<{ name?: string; alias_for?: string }>(
+    `SELECT name, alias_for FROM system.settings WHERE alias_for IN (${names})`,
+  ).catch(() => [])
+  return Object.fromEntries(
+    rows.flatMap((row) => (row.name && row.alias_for ? [[row.name, row.alias_for]] : [])),
+  )
 }
 
 /**

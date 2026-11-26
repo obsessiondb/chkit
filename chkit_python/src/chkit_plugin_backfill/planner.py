@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
@@ -16,7 +17,11 @@ from chkit_plugin_backfill.chunking.boundary_codec import (
     encode_chunk_plan_for_persistence,
 )
 from chkit_plugin_backfill.chunking.planner import generate_chunk_plan
-from chkit_plugin_backfill.chunking.sql import PINNED_INSERT_SETTINGS, PINNED_INSERT_SETTINGS_SQL
+from chkit_plugin_backfill.chunking.sql import (
+    PREFLIGHT_TOKEN,
+    chunk_insert_settings_sql,
+    compulsory_setting_names,
+)
 from chkit_plugin_backfill.chunking.types import (
     GenerateChunkPlanInput,
     PlannerQuery,
@@ -109,26 +114,39 @@ def _detect_backfill_strategy(
         return _BackfillStrategy(mvs=[])
 
 
-def assert_pinned_insert_settings_accepted(*, plan_id: str, query: PlannerQuery) -> None:
+def assert_pinned_insert_settings_accepted(
+    *,
+    plan_id: str,
+    query: PlannerQuery,
+    insert_settings: Mapping[str, str | int | float | bool] | None = None,
+    cutover: bool = False,
+    token: bool = False,
+) -> None:
     """Fail before anything is submitted when the server would refuse the
-    settings every chunk INSERT runs with (``PINNED_INSERT_SETTINGS``): a user
-    with ``readonly = 1``, or a settings constraint on one of them."""
+    settings every chunk INSERT runs with in the plan's mode
+    (``chunk_insert_settings_sql``, with a placeholder dedup token where the
+    chunks carry one): a user with ``readonly = 1``, or a settings constraint
+    on one of them."""
+    settings = chunk_insert_settings_sql(
+        insert_settings, cutover=cutover, token=PREFLIGHT_TOKEN if token else ""
+    )
     try:
-        query(f"SELECT 1 SETTINGS {PINNED_INSERT_SETTINGS_SQL}", None)
+        query(f"SELECT 1 SETTINGS {settings}", None)
     except Exception as error:
         msg = (
             f"Backfill plan {plan_id}: the server refused the settings every chunk INSERT "
-            f"runs with ({PINNED_INSERT_SETTINGS_SQL}): {error}. Nothing was submitted. Use a "
+            f"runs with ({settings}): {error}. Nothing was submitted. Use a "
             "user allowed to set them (not readonly = 1, and no settings constraint on them)."
         )
         raise BackfillConfigError(msg) from error
 
 
 def read_pinned_setting_aliases(query: PlannerQuery) -> dict[str, str]:
-    """The server's other names of the pinned settings, from
-    ``system.settings.alias_for``. A server without that column, or a read
-    that fails, gives none: ``PINNED_SETTING_ALIASES`` still applies."""
-    names = ", ".join(f"'{name}'" for name in PINNED_INSERT_SETTINGS)
+    """The server's other names of the settings chkit writes on a chunk INSERT
+    (``compulsory_setting_names``), from ``system.settings.alias_for``. A
+    server without that column, or a read that fails, gives none:
+    ``PINNED_SETTING_ALIASES`` still applies."""
+    names = ", ".join(f"'{name}'" for name in compulsory_setting_names())
     try:
         rows = query(
             f"SELECT name, alias_for FROM system.settings WHERE alias_for IN ({names})", None

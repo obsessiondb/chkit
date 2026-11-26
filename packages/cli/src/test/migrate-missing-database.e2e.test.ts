@@ -73,6 +73,10 @@ describe('migrate --apply into a database that does not exist yet', () => {
         const lockless = runCli(dir, ['migrate', '--config', configPath, '--apply', '--json'], cliEnv)
         expect(lockless.exitCode).toBe(1)
         expect(JSON.parse(lockless.stdout).error).toMatchObject({ code: 'async_needs_lock' })
+        // #810: with the lock turned off the run holds none either.
+        const lockOff = runCli(dir, ['migrate', '--config', configPath, '--apply', '--json'], { ...cliEnv, CHKIT_MIGRATE_LOCK: 'off' })
+        expect(lockOff.exitCode).toBe(1)
+        expect(JSON.parse(lockOff.stdout).error).toMatchObject({ code: 'async_needs_lock' })
         // The database exists now: this run takes the lock and submits the load.
         const apply = runCli(dir, ['migrate', '--config', configPath, '--apply', '--json'], cliEnv)
         if (apply.exitCode !== 0) {

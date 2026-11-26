@@ -96,7 +96,7 @@ export async function cmdRegistry(command: 'add' | 'registry', argv: string[]): 
       if (item.meta.chkit.documentation) console.log(`Guide: ${item.meta.chkit.documentation}`)
       if (item.meta.chkit.logo) console.log(`Logo: ${item.meta.chkit.logo}`)
       console.log(`Install: ${installCommand(reference, values.registry)}`)
-      console.log(`Requires chkit ${item.meta.chkit.chkit}; ingestion ${item.meta.chkit.ingest}; ClickHouse ${item.meta.chkit.clickhouse}`)
+      console.log(`Requires chkit ${item.meta.chkit.chkit}; Sync plugin ${item.meta.chkit.ingest}; ClickHouse ${item.meta.chkit.clickhouse}`)
       console.log(`\nDependencies: ${item.dependencies.join(', ')}`)
       if (item.devDependencies?.length) console.log(`Test dependencies (--with-tests): ${item.devDependencies.join(', ')}`)
       const authentication = item.meta.chkit.authentication

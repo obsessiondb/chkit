@@ -109,7 +109,9 @@ export { createPluginRunner, wrapPluginRun, type PluginRunContext } from './plug
 export {
   splitSqlStatements,
   extractExecutableStatements,
+  extractExecutableStatementsWithComments,
   extractLegacyExecutableStatements,
+  type ExecutableStatementWithComments,
 } from './sql-splitter.js'
 export { statementFingerprint } from './sql-fingerprint.js'
 export { parseJsonEachRow, parseJsonEachRowLine, roundTripNumber } from './exact-json.js'

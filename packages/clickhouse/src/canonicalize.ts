@@ -1,6 +1,7 @@
 import { isTrivia, tokenizeSQL } from '@chkit/core'
 
 import type { ClickHouseExecutor } from './index.js'
+import { expandSQLUDFs, parseSQLUDF, type SQLUDF } from './sql-udf.js'
 
 function quoteLiteral(value: string): string {
   return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "''")}'`
@@ -41,6 +42,7 @@ export interface FunctionRegistryRow {
   name: string
   case_insensitive: number | boolean
   alias_to: string
+  create_query?: string
 }
 
 /**
@@ -50,19 +52,23 @@ export interface FunctionRegistryRow {
  * name, but only for names ClickHouse resolves case-insensitively.
  */
 export interface FunctionRegistry {
+  sqlUdfs: ReadonlyMap<string, SQLUDF>
   exact: ReadonlyMap<string, string>
   insensitive: ReadonlyMap<string, string>
 }
 
 export function buildFunctionRegistry(rows: readonly FunctionRegistryRow[]): FunctionRegistry {
+  const sqlUdfs = new Map<string, SQLUDF>()
   const exact = new Map<string, string>()
   const insensitive = new Map<string, string>()
   for (const row of rows) {
+    const definition = parseSQLUDF(row.create_query ?? '')
+    if (definition) sqlUdfs.set(row.name, definition)
     const canonical = row.alias_to || row.name
     exact.set(row.name, canonical)
     if (row.case_insensitive) insensitive.set(row.name.toLowerCase(), canonical)
   }
-  return { exact, insensitive }
+  return { exact, insensitive, sqlUdfs }
 }
 
 /**
@@ -79,7 +85,7 @@ async function loadFunctionRegistry(
 ): Promise<FunctionRegistry> {
   try {
     const rows = await executor.query<FunctionRegistryRow>(
-      'SELECT name, case_insensitive, alias_to FROM system.functions'
+      "SELECT name, case_insensitive, alias_to, if(isValidUTF8(create_query), create_query, '') AS create_query FROM system.functions"
     )
     return buildFunctionRegistry(rows)
   } catch (error) {
@@ -138,6 +144,9 @@ export function normalizeFunctionNames(sql: string, registry: FunctionRegistry):
  * `system.functions` registry, since the server canonicalizes their case and
  * aliases on write but the formatter does not (#729).
  *
+ * `storedQueryPairs` additionally analyzes differing view queries through the
+ * server storage rewrite path; unavailable analysis retains both formatted forms.
+ *
  * `wrap` distinguishes a scalar expression (wrapped as `SELECT 0, <expr>`, prefix
  * stripped back off; after `0,` a leading `all` or `distinct` column is not read
  * as the SELECT modifier) from a full `SELECT` query (formatted as-is). A scalar
@@ -155,14 +164,20 @@ export function normalizeFunctionNames(sql: string, registry: FunctionRegistry):
 export async function canonicalizeSqlFragments(
   executor: ClickHouseExecutor,
   fragments: readonly string[],
-  options: { wrap: boolean; onRegistryUnavailable?: (error: unknown) => void }
+  options: {
+    wrap: boolean
+    storedQueryPairs?: ReadonlyArray<readonly [string, string]>
+    onRegistryUnavailable?: (error: unknown) => void
+  }
 ): Promise<Map<string, string>> {
   const unique = [...new Set(fragments.map((fragment) => fragment.trim()).filter((f) => f.length > 0))]
   if (unique.length === 0) return new Map()
 
   const registry = await loadFunctionRegistry(executor, options.onRegistryUnavailable)
   if (!options.wrap) {
-    return formatFragments(executor, unique, `formatQuerySingleLineOrNull(fragment)`, null, registry)
+    const result = await formatFragments(executor, unique, `formatQuerySingleLineOrNull(fragment)`, null, registry)
+    await normalizeStoredQueryPairs(executor, options.storedQueryPairs ?? [], result, registry)
+    return result
   }
 
   const result = await formatFragments(
@@ -215,4 +230,56 @@ async function formatFragments(
     }
   }
   return result
+}
+
+// Normalize each formatted query once, independently of which view pairs use
+// it. Pair-dependent rewrites can invalidate a previously matching shared query.
+async function normalizeStoredQueryPairs(
+  executor: ClickHouseExecutor,
+  pairs: ReadonlyArray<readonly [string, string]>,
+  result: Map<string, string>,
+  registry: FunctionRegistry
+): Promise<void> {
+  const original = new Map(result)
+  const candidates = new Map<string, string>()
+  for (const query of pairs.flat()) {
+    const canonical = original.get(query.trim())
+    if (!canonical || candidates.has(canonical)) continue
+    const expanded = expandSQLUDFs(canonical, registry.sqlUdfs)
+    if (expanded !== undefined && (expanded !== canonical || hasWithClause(canonical))) candidates.set(canonical, expanded)
+  }
+  if (candidates.size === 0) return
+  try {
+    const formatted = await formatFragments(executor, [...new Set(candidates.values())], 'formatQuerySingleLineOrNull(fragment)', null, registry)
+    const normalized = new Map<string, string>()
+    const explained = new Map<string, string>()
+    for (const [canonical, expanded] of candidates) {
+      const value = formatted.get(expanded)
+      if (!value) continue
+      normalized.set(canonical, value)
+      if (!hasWithClause(value) || explained.has(value)) continue
+      try {
+        const rows = await executor.query<{ explain: string }>(`EXPLAIN SYNTAX oneline=1 ${value}`)
+        const text = rows.map((row) => row.explain).join('\n').trim()
+        if (text && !text.includes('\uFFFD')) explained.set(value, text)
+      } catch {
+        // The valid scalar expansion remains usable when analysis is unavailable.
+      }
+    }
+    const syntax = await formatFragments(executor, [...new Set(explained.values())], 'formatQuerySingleLineOrNull(fragment)', null, registry)
+    for (const [canonical, value] of normalized) {
+      const explanation = explained.get(value)
+      if (explanation) normalized.set(canonical, syntax.get(explanation) ?? value)
+    }
+    for (const [raw, canonical] of original) {
+      const value = normalized.get(canonical)
+      if (value) result.set(raw, value)
+    }
+  } catch {
+    // Keep the original formatter results if the server cannot reformat.
+  }
+}
+
+function hasWithClause(sql: string): boolean {
+  return tokenizeSQL(sql).some((token) => token.kind === 'identifier' && token.text.toUpperCase() === 'WITH')
 }

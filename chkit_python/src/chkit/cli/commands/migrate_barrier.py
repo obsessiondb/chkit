@@ -10,7 +10,7 @@ from pathlib import Path
 
 from chkit.cli.commands.migrate_apply import non_select_barriers
 from chkit.cli.commands.migrate_errors import PendingNonSelectBarrier
-from chkit.cli.safety_markers import extract_migration_operation_summaries
+from chkit.cli.safety_markers import extract_statement_operations
 from chkit.core.sql_splitter import extract_executable_statements
 
 
@@ -27,7 +27,7 @@ def find_pending_non_select_barriers(
             non_select_barriers(
                 migration,
                 extract_executable_statements(sql),
-                extract_migration_operation_summaries(sql),
+                extract_statement_operations(sql),
             )
         )
     return found

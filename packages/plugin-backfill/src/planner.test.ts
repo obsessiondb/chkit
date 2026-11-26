@@ -8,7 +8,7 @@ import { resolveConfig } from '@chkit/core'
 import { buildChunkExecutionSql, rewriteSelectColumns } from './chunking/sql.js'
 import { generateIdempotencyToken } from './chunking/utils/ids.js'
 import { PlanSchema } from './options.js'
-import { assertBackfillTargetSafe, assertPinnedInsertSettingsAccepted, assertReplayColumnsStillInsertable, buildBackfillPlan, unprovableTargetFailures } from './planner.js'
+import { assertBackfillTargetSafe, assertPinnedInsertSettingsAccepted, assertReplayColumnsStillInsertable, buildBackfillPlan, readPinnedSettingAliases, unprovableTargetFailures } from './planner.js'
 import { backfillPaths, computeBackfillStateDir, readPlan } from './state.js'
 
 function createMockQuery(opts: {
@@ -317,7 +317,7 @@ export const events_mv = {
       expect(sql).toContain('SELECT toStartOfHour(event_time)')
       expect(sql).toContain('FROM app.events')
       expect(sql).toContain('GROUP BY event_time')
-      expect(sql).toContain('SETTINGS async_insert=0')
+      expect(sql).toContain('SETTINGS distributed_foreground_insert=1, materialized_views_ignore_errors=0, async_insert=0')
       expect(sql).not.toContain('FROM app.events_agg')
       // Single MV: no UNION ALL, output identical to prior behavior.
       expect(sql).not.toContain('UNION ALL')
@@ -442,7 +442,7 @@ export const api_mv = {
         : ''
 
       expect(output.plan.execution.requireIdempotencyToken).toBe(false)
-      expect(sql).toContain('SETTINGS async_insert=0')
+      expect(sql).toContain('SETTINGS distributed_foreground_insert=1, materialized_views_ignore_errors=0, async_insert=0')
       expect(sql).not.toContain('insert_deduplication_token')
     } finally {
       await rm(dir, { recursive: true, force: true })
@@ -770,7 +770,9 @@ describe('unprovableTargetFailures', () => {
 // Opus delta review: a server that refuses the INSERT's pinned settings
 // (readonly = 1, a settings constraint) fails the run before it submits.
 describe('assertPinnedInsertSettingsAccepted', () => {
-  const PINNED = "allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0"
+  const FIXED = 'async_insert=0, asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0'
+  const PROOF = "allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0, log_queries_probability=1"
+  const PINNED = `distributed_foreground_insert=1, materialized_views_ignore_errors=0, ${FIXED}, ${PROOF}`
 
   test('reads SELECT 1 with the pinned settings', async () => {
     const reads: string[] = []
@@ -783,5 +785,71 @@ describe('assertPinnedInsertSettingsAccepted', () => {
     await expect(assertPinnedInsertSettingsAccepted({ planId: 'p1', query })).rejects.toThrow(
       `Backfill plan p1: the server refused the settings every chunk INSERT runs with (${PINNED}): Cannot modify 'log_queries' setting in readonly mode. Nothing was submitted. Use a user allowed to set them (not readonly = 1, and no settings constraint on them).`,
     )
+  })
+
+  // #821: a user whose server forbids a delivery pin overrides it, and the
+  // preflight checks the settings the chunks will run with.
+  test('checks the overridden delivery settings', async () => {
+    const reads: string[] = []
+    await assertPinnedInsertSettingsAccepted({
+      planId: 'p1',
+      query: async <T>(sql: string) => { reads.push(sql); return [] as T[] },
+      insertSettings: { distributed_foreground_insert: 0 },
+    })
+    expect(reads).toEqual([`SELECT 1 SETTINGS distributed_foreground_insert=0, materialized_views_ignore_errors=0, ${FIXED}, ${PROOF}`])
+  })
+})
+
+// Codex review r2: the preflight tries every setting the chunks run with in
+// the plan's mode, the user's own first.
+describe('assertPinnedInsertSettingsAccepted for the whole chunk INSERT', () => {
+  test('tries the fixed, cutover and user settings too', async () => {
+    const reads: string[] = []
+    const query = async <T>(sql: string) => { reads.push(sql); return [] as T[] }
+    await assertPinnedInsertSettingsAccepted({ planId: 'p1', query })
+    await assertPinnedInsertSettingsAccepted({ planId: 'p1', query, insertSettings: { max_insert_threads: 2 }, cutover: true })
+    const fixed = 'async_insert=0, asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0'
+    const delivery = 'distributed_foreground_insert=1, materialized_views_ignore_errors=0'
+    const pins = "allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0, log_queries_probability=1"
+    expect(reads).toEqual([
+      `SELECT 1 SETTINGS ${delivery}, ${fixed}, ${pins}`,
+      `SELECT 1 SETTINGS max_insert_threads=2, ${delivery}, ${fixed}, insert_deduplicate=0, select_sequential_consistency=1, ${pins}`,
+    ])
+  })
+})
+
+// Codex review r3: a plan whose chunks carry a dedup token preflights one too,
+// in the same place, so a constraint on the token fails before anything runs.
+describe('assertPinnedInsertSettingsAccepted for a token-bearing plan', () => {
+  test('carries a placeholder token where the chunks carry theirs', async () => {
+    const reads: string[] = []
+    await assertPinnedInsertSettingsAccepted({
+      planId: 'p1',
+      query: async <T>(sql: string) => { reads.push(sql); return [] as T[] },
+      insertSettings: { max_insert_threads: 2 },
+      token: true,
+    })
+    expect(reads).toEqual([
+      "SELECT 1 SETTINGS max_insert_threads=2, distributed_foreground_insert=1, materialized_views_ignore_errors=0, async_insert=0, asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0, insert_deduplication_token='chkit_preflight', allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0, log_queries_probability=1",
+    ])
+  })
+})
+
+describe('readPinnedSettingAliases', () => {
+  test('reads the aliases from system.settings.alias_for', async () => {
+    const reads: string[] = []
+    const aliases = await readPinnedSettingAliases(async <T>(sql: string) => {
+      reads.push(sql)
+      return [{ name: 'enable_parallel_replicas', alias_for: 'allow_experimental_parallel_reading_from_replicas' }] as T[]
+    })
+    expect(aliases).toEqual({ enable_parallel_replicas: 'allow_experimental_parallel_reading_from_replicas' })
+    expect(reads).toEqual([
+      "SELECT name, alias_for FROM system.settings WHERE alias_for IN ('allow_experimental_parallel_reading_from_replicas', 'parallel_distributed_insert_select', 'distributed_foreground_insert', 'materialized_views_ignore_errors', 'log_queries', 'log_queries_min_type', 'log_queries_min_query_duration_ms', 'log_queries_probability', 'async_insert', 'asterisk_include_materialized_columns', 'asterisk_include_alias_columns', 'insert_deduplicate', 'select_sequential_consistency', 'insert_deduplication_token')",
+    ])
+  })
+
+  test('a server without alias_for gives none', async () => {
+    const aliases = await readPinnedSettingAliases(async <T>(): Promise<T[]> => { throw new Error("Missing columns: 'alias_for'") })
+    expect(aliases).toEqual({})
   })
 })

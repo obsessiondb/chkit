@@ -13,7 +13,7 @@ bunx chkit check
 bunx chkit generate --name add_linear
 # Review the migration before applying it.
 bunx chkit migrate --apply
-bunx chkit ingest run --tag provider:linear
+bunx chkit sync run --tag provider:linear
 ```
 
 ## Resources
@@ -33,8 +33,8 @@ bunx chkit ingest run --tag provider:linear
 The default IDs are `linear` for the pipeline and `linear.<resource>` for each stream. Each owns its journal progress. Run a resource separately with:
 
 ```sh
-bunx chkit ingest run --tag provider:linear --tag resource:comments
-bunx chkit ingest run --tag provider:linear --tag resource:issue_history
+bunx chkit sync run --tag provider:linear --tag resource:comments
+bunx chkit sync run --tag provider:linear --tag resource:issue_history
 ```
 
 Repeated tags use AND matching. The default `maxStreams: 1` executes selected streams sequentially to limit API usage. Selection and failure in one stream do not make another stream's discovery depend on it. Give expensive history reads their own schedule and execution budget; individual issues remain records inside the resource stream.
@@ -60,8 +60,8 @@ Issue relations have a root listing without a reliable timestamp filter. Issue h
 The API does not guarantee atomic snapshots. Deleted records and removed relations remain stored; missing observations do not generate tombstones. A label rename is not assumed to update every issue's timestamp. Periodic reconciliation refreshes older observations and changes beyond overlap:
 
 ```sh
-bunx chkit ingest run --tag provider:linear --tag resource:issues --backfill reconcile-2026-10-05 --from 1970-01-01
-bunx chkit ingest status --tag provider:linear --json
+bunx chkit sync run --tag provider:linear --tag resource:issues --backfill reconcile-2026-10-05 --from 1970-01-01
+bunx chkit sync status --tag provider:linear --json
 ```
 
 Use a new backfill ID for each reconciliation. Timestamp replay reads current observations, while the separate history stream reads the provider's accessible event records; neither reconstructs an atomic historical workspace snapshot. Run one ingestion process per ClickHouse target at a time.

@@ -40,6 +40,7 @@ from chkit.cli.commands.migrate_errors import (
     recorded_statements_changed_error,
     statement_split_changed_error,
 )
+from chkit.cli.commands.migrate_interrupt import as_cleanup, deferred_interrupt
 from chkit.cli.commands.migrate_query_intents import QueryContext, QueryTracker
 from chkit.cli.commands.migrate_recovery import (
     RetryEditMismatch,
@@ -67,6 +68,7 @@ from chkit.cli.plugin_runtime import PluginRuntime
 from chkit.cli.safety_markers import (
     MigrationOperationSummary,
     extract_migration_operation_summaries,
+    extract_statement_operations,
     find_non_select_barriers,
 )
 from chkit.cli.table_scope import TableScope
@@ -131,7 +133,8 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
     journal_store = input_.journal_store
     sql = (input_.migrations_dir / file).read_text(encoding="utf-8")
     parsed_statements = extract_executable_statements(sql)
-    operation_summaries = extract_migration_operation_summaries(sql)
+    # The marker of each statement, by position (#831).
+    operation_summaries = extract_statement_operations(sql)
 
     statements = list(
         input_.plugin_runtime.run_on_before_apply(
@@ -233,7 +236,9 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
             file=file,
             state=initial_state,
             checksum=migration_checksum,
-            identities=statement_identities(operation_summaries, fingerprints),
+            identities=statement_identities(
+                operation_summaries, fingerprints, extract_migration_operation_summaries(sql)
+            ),
             sql_by_fingerprint=sql_by_fingerprint,
             retry=input_.retry,
             journal_store=journal_store,
@@ -338,23 +343,25 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
             and operation.before_retry
             and resolved != "unsent"
         ):
-            try:
-                _run_before_retry(
-                    input_.client,
-                    operation.type,
-                    statement,
-                    operation.before_retry,
-                    cluster=cluster,
-                    settings=input_.settings,
-                    log=input_.log,
-                    status=prior_attempt.status,
-                    query_tracker=input_.query_tracker,
-                    query_context=QueryContext(file, index, statement, operation.before_retry),
-                )
-            except Exception as error:
-                raise statement_error(
-                    file=file, index=index, total=total, statement=statement, error=error
-                ) from error
+            # A first Ctrl-C lets compensation under way finish (#816).
+            with deferred_interrupt():
+                try:
+                    _run_before_retry(
+                        input_.client,
+                        operation.type,
+                        statement,
+                        operation.before_retry,
+                        cluster=cluster,
+                        settings=input_.settings,
+                        log=input_.log,
+                        status=prior_attempt.status,
+                        query_tracker=input_.query_tracker,
+                        query_context=QueryContext(file, index, statement, operation.before_retry),
+                    )
+                except Exception as error:
+                    raise statement_error(
+                        file=file, index=index, total=total, statement=statement, error=error
+                    ) from error
         swapped = (
             _swapped_tables(operation.type, operation.key, statement)
             if operation is not None
@@ -377,63 +384,67 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                 iso_without_zone(datetime.now(tz=UTC)),
             )
         )
-        try:
-            if operation is not None and operation.mode == "barrier":
-                wait_for_insert_barrier(
-                    input_.client,
-                    statement,
-                    cluster=cluster,
-                    settings=input_.settings,
-                    log=input_.log,
+        # A first Ctrl-C lets the statement finish and records its outcome (#816).
+        with deferred_interrupt():
+            try:
+                if operation is not None and operation.mode == "barrier":
+                    wait_for_insert_barrier(
+                        input_.client,
+                        statement,
+                        cluster=cluster,
+                        settings=input_.settings,
+                        log=input_.log,
+                    )
+                elif input_.query_tracker is not None:
+                    input_.query_tracker.command(
+                        QueryContext(
+                            file, index, statement,
+                            operation.before_retry if operation is not None else None,
+                        ),
+                        "forward", statement, input_.settings,
+                    )
+                else:
+                    input_.client.execute(statement, settings=input_.settings)
+            except Exception as error:
+                with as_cleanup():
+                    state_on_error = journal_store.read_migration_state(file) or base_state
+                    journal_store.write_migration_state(
+                        upsert_operation(
+                            state_on_error,
+                            _sync_operation_state(
+                                index,
+                                identity,
+                                fingerprint,
+                                "failed",
+                                clickhouse_error_message(error),
+                            ),
+                            iso_without_zone(datetime.now(tz=UTC)),
+                        )
+                    )
+                raise statement_error(
+                    file=file, index=index, total=total, statement=statement, error=error
+                ) from error
+            # Mark completed as soon as the statement has executed — BEFORE waiting
+            # for DDL propagation, so a propagation timeout never makes a re-run
+            # replay this statement into an "already exists" error. Until its wait
+            # passes, the record carries PROPAGATION_WAIT_PENDING, so a re-run
+            # waits for it again before the next statement (#513).
+            waits = _has_propagation_wait(operation)
+            with as_cleanup():
+                state_after = journal_store.read_migration_state(file) or base_state
+                journal_store.write_migration_state(
+                    upsert_operation(
+                        state_after,
+                        _sync_operation_state(
+                            index,
+                            identity,
+                            fingerprint,
+                            "completed",
+                            PROPAGATION_WAIT_PENDING if waits else "",
+                        ),
+                        iso_without_zone(datetime.now(tz=UTC)),
+                    )
                 )
-            elif input_.query_tracker is not None:
-                input_.query_tracker.command(
-                    QueryContext(
-                        file, index, statement,
-                        operation.before_retry if operation is not None else None,
-                    ),
-                    "forward", statement, input_.settings,
-                )
-            else:
-                input_.client.execute(statement, settings=input_.settings)
-        except Exception as error:
-            state_on_error = journal_store.read_migration_state(file) or base_state
-            journal_store.write_migration_state(
-                upsert_operation(
-                    state_on_error,
-                    _sync_operation_state(
-                        index,
-                        identity,
-                        fingerprint,
-                        "failed",
-                        clickhouse_error_message(error),
-                    ),
-                    iso_without_zone(datetime.now(tz=UTC)),
-                )
-            )
-            raise statement_error(
-                file=file, index=index, total=total, statement=statement, error=error
-            ) from error
-        # Mark completed as soon as the statement has executed — BEFORE waiting
-        # for DDL propagation, so a propagation timeout never makes a re-run
-        # replay this statement into an "already exists" error. Until its wait
-        # passes, the record carries PROPAGATION_WAIT_PENDING, so a re-run
-        # waits for it again before the next statement (#513).
-        waits = _has_propagation_wait(operation)
-        state_after = journal_store.read_migration_state(file) or base_state
-        journal_store.write_migration_state(
-            upsert_operation(
-                state_after,
-                _sync_operation_state(
-                    index,
-                    identity,
-                    fingerprint,
-                    "completed",
-                    PROPAGATION_WAIT_PENDING if waits else "",
-                ),
-                iso_without_zone(datetime.now(tz=UTC)),
-            )
-        )
         if waits:
             _complete_propagation(
                 input_,
@@ -477,7 +488,7 @@ def preview_statement(sql: str, max_length: int = 120) -> str:
 def non_select_barriers(
     migration: str,
     statements: Sequence[str],
-    operations: Sequence[MigrationOperationSummary],
+    operations: Sequence[MigrationOperationSummary | None],
 ) -> list[PendingNonSelectBarrier]:
     """A migration's statements marked ``mode=barrier`` that are not a SELECT (#634)."""
     return [

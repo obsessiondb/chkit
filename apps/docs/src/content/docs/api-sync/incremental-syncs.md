@@ -20,7 +20,7 @@ For expensive full reads, use the provider's change mechanism: a timestamp windo
 This complete source module uses the client from [Readers and pagination](/api-sync/readers/#a-reusable-page-client). Save it as `src/sources/helpdesk.ts` and re-export its table and pipeline from the project entry:
 
 ```ts
-import { definePipeline, defineStream, rawRows, rawTable, timestampWindow } from '@chkit/plugin-ingest'
+import { definePipeline, defineStream, rawRows, rawTable, timestampWindow } from '@chkit/plugin-sync'
 import { createHelpdeskClient, helpdeskConfig } from './helpdesk-client.js'
 
 export const ticketsRaw = rawTable({ database: 'default', name: 'tickets_raw' })
@@ -64,7 +64,7 @@ Choose `cursorState` when the provider guarantees resumption across runs. `parse
 This standalone fixture demonstrates a provider with stable, increasing change sequence numbers. `paginate` owns each request attempt and exposes its candidate checkpoint in metadata. Replace the fixture body of `fetchPage` with a provider request through `context.fetch`:
 
 ```ts
-import { cursorState, definePipeline, defineStream, paginate, rawRows, rawTable } from '@chkit/plugin-ingest'
+import { cursorState, definePipeline, defineStream, paginate, rawRows, rawTable } from '@chkit/plugin-sync'
 
 const changes = [
   { sequence: 1, id: 'a', subject: 'Opened' },
