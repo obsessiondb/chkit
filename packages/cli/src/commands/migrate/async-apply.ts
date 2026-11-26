@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { setTimeout as defaultSleep } from 'node:timers/promises'
 
-import type { ClickHouseExecutor, ClickHouseSettings, QueryStatus } from '@chkit/clickhouse'
+import { type ClickHouseExecutor, type ClickHouseSettings, isSubmitNotSentError, type QueryStatus } from '@chkit/clickhouse'
 
 import { debug } from '../../runtime/debug.js'
 import {
@@ -53,6 +53,30 @@ const QUERY_LOG_FLUSH_RECHECKS = 5
 // the run reads every replica once more, then stops without an outcome (#767).
 const MAX_UNKNOWN_POLLS = 20
 const QUERY_LOG_FLUSH_RECHECK_INTERVAL_MS = 2_000
+// An async statement is journaled complete at its QueryFinish (#812). A
+// mutation (ALTER ... UPDATE/DELETE, a lightweight DELETE) and a replicated
+// ALTER, OPTIMIZE or TRUNCATE finish once queued unless the query waits for
+// them on every replica, and ON CLUSTER DDL once queued when its wait is off
+// (a timeout of 0) or a mode finishes despite a host that timed out or
+// failed. These make the query wait for the work, and fail when it does not
+// complete. They go after --setting values; a SETTINGS clause in the
+// statement still wins. A SELECT or an INSERT queues no such work and is sent
+// without them, so a profile that fixes one of them does not reject a load.
+const ASYNC_COMPLETION_SETTINGS: ClickHouseSettings = {
+  mutations_sync: '2',
+  alter_sync: '2',
+  distributed_ddl_task_timeout: '-1',
+  distributed_ddl_output_mode: 'throw',
+}
+
+export function asyncSubmitSettings(sql: string, settings: ClickHouseSettings | undefined): ClickHouseSettings | undefined {
+  if (rejectionRunsNothing(sql)) return settings
+  // A server before ClickHouse 24.4 rejects lightweight_deletes_sync as an
+  // unknown setting (its lightweight DELETE always waits), so it is pinned
+  // only over a --setting value, which that server would reject anyway.
+  const deletes = settings?.lightweight_deletes_sync === undefined ? {} : { lightweight_deletes_sync: '2' }
+  return { ...settings, ...ASYNC_COMPLETION_SETTINGS, ...deletes }
+}
 
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -293,6 +317,16 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
   await journalStore.writeMigrationState(upsertOperation(baseState, attemptRecord(PREPARED_RECORD_MARKER), now))
   await assertAttemptStored({ ...stored, lastError: PREPARED_RECORD_MARKER })
   await journalStore.writeMigrationState(upsertOperation(baseState, attemptRecord(ATTEMPT_RECORD_MARKER), now))
+  // Nothing was sent: put the record back to prepared, so a re-run runs it
+  // again without an abandon (#767).
+  const backToPrepared = async (error: unknown): Promise<void> => {
+    try {
+      // Cleanup: an interrupted run sends it too (#816).
+      await asCleanup(() => journalStore.writeMigrationState(upsertOperation(baseState, attemptRecord(PREPARED_RECORD_MARKER), now)))
+    } catch (revertError) {
+      throw new Error(notRevertedMessage(error, revertError, migrationName), { cause: error })
+    }
+  }
   let stateAfterStart: MigrationRowState | null
   try {
     await assertAttemptStored({ ...stored, lastError: ATTEMPT_RECORD_MARKER })
@@ -304,21 +338,14 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     // Ctrl-C before the submit: provably not sent.
     input.signal?.throwIfAborted()
   } catch (error) {
-    // Nothing was sent: put the record back to prepared, so a re-run runs
-    // it again without an abandon (#767).
-    try {
-      // Cleanup: an interrupted run sends it too (#816).
-      await asCleanup(() => journalStore.writeMigrationState(upsertOperation(baseState, attemptRecord(PREPARED_RECORD_MARKER), now)))
-    } catch (revertError) {
-      throw new Error(notRevertedMessage(error, revertError, migrationName), { cause: error })
-    }
+    await backToPrepared(error)
     throw error
   }
   const pollAfterTime = queryLogLowerBound(serverNowMs)
   // Aborted when the run stops without an outcome, so a request not sent yet
   // never starts after the run released the migrate lock (#767).
   const submitAbort = new AbortController()
-  const submitPromise = db.submit(sql, attemptQueryId, settings, { signal: submitAbort.signal })
+  const submitPromise = db.submit(sql, attemptQueryId, asyncSubmitSettings(sql, settings), { signal: submitAbort.signal })
 
   return await pollUntilTerminal({
     rejectionRunsNothing: rejectionRunsNothing(sql),
@@ -339,6 +366,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     now,
     submitPromise,
     abortSubmit: () => submitAbort.abort(),
+    backToPrepared,
     startedAt,
     signal: input.signal,
   })
@@ -364,6 +392,8 @@ interface PollUntilTerminalInput {
   submitPromise: Promise<unknown> | null
   /** Gives up on the submit request: the run stops without waiting for it. */
   abortSubmit?: () => void
+  /** Puts the attempt's record back to prepared, for a submit that was never sent (#800). */
+  backToPrepared?: (error: unknown) => Promise<void>
   startedAt: string
   /** Whether an ExceptionBeforeStart of the statement shows it applied nothing (#767). */
   rejectionRunsNothing: boolean
@@ -422,6 +452,9 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
   // Polls in a row that found the query neither running nor in query_log,
   // however polling started (#767).
   let unknownPolls = 0
+  // Whether a poll found the query on the server: then its submit was sent,
+  // whatever its error says (#800).
+  let seenOnServer = false
   const signal = input.signal
   // Ctrl-C ends the wait at once.
   let onAbort: (() => void) | undefined
@@ -439,6 +472,18 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
     for (;;) {
       await (interrupted ? Promise.race([sleep(pollIntervalMs), interrupted]) : sleep(pollIntervalMs))
       stopIfInterrupted()
+      // A submit the executor proved was never sent (a refused connect, a
+      // failed host lookup) ran nothing: the attempt goes back to prepared and
+      // the run stops, so a re-run submits it again without an abandon (#800).
+      if (submitError !== null && isSubmitNotSentError(submitError) && !seenOnServer && input.backToPrepared) {
+        const notSent: Error = submitError
+        abandonSubmit()
+        await input.backToPrepared(notSent)
+        throw new Error(
+          `Async migration step ${operationType} (query_id ${queryId}) was not sent: the submit request never reached ClickHouse (${describeError(notSent)}), so it was not submitted. Re-run \`chkit migrate --apply\`: an attempt that was never sent runs again.`,
+          { cause: notSent },
+        )
+      }
       let status: QueryStatus
       try {
         status = await db.queryStatus(queryId, { afterTime: pollAfterTime, includeBeforeStart: true })
@@ -481,6 +526,8 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
         }
         unknownPolls = 0
       }
+      // After the final check too: it can find the query (#800).
+      if (status.status !== 'unknown') seenOnServer = true
 
       if (status.status === 'finished') {
         const finishedSec = Math.round((status.durationMs ?? 0) / 1000)
@@ -654,7 +701,7 @@ const UNVERIFIED_FAILURE_REASON =
   'the journal records it as failed, but not from a rejection the server recorded before it started (an earlier chkit release recorded it, it failed while it ran, or a run lost its submit response), so some of its writes may have been applied'
 const WHILE_PROCESSING_REASON =
   'the server reports it failed while it ran (ExceptionWhileProcessing), and a statement that fails while it runs can leave some of its writes applied (parts of an INSERT ... SELECT, a DDL that ran on some hosts)'
-const BEFORE_START_EFFECTS_REASON =
+export const BEFORE_START_EFFECTS_REASON =
   "the server reports it was rejected before it started (ExceptionBeforeStart), but a statement other than a SELECT or an INSERT can apply effects before that (an ALTER's mutation keeps running in system.mutations, or applied to some partitions before one failed)"
 const STALE_PREPARED_REASON =
   'the journal records it as prepared, not sent, but chkit cannot read every copy of the journal to rule out a newer record of it (one that may have been sent)'
@@ -815,7 +862,7 @@ function failedWhileRunningError(input: {
     : `failed while it ran: ${input.error}. A statement that fails while it runs can leave some of its writes applied (parts of an INSERT ... SELECT, a DDL that ran on some hosts)`
   return new MigrateError(
     'async_outcome_unknown',
-    `Async migration step ${input.operationType} (statement ${input.statementIndex + 1} of ${input.migrationName}, query_id ${input.queryId}) ${what}, so chkit does not run it, or its before-retry SQL, again. Check in ClickHouse what the statement applied. Then reconcile every statement of ${input.migrationName} that already ran, since an abandon runs the migration again from statement 1, run chkit migrate --apply --abandon ${input.migrationName}, and apply again.`,
+    `Async migration step ${input.operationType} (statement ${input.statementIndex + 1} of ${input.migrationName}, query_id ${input.queryId}) ${what}, so chkit does not run it, or its before-retry SQL, again. Check in ClickHouse what the statement applied. ${recordOutcomeAdvice(input.migrationName)}`,
   )
 }
 
@@ -925,8 +972,13 @@ export function outcomeUnknownError(input: {
 }): MigrateError {
   return new MigrateError(
     'async_outcome_unknown',
-    `Async migration step ${input.operationType} (statement ${input.statementIndex + 1} of ${input.migrationName}, query_id ${input.queryId}): the journal records an attempt of it and no replica runs it, but chkit cannot tell whether it finished: ${input.reason}. Nothing was submitted and no before-retry SQL ran. Check in ClickHouse whether the statement's rows reached its target. Then reconcile every statement of ${input.migrationName} that already ran, since an abandon runs the migration again from statement 1, run chkit migrate --apply --abandon ${input.migrationName}, and apply again.`,
+    `Async migration step ${input.operationType} (statement ${input.statementIndex + 1} of ${input.migrationName}, query_id ${input.queryId}): the journal records an attempt of it and no replica runs it, but chkit cannot tell whether it finished: ${input.reason}. Nothing was submitted and no before-retry SQL ran. Check in ClickHouse whether the statement's rows reached its target. ${recordOutcomeAdvice(input.migrationName)}`,
   )
+}
+
+/** How the operator records an attempt's outcome once they checked it. */
+function recordOutcomeAdvice(migrationName: string): string {
+  return `Then record what you found: chkit migrate --apply --mark-applied ${migrationName} if it applied all of its writes, or chkit migrate --apply --mark-not-applied ${migrationName} once nothing it applied is left (its before-retry SQL runs before it is submitted again), and apply again; the statements recorded as completed do not run again. Or reconcile every statement of ${migrationName} that already ran and run chkit migrate --apply --abandon ${migrationName}, which runs the migration again from statement 1.`
 }
 
 // The journal returns DateTime64 without a zone, all of it UTC.

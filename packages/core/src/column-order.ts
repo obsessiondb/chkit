@@ -1,5 +1,15 @@
 import { type ColumnStatementDefinitions, cycleReleases, repairedOrder } from './column-cycle-repair.js'
-import { type ColumnRename, columnDefaultReads, columnKey, columnRenameKey, tableTtlReads } from './column-reads.js'
+import {
+  type ColumnRename,
+  columnDefaultReads,
+  columnKey,
+  columnObjectId,
+  columnRenameKey,
+  renameObjectId,
+  tableTtlReads,
+  ttlObjectId,
+} from './column-reads.js'
+import { quoteIdentifier, renderQualifiedName } from './identifier.js'
 import type { MigrationOperation, TableDefinition } from './model.js'
 import { type DependencyGraph, orderByDependencies } from './object-dependencies.js'
 import { compareCodePoints } from './order.js'
@@ -48,17 +58,25 @@ export function orderColumnStatements(
   definitions: ColumnStatementDefinitions,
   renames: readonly ColumnRename[]
 ): MigrationOperation[] {
-  const reads = columnDefaultReads(definitions.next)
-  const oldReads = columnDefaultReads(definitions.previous)
+  const reads = columnDefaultReads(definitions.next, false, columnObjectId)
+  const oldReads = columnDefaultReads(definitions.previous, false, columnObjectId)
   // ALTER's check for cyclic defaults also reads lambda parameters (#799).
-  const cycleReads = columnDefaultReads(definitions.next, true)
-  const oldCycleReads = columnDefaultReads(definitions.previous, true)
+  const cycleReads = columnDefaultReads(definitions.next, true, columnObjectId)
+  const oldCycleReads = columnDefaultReads(definitions.previous, true, columnObjectId)
   const ttlReads = tableTtlReads(definitions.next)
   const oldTtlReads = tableTtlReads(definitions.previous)
-  const renamedTo = new Map(renames.map((rename) => [columnRenameKey(rename), columnKey(rename, rename.to)]))
+  const renamedTo = new Map(renames.map((rename) => [renameObjectId(rename), columnObjectId(rename.database, rename.table, rename.to)]))
   const statements = operations
     .filter(isColumnStatement)
     .sort((a, b) => compareCodePoints(a.key, b.key))
+  const ids = statementObjectIds(statements, definitions, renames)
+  // The statements of one object (`ids`) are next to each other in key order.
+  const lastOf = new Map<string, number>()
+  const previousOf = ids.map((id, index) => {
+    const before = lastOf.get(id)
+    lastOf.set(id, index)
+    return before
+  })
 
   const providers = new Map<string, number[]>()
   const releasers = new Map<string, number[]>()
@@ -66,38 +84,41 @@ export function orderColumnStatements(
   const append = (map: Map<string, number[]>, key: string, index: number) =>
     map.set(key, [...(map.get(key) ?? []), index])
   statements.forEach((op, index) => {
-    if (op.type === 'alter_table_add_column') append(providers, op.key, index)
-    const renamed = renamedTo.get(op.key)
+    const id = ids[index] ?? ''
+    if (op.type === 'alter_table_add_column') append(providers, id, index)
+    const renamed = renamedTo.get(id)
     if (op.type === 'alter_table_rename_column' && renamed !== undefined) append(providers, renamed, index)
-    if (op.type === 'alter_table_modify_column') append(modifies, op.key, index)
+    if (op.type === 'alter_table_modify_column') append(modifies, id, index)
     if (op.type === 'alter_table_modify_column' || op.type === 'alter_table_drop_column') {
-      for (const read of oldReads.get(op.key) ?? []) append(releasers, read, index)
+      for (const read of oldReads.get(id) ?? []) append(releasers, read, index)
     }
     if (op.type === 'alter_table_modify_ttl') {
-      for (const read of oldTtlReads.get(op.key) ?? []) append(releasers, read, index)
+      for (const read of oldTtlReads.get(id) ?? []) append(releasers, read, index)
     }
   })
 
-  const added = new Set(statements.filter((op) => op.type === 'alter_table_add_column').map((op) => op.key))
+  const added = new Set(ids.filter((_, index) => statements[index]?.type === 'alter_table_add_column'))
   const releases = cycleReleases(cycleReads, oldCycleReads, added, new Set(modifies.keys()))
   const prerequisites = statements.map((op, index) => {
+    const id = ids[index] ?? ''
     const found = new Set<number>()
     if (op.type === 'alter_table_add_column' || op.type === 'alter_table_modify_column') {
-      for (const read of reads.get(op.key) ?? []) for (const other of providers.get(read) ?? []) found.add(other)
+      for (const read of reads.get(id) ?? []) for (const other of providers.get(read) ?? []) found.add(other)
     }
     if (op.type === 'alter_table_modify_ttl') {
-      for (const read of ttlReads.get(op.key) ?? []) for (const other of providers.get(read) ?? []) found.add(other)
+      for (const read of ttlReads.get(id) ?? []) for (const other of providers.get(read) ?? []) found.add(other)
     }
     if (op.type === 'alter_table_drop_column') {
-      for (const other of releasers.get(op.key) ?? []) found.add(other)
+      for (const other of releasers.get(id) ?? []) found.add(other)
     }
     // A column's last statement is the MODIFY COLUMN that sets its new expression.
-    if (op.type === 'alter_table_modify_column' && statements[index + 1]?.key !== op.key) {
-      for (const column of releases.get(op.key) ?? []) {
+    if (op.type === 'alter_table_modify_column' && lastOf.get(id) === index) {
+      for (const column of releases.get(id) ?? []) {
         for (const other of modifies.get(column) ?? []) found.add(other)
       }
     }
-    if (index > 0 && statements[index - 1]?.key === op.key) found.add(index - 1)
+    const before = previousOf[index]
+    if (before !== undefined) found.add(before)
     found.delete(index)
     return [...found]
   })
@@ -342,4 +363,51 @@ function typeChangedColumns(definitions: ColumnStatementDefinitions, renames: re
     }
   }
   return changed
+}
+
+/**
+ * The id of the object each column statement changes (#801). A key that
+ * names one object of `definitions` or `renames` is that object's. A key
+ * that names several (keys of two tables can be the same) is the one whose
+ * table the statement's SQL alters, and for a RENAME COLUMN whose SQL it
+ * is. A statement that is still not one object's keeps its key as its id,
+ * so it reads and provides nothing.
+ */
+function statementObjectIds(
+  statements: MigrationOperation[],
+  definitions: ColumnStatementDefinitions,
+  renames: readonly ColumnRename[]
+): string[] {
+  type Candidate = { id: string; matches: (sql: string) => boolean }
+  const candidates = new Map<string, Candidate[]>()
+  const add = (kind: string, key: string, candidate: Candidate) => {
+    const slot = JSON.stringify([kind, key])
+    const list = candidates.get(slot) ?? []
+    if (!list.some((other) => other.id === candidate.id)) list.push(candidate)
+    candidates.set(slot, list)
+  }
+  for (const def of [...definitions.previous, ...definitions.next]) {
+    if (def.kind !== 'table') continue
+    const prefix = `ALTER TABLE ${renderQualifiedName(def.database, def.name)} `
+    const matches = (sql: string) => sql.startsWith(prefix)
+    for (const column of def.columns) {
+      add('column', columnKey({ database: def.database, table: def.name }, column.name), {
+        id: columnObjectId(def.database, def.name, column.name),
+        matches,
+      })
+    }
+    add('ttl', `table:${def.database}.${def.name}:ttl`, { id: ttlObjectId(def.database, def.name), matches })
+  }
+  for (const rename of renames) {
+    const sql = `ALTER TABLE ${renderQualifiedName(rename.database, rename.table)} RENAME COLUMN IF EXISTS ${quoteIdentifier(rename.from)} TO ${quoteIdentifier(rename.to)};`
+    add('rename', columnRenameKey(rename), { id: renameObjectId(rename), matches: (other) => other === sql })
+  }
+  const kindOf = (op: MigrationOperation) =>
+    op.type === 'alter_table_modify_ttl' ? 'ttl' : op.type === 'alter_table_rename_column' ? 'rename' : 'column'
+  return statements.map((op) => {
+    const slot = JSON.stringify([kindOf(op), op.key])
+    const found = candidates.get(slot) ?? []
+    const matching = found.length === 1 ? found : found.filter((candidate) => candidate.matches(op.sql))
+    return matching.length === 1 && matching[0] !== undefined ? matching[0].id : slot
+  })
 }

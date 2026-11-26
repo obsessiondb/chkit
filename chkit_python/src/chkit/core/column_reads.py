@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import json
+from collections.abc import Callable, Sequence
 
 from chkit.core.column_default import parse_column_default
 from chkit.core.model import ColumnRenameSuggestion, SchemaDefinition, TableDefinition
@@ -54,22 +55,54 @@ _SPECIAL_ARGUMENT_FUNCTIONS = frozenset(
 )
 # Deeper types than this are not parsed: the expression is not plain.
 _TYPE_DEPTH = 32
+# Keywords that follow an operand (``x IS NULL``, ``CASE x WHEN 1 THEN 2 END``,
+# ``substring(s FROM 1 FOR 2)``, ``x AS y``). ClickHouse reads a column of that
+# name where an operand is expected (``end + 1``, ``THEN end``, ``x AND end``).
+_INFIX_KEYWORDS = frozenset(
+    {
+        "and", "as", "between", "div", "else", "end", "for", "from", "ilike", "in", "is", "like",
+        "mod", "or", "then", "when",
+    }
+)  # fmt: skip
+# Words that can take an operand after them (``INTERVAL end DAY``, ``DISTINCT x``,
+# ``DELETE WHERE end``). A column of that name, read where an operand belongs,
+# may be that keyword, so the word after it keeps its read.
+_PREFIX_KEYWORDS = frozenset(
+    {
+        "all", "any", "array", "asc", "ascending", "both", "by", "case", "cast", "columns", "date",
+        "delete", "desc", "descending", "disk", "distinct", "escape", "except", "exists",
+        "extract", "global", "group", "interval", "lambda", "leading", "not", "over", "partition",
+        "position", "recompress", "regexp", "select", "set", "substring", "timestamp", "to",
+        "trailing", "trim", "volume", "where", "with",
+    }
+)  # fmt: skip
+# The units of ``extract(unit FROM …)``.
+_EXTRACT_UNITS = frozenset(
+    {
+        "nanosecond", "microsecond", "millisecond", "second", "minute", "hour", "day", "week",
+        "month", "quarter", "year",
+    }
+)  # fmt: skip
 
 
 def _column_default_reads(
-    definitions: Sequence[SchemaDefinition], lambdas: bool = False
+    definitions: Sequence[SchemaDefinition],
+    lambdas: bool = False,
+    column_key_of: Callable[[str, str, str], str] | None = None,
 ) -> dict[str, set[str]]:
     """Column operation key to the keys of the same table's columns its default expression names.
 
-    A name followed by ``(`` is a function call, not a column, and neither are
-    the names ``_not_column_names`` finds. With ``lambdas``, the lambdas' own
-    names read columns as well (``_lambda_reads``).
+    Or the same with the keys ``column_key_of`` gives. A name followed by
+    ``(`` is a function call, not a column, and neither are the names
+    ``_not_column_names`` finds. With ``lambdas``, the lambdas' own names read
+    columns as well (``_lambda_reads``).
     """
+    key_of = _column_key if column_key_of is None else column_key_of
     graph: dict[str, set[str]] = {}
     for definition in definitions:
         if not isinstance(definition, TableDefinition):
             continue
-        prefix = f"table:{definition.database}.{definition.name}:column:"
+        database, table_name = definition.database, definition.name
         names = {column.name for column in definition.columns}
         for column in definition.columns:
             if column.default is None:
@@ -81,8 +114,8 @@ def _column_default_reads(
             found = _dotted_names(parsed.sql, names)
             for name in [*found, *_lambda_reads(parsed.sql, names)] if lambdas else found:
                 if name != column.name:
-                    read.add(prefix + name)
-            graph[prefix + column.name] = read
+                    read.add(key_of(database, table_name, name))
+            graph[key_of(database, table_name, column.name)] = read
     return graph
 
 
@@ -124,7 +157,7 @@ def _plain_facts(
 
 
 def _table_ttl_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, set[str]]:
-    """Table TTL operation key to the keys of the table's columns the TTL names.
+    """Table TTL id to the ids of the table's columns the TTL names.
 
     The TTL is read with the same rules as a column's default expression
     (``_dotted_names``).
@@ -134,8 +167,8 @@ def _table_ttl_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, set[s
         if not isinstance(definition, TableDefinition) or definition.ttl is None:
             continue
         names = {column.name for column in definition.columns}
-        graph[f"table:{definition.database}.{definition.name}:ttl"] = {
-            _column_key(definition.database, definition.name, name)
+        graph[_ttl_object_id(definition.database, definition.name)] = {
+            _column_object_id(definition.database, definition.name, name)
             for name in _dotted_names(definition.ttl, names)
         }
     return graph
@@ -336,7 +369,8 @@ def _dotted_names(sql: str, columns: set[str]) -> list[str]:
     ``t.col`` and ``db.t.col`` read ``col`` (#748). A tuple element by position
     ends the run: ``t.1.a`` reads ``t``. A run followed by ``(`` is a function
     call, not a column, and a run that starts on a name ``_not_column_names``
-    skips reads nothing, so ``a -> a.x`` reads no ``a.x`` (#768).
+    skips reads nothing, so ``a -> a.x`` reads no ``a.x`` (#768). Nor does a
+    keyword ``_keyword_names`` finds (#805).
     """
     return _names_read([token for token in tokenize_sql(sql) if not is_trivia(token)], columns)
 
@@ -345,6 +379,7 @@ def _names_read(tokens: list[SQLToken], columns: set[str]) -> list[str]:
     """``_dotted_names`` over the ``tokens`` of an expression, without trivia."""
     skipped = _not_column_names(tokens)
     found: list[str] = []
+    keywords = _keyword_names(tokens, columns, skipped)
     i = 0
     while i < len(tokens):
         first = i
@@ -372,7 +407,7 @@ def _names_read(tokens: list[SQLToken], columns: set[str]) -> list[str]:
                 i += 1
         if not run:
             i += 1
-        if (i < len(tokens) and tokens[i].text == "(") or first in skipped:
+        if (i < len(tokens) and tokens[i].text == "(") or first in skipped or first in keywords:
             continue
         for start in range(len(run)):
             match = _longest_column_prefix(run[start:], columns)
@@ -555,8 +590,119 @@ def _closing_paren(tokens: list[SQLToken], open_: int) -> int:
     return len(tokens)
 
 
+def _keyword_names(  # noqa: PLR0915 — mirrors TS keywordNames
+    tokens: list[SQLToken], columns: set[str], skipped: set[int]
+) -> set[int]:
+    """Indices of the single bare names in ``tokens`` (trivia removed) that are keywords (#805).
+
+    They read no column of that name: the words in ``_LITERAL_WORDS`` and NOT,
+    except before a single ``=``; CASE when no column has that name, with a
+    WHEN right after it; a word in ``_INFIX_KEYWORDS`` right after a complete
+    operand; and the name after such an AS (``toUInt64(x AS c)``), which
+    ClickHouse does not read as the column. A complete operand ends on a
+    number, a string, a closing bracket, a literal word, END, the unit of
+    ``extract(unit FROM …)``, or a column read where an operand was expected
+    that is not named like a word in ``_PREFIX_KEYWORDS``. After any other
+    name the next word keeps its read: when the position is unclear, the read
+    stays.
+    """
+    keywords: set[int] = set()
+    count = len(tokens)
+
+    def text_at(i: int) -> str | None:
+        return tokens[i].text if 0 <= i < count else None
+
+    def assigned(i: int) -> bool:
+        return text_at(i + 1) == "=" and text_at(i + 2) != "="
+
+    def bare(i: int) -> str | None:
+        return tokens[i].text.lower() if 0 <= i < count and tokens[i].kind == "identifier" else None
+
+    state = "operand"
+    i = 0
+    while i < count:
+        token = tokens[i]
+        word = bare(i)
+        name = identifier_name(token)
+        if token.kind in ("number", "string"):
+            state = "ended"
+        elif token.kind == "punctuation":
+            if token.text in (")", "]", "}"):
+                state = "ended"
+            elif token.text != ".":
+                state = "operand"
+        elif name is None:
+            state = "unknown"
+        elif i in skipped:
+            # A lambda parameter or a cast type: the reads around it keep main's rules.
+            state = "unknown"
+        elif text_at(i + 1) == "(":
+            # A function call: the ``(`` after it expects an operand.
+            pass
+        elif text_at(i - 1) == "." or text_at(i + 1) == ".":
+            # A part of a dotted name, which may or may not be a complete operand.
+            state = "unknown"
+        # A word before a single ``=`` may be the column a TTL's ``SET col = …`` assigns.
+        elif word is not None and word in _LITERAL_WORDS and not assigned(i):
+            keywords.add(i)
+            state = "ended"
+        elif word == "not" and not assigned(i):
+            # NOT keeps the state: unary NOT expects an operand, as before it, and
+            # after an operand it starts ``NOT IN``, ``NOT LIKE`` or ``NOT BETWEEN``.
+            keywords.add(i)
+        elif word == "case" and token.text not in columns:
+            # Without a column of that name, `case` is the keyword or an alias the
+            # expression defines (``s AS case``), and a WHEN right after it is the
+            # keyword or an alias too. Which one it is stays unknown.
+            keywords.add(i)
+            if bare(i + 1) == "when":
+                i += 1
+                keywords.add(i)
+            state = "unknown"
+        elif word is not None and word in _INFIX_KEYWORDS and state == "ended":
+            keywords.add(i)
+            state = "ended" if word == "end" else "operand"
+            if (
+                word == "as"
+                and i + 1 < count
+                and identifier_name(tokens[i + 1]) is not None
+                and i + 1 not in skipped
+                and text_at(i + 2) not in (".", "(")
+            ):
+                i += 1
+                keywords.add(i)
+                state = "ended"
+        elif (
+            text_at(i - 1) == "("
+            and bare(i - 2) == "extract"
+            and word in _EXTRACT_UNITS
+            and bare(i + 1) == "from"
+        ):
+            state = "ended"
+        else:
+            ended = state == "operand" and name in columns and word not in _PREFIX_KEYWORDS
+            state = "ended" if ended else "unknown"
+        i += 1
+    return keywords
+
+
 def _column_key(database: str, table: str, column: str) -> str:
     return f"table:{database}.{table}:column:{column}"
+
+
+# Ids of the objects the column statements change. Unlike operation keys,
+# two objects never share one: table ``t:column:x`` and column ``x:column:a``
+# of ``t`` give the same key (#801).
+def _column_object_id(database: str, table: str, column: str) -> str:
+    return json.dumps(["column", database, table, column])
+
+
+def _ttl_object_id(database: str, table: str) -> str:
+    return json.dumps(["ttl", database, table])
+
+
+def _rename_object_id(rename: ColumnRenameSuggestion) -> str:
+    return json.dumps(["rename", rename.database, rename.table, rename.from_, rename.to])
 
 
 def _table_id(database: str, table: str) -> str:

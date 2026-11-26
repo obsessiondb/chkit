@@ -3,8 +3,8 @@ import { describe, test } from 'bun:test'
 import { migrateColumnChange } from './migrate-column-change.js'
 
 // Names in an expression that are not columns of the table (a function, a
-// lambda parameter) must not change the order of the column statements.
-describe('@chkit/cli migrate orders the column statements of a table around names that are not columns (#768, #799)', () => {
+// lambda parameter, a keyword) must not change the order of the column statements.
+describe('@chkit/cli migrate orders the column statements of a table around names that are not columns (#768, #799, #805)', () => {
   test('a function call named like a new column does not hold back the rename it reads', async () => {
     await migrateColumnChange({
       label: 'fnrename',
@@ -54,6 +54,20 @@ describe('@chkit/cli migrate orders the column statements of a table around name
         "{ name: 'a', type: 'UInt64', default: { expression: 'arraySum(arrayMap(b -> 1, [1]))' } }, { name: 'b', type: 'UInt64' }",
       order: ['MODIFY COLUMN `b` REMOVE DEFAULT;', 'MODIFY COLUMN `a` UInt64 DEFAULT arraySum(arrayMap(b -> 1, [1]));'],
       columns: ['a', 'b', 'id'],
+    })
+  }, 120_000)
+
+  // Reading the CASE's `end` as the column `end` made the two DROPs a cycle,
+  // so `a` was dropped first: Cannot drop column `a`, because column `end`
+  // depends on it (#805).
+  test('a CASE keyword named like a column does not hold back the DROP of the column it names', async () => {
+    await migrateColumnChange({
+      label: 'casekeyword',
+      before:
+        "{ name: 'a', type: 'UInt64', default: { expression: 'case when id = 1 then 2 else 3 end' } }, { name: 'end', type: 'UInt64', default: { expression: 'a + 1' } }",
+      after: "{ name: 'x', type: 'UInt64' }",
+      order: ['DROP COLUMN IF EXISTS `end`;', 'DROP COLUMN IF EXISTS `a`;'],
+      columns: ['id', 'x'],
     })
   }, 120_000)
 })
