@@ -14,9 +14,12 @@ import pytest
 
 from chkit.core.canonical import canonicalize_definitions
 from chkit.core.column_cycle_repair import _cycle_repair_work
-from chkit.core.column_reads import _column_default_reads
+from chkit.core.column_order import order_column_statements
+from chkit.core.column_reads import _column_default_reads, column_rename_key
 from chkit.core.model import (
+    ColumnRenameSuggestion,
     DictionaryDefinition,
+    MigrationOperation,
     SchemaDefinition,
     SQLExpression,
     TableDefinition,
@@ -1073,6 +1076,174 @@ def test_keeps_the_other_statements_other_tables_and_same_column_statements_in_p
     ]
 
 
+# ---------- the column reads skip keywords and alias names (#805) ----------
+# Each expected read below is what ClickHouse 26.3 reads: a DROP COLUMN of a
+# column it reads is refused.
+
+
+_KEYWORD_COLUMNS = [
+    "and", "as", "c", "else", "end", "from", "id", "interval", "is", "like", "nan", "not", "null",
+    "NULL", "s", "then", "true", "ts", "when", "x",
+]  # fmt: skip
+
+
+def _keyword_reads_of(expression: str, extra: tuple[str, ...] = ()) -> list[str]:
+    columns: list[dict[str, object]] = [
+        {"name": name, "type": "UInt64"} for name in (*_KEYWORD_COLUMNS, *extra)
+    ]
+    columns.append({"name": "v", "type": "UInt64", "default": _expr(expression)})
+    definition = table(
+        database="app",
+        name="t",
+        columns=list(columns),
+        engine="MergeTree()",
+        primary_key=["id"],
+        order_by=["id"],
+    )
+    reads = _column_default_reads([definition]).get("table:app.t:column:v", set())
+    return sorted(key[len("table:app.t:column:"):] for key in reads)
+
+
+@pytest.mark.parametrize(
+    ("expression", "expected"),
+    [
+        ("case when x = 1 then 2 else 3 end", ["x"]),
+        ("case x when 1 then 2 end", ["when", "x"]),
+        ("CASE x WHEN 1 THEN 2 END + 0", ["x"]),
+        ("if(x is null, 1, 2)", ["x"]),
+        ("if(x is not null, 1, 2)", ["x"]),
+        ("not x", ["x"]),
+        ("toUInt64(not (x = 1))", ["x"]),
+        ("x not in (1, 2)", ["x"]),
+        ("ifNull(null, 1) + ifNull(NULL, 1)", []),
+        ("if(true, 1, 2) + toUInt64(isNaN(nan))", []),
+        ("length(substring(toString(s) from 1 for 2))", ["s"]),
+        ("toUInt64(extract(day from ts))", ["ts"]),
+        ("length(trim(both ' ' from toString(s)))", ["s"]),
+        ("x and 1", ["x"]),
+        ("x between 1 and 2", ["x"]),
+        ("toUInt64(x as c)", ["x"]),
+        ("toUInt64(x AS `c`)", ["x"]),
+        ("(x + 1 as c) * 2", ["x"]),
+    ],
+)
+def test_reads_skip_keywords(expression: str, expected: list[str]) -> None:
+    assert _keyword_reads_of(expression) == expected
+
+
+@pytest.mark.parametrize(
+    ("expression", "expected"),
+    [
+        ("end + 1", ["end"]),
+        ("toUInt64(when)", ["when"]),
+        ("is + 1", ["is"]),
+        ("x and and", ["and", "x"]),
+        ("toUInt64(as)", ["as"]),
+        ("case when end = 1 then 2 end", ["end"]),
+        ("case when x = 1 then end else 3 end", ["end", "x"]),
+        ("case when x = 1 then then else else end", ["else", "then", "x"]),
+        ("case when x = 1 then 2 else 3 end + end", ["end", "x"]),
+        ("toUInt64(substring(toString(s) from from))", ["from", "s"]),
+        ("ifNull(`null`, 1)", ["null"]),
+        ("toUInt64(`true`)", ["true"]),
+        ("toUInt64(`not`)", ["not"]),
+        ("toUInt64(c as c)", ["c"]),
+        ("(x + 1 as c) * c", ["c", "x"]),
+        # A column named like a prefix keyword may be that keyword: the name after it is still read.
+        ("toUInt64(toDateTime(0) + interval end day)", ["end", "interval"]),
+        ("arraySum(arrayMap(interval -> toUInt64(toDateTime(0) + interval end day), [1]))", ["end"]),
+        ("length(extract(interval end day > interval 0 day ? 'a' : 'b', '.'))", ["end", "interval"]),
+        ("arraySum(arrayMap(and -> 1 and end, [1]))", ["end"]),
+        ("arraySum(arrayMap(both -> both not like end, ['x']))", ["end", "like"]),
+        ("toUInt8(t.x and end)", ["and", "end", "x"]),
+        # Unclear positions keep the read: after a lambda parameter, and before a single `=`.
+        ("arraySum(arrayMap(i -> i is null, [x]))", ["is", "x"]),
+        ("toUInt8(null = 1)", ["null"]),
+        # An alias named `case` (`s AS case`) is no CASE keyword.
+        ("length(concat(toString(s) AS case, substring(case from then)))", ["from", "s", "then"]),
+        ("length(extract(interval from day > interval 0 day ? 'a' : 'b', '.'))", ["from", "interval"]),
+    ],
+)
+def test_reads_keep_keyword_named_columns_where_an_operand_is_expected(
+    expression: str, expected: list[str]
+) -> None:
+    assert _keyword_reads_of(expression) == expected
+
+
+# With a column named `case`, a bare `case` keeps its read: ClickHouse reads
+# the column wherever CASE does not parse (`INTERVAL case DAY`, `case when`
+# with the alias `when`), and chkit does not tell the two apart.
+@pytest.mark.parametrize(
+    ("expression", "expected"),
+    [
+        ("case", ["case"]),
+        ("case + 1", ["case"]),
+        ("case when case = 1 then 2 end", ["case", "when"]),
+        ("case global in (1, 2)", ["case"]),
+        ("case regexp 'x'", ["case"]),
+        ("toUInt64(toDateTime(0) + interval case day)", ["case", "interval"]),
+        ("length(substring(case c, 1))", ["c", "case"]),
+        ("length(substring(case when, 1))", ["case", "when"]),
+        ("toUInt64(toDateTime(0) + interval case when day)", ["case", "interval", "when"]),
+        ("case when x = 1 then 2 else 3 end", ["case", "when", "x"]),
+        ("length(substring(case when from then))", ["case", "from", "then", "when"]),
+    ],
+)
+def test_reads_keep_a_column_named_case(expression: str, expected: list[str]) -> None:
+    assert _keyword_reads_of(expression, ("case",)) == expected
+
+
+def test_drops_a_column_after_the_dropped_column_that_reads_it_when_a_case_names_that_column() -> None:
+    assert _sqls(
+        [_t([
+            {"name": "a", "type": "UInt64", "default": _expr("case when id = 1 then 2 else 3 end")},
+            {"name": "end", "type": "UInt64", "default": _expr("a + 1")},
+        ])],
+        [_t([])],
+    ) == [
+        "ALTER TABLE app.t DROP COLUMN IF EXISTS `end`;",
+        "ALTER TABLE app.t DROP COLUMN IF EXISTS `a`;",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("column", "before", "after"),
+    [
+        ("case", "case TO DISK 'default'", "ts TO DISK 'default'"),
+        ("case", "case DELETE", "ts DELETE"),
+        ("null", "ts GROUP BY id SET null = max(x)", "ts GROUP BY id SET x = max(x)"),
+    ],
+)
+def test_a_ttl_that_reads_a_keyword_named_column_changes_before_it_is_dropped(
+    column: str, before: str, after: str
+) -> None:
+    columns: list[dict[str, Any]] = [
+        {"name": "ts", "type": "DateTime"},
+        {"name": "x", "type": "UInt64"},
+    ]
+    assert _sqls(
+        [_t([*columns, {"name": column, "type": "DateTime"}], ttl=before)],
+        [_t(columns, ttl=after)],
+    ) == [
+        f"ALTER TABLE app.t MODIFY TTL {after};",
+        f"ALTER TABLE app.t DROP COLUMN IF EXISTS `{column}`;",
+    ]
+
+
+def test_a_ttl_that_reads_a_column_after_a_column_named_interval_changes_before_that_column_is_dropped() -> None:
+    columns: list[dict[str, Any]] = [
+        {"name": "ts", "type": "DateTime"},
+        {"name": "interval", "type": "UInt64"},
+    ]
+    assert _sqls(
+        [_t([*columns, {"name": "end", "type": "UInt64"}], ttl="ts + interval end day")],
+        [_t(columns, ttl="ts + interval 1 day")],
+    ) == [
+        "ALTER TABLE app.t MODIFY TTL ts + interval 1 day;",
+        "ALTER TABLE app.t DROP COLUMN IF EXISTS `end`;",
+    ]
+
+
 # ---------- MODIFY read releases and table TTL changes (#769) ----------
 
 
@@ -1461,22 +1632,26 @@ def _text(name: str, expression: str) -> dict[str, Any]:
     ("expression", "name", "changed"),
     [
         ("toString(date '2024-01-01')", "date", _text("date", "toString(id)")),
-        ("toString(arrayMap(`as` -> tuple(id as month).1, [id])[1])", "month", _u("month", "id")),
+        (
+            "toString(arrayMap(`as` -> tuple(id as month).1, [id])[1])",
+            "month",
+            _text("month", "toString(id)"),
+        ),
         (
             "CAST(arrayMap(lambda(tuple(month), month), [id])[1] AS String)",
             "month",
-            _u("month", "id"),
+            _text("month", "toString(id)"),
         ),
     ],
 )
 def test_a_table_with_an_uncertain_expression_keeps_its_sorted_order(
     expression: str, name: str, changed: dict[str, Any]
 ) -> None:
-    # `a` changes to String; the ALIAS `b` calls `length(a)`, so it must come
-    # after that change. Each expression for `a` reads `month` or `date` only
-    # seemingly, so these tables keep their sorted order.
+    # `a` gets a new DEFAULT; the ALIAS `b` calls `length(a)`. Each expression
+    # for `a` reads `month` or `date` only seemingly, so these tables keep their
+    # sorted order. No column changes its type, so none is ordered by one (#814).
     assert _order_of(
-        [_t([_u("a"), _text(name, "toString(z)"), _u("z", "length(toString(a))")])],
+        [_t([{"name": "a", "type": "String"}, _text(name, "toString(z)"), _u("z", "length(toString(a))")])],
         [_t([_text("a", expression), _u("b", "length(a)", default_kind="ALIAS"), changed, _u("z", "id")])],
     ) == ["t.a", "t.b", f"t.{name}", "t.z"]
 
@@ -1579,8 +1754,13 @@ def test_does_no_repair_work_on_the_acyclic_groups_fixture() -> None:
 
 def test_a_bare_null_is_no_read_of_a_column_named_null() -> None:
     # A bare NULL is a literal even when a column is named `null`, so these
-    # tables keep their sorted order: the ALIAS `b` runs after `a` changes to
-    # String. Only a quoted `null` reads the column.
+    # tables close no cycle: the ALIAS `b` runs after `a` changes. Only a
+    # quoted `null` reads the column. In the first plan `a` changes its type
+    # and the old DEFAULT of `z` reads it, so `z` changes first (#814). Read as
+    # a column, `null`, whose type changes too, would have to change before
+    # `a`: that reorders the type changes, so the plan would keep its sorted
+    # order. In the second plan no column changes its type, so none is
+    # ordered by one.
     assert _order_of(
         [_t([_u("a"), _text("null", "toString(z)"), _u("z", "length(toString(a))")])],
         [_t([
@@ -1589,10 +1769,10 @@ def test_a_bare_null_is_no_read_of_a_column_named_null() -> None:
             _u("null", "id"),
             _u("z", "id"),
         ])],
-    ) == ["t.a", "t.b", "t.null", "t.z"]
+    ) == ["t.z", "t.a", "t.b", "t.null"]
     assert _order_of(
         [_t([
-            _u("a"),
+            {"name": "a", "type": "String"},
             _u("b", "length(`null`)", default_kind="ALIAS"),
             _text("null", "toString(z)"),
             _u("z", "length(toString(a))"),
@@ -1600,7 +1780,7 @@ def test_a_bare_null_is_no_read_of_a_column_named_null() -> None:
         [_t([
             _text("a", "toString(ifNull(null, 1))"),
             _u("b", "length(a)", default_kind="ALIAS"),
-            _u("null", "id"),
+            _text("null", "toString(id)"),
             _u("z", "id"),
         ])],
     ) == ["t.a", "t.b", "t.null", "t.z"]
@@ -1796,9 +1976,10 @@ def test_keeps_the_sorted_order_when_the_old_defaults_read_each_other_in_a_cycle
 def test_a_bare_special_word_is_no_read_of_a_column_with_that_name(expression: str, name: str) -> None:
     # The unit of `date_add`, `dateDiff` and the like, a bare NOT and a bare
     # SELECT are not reads even when a column has that name, so these tables
-    # keep their sorted order: the ALIAS `b` runs after `a` changes to String.
+    # keep their sorted order: the ALIAS `b` runs after `a` changes. `a` keeps
+    # its type, so no type change orders `z` (#814).
     assert _order_of(
-        [_t([_u("a"), _u(name, "z"), _u("z", "length(toString(a))")])],
+        [_t([{"name": "a", "type": "String"}, _u(name, "z"), _u("z", "length(toString(a))")])],
         [_t([
             _text("a", expression),
             _u("b", "match(a, 'x')", type="UInt8", default_kind="ALIAS"),
@@ -1809,8 +1990,9 @@ def test_a_bare_special_word_is_no_read_of_a_column_with_that_name(expression: s
 
 
 def test_a_datediff_unit_is_no_read_of_a_column_with_that_name() -> None:
+    # `a` keeps its type, so no type change orders `c` (#814).
     assert _order_of(
-        [_t([{"name": "a", "type": "String"}, _u("b"), _text("c", "a"), _text("hour", "c")])],
+        [_t([_u("a"), _u("b"), _text("c", "a"), _text("hour", "c")])],
         [_t([
             _u("a", "dateDiff(hour, toDateTime(0), toDateTime(id))"),
             _u("b", "a + 1"),
@@ -1845,11 +2027,12 @@ def test_a_deeply_nested_cast_in_an_unchanged_table_plans_nothing() -> None:
     assert plan_diff([_t([_u("a"), deep])], [_t([_u("a"), deep])]).operations == []
 
 
-def test_a_prerequisite_between_two_tables_keeps_both_in_their_sorted_order() -> None:
-    # Column `x:column:a` of `t` and column `a` of `t:column:x` share a key, so
-    # a prerequisite links the two tables' statements. `t:column:x` keeps its
-    # sorted order because of its INTERVAL, so `t` keeps its order too: the
-    # plan is main's.
+def test_a_shared_key_does_not_link_two_tables_so_the_other_table_is_still_repaired() -> None:
+    # Column `x:column:a` of `t` and column `a` of `t:column:x` share a key,
+    # but their statements are keyed by column (#801), so no prerequisite links
+    # the two tables. `t:column:x` keeps its sorted order because of its
+    # INTERVAL; `t` is still repaired: `MODIFY y` runs before the MODIFY of
+    # `x:column:a` that would close the cycle through `y` and `z`.
     interval = _u("k", "toUInt64(toDateTime(id) + INTERVAL 1 day)")
     previous = [
         _t([_u("x:column:a"), _u("y", "z"), _u("z", "`x:column:a`")], "t"),
@@ -1860,10 +2043,10 @@ def test_a_prerequisite_between_two_tables_keeps_both_in_their_sorted_order() ->
         _t([_u("a"), _u("b", "id"), interval], "t:column:x"),
     ]
     assert [op.sql for op in plan_diff(previous, next_).operations] == [
-        "ALTER TABLE app.t MODIFY COLUMN `x:column:a` UInt64 DEFAULT y;",
         "ALTER TABLE app.`t:column:x` ADD COLUMN IF NOT EXISTS `a` UInt64;",
         "ALTER TABLE app.`t:column:x` MODIFY COLUMN `b` UInt64 DEFAULT id;",
         "ALTER TABLE app.t MODIFY COLUMN `y` UInt64 DEFAULT id;",
+        "ALTER TABLE app.t MODIFY COLUMN `x:column:a` UInt64 DEFAULT y;",
         "ALTER TABLE app.t MODIFY COLUMN `z` UInt64 DEFAULT id;",
     ]
 
@@ -1984,9 +2167,9 @@ def test_a_quoted_literal_word_keeps_the_sorted_order(name: str, order: list[str
 def test_a_quoted_true_is_no_read_of_a_column_with_that_name() -> None:
     # `toUInt64(`true`)` reads no column, so `a` does not read the column
     # `true`: the table keeps its sorted order, where `b DEFAULT a + 1` runs
-    # after `a` changes to UInt64.
+    # after `a` changes. `a` keeps its type, so no type change orders `c` (#814).
     assert _order_of(
-        [_t([{"name": "a", "type": "String"}, _u("b"), _text("c", "a"), _text("true", "c")])],
+        [_t([_u("a"), _u("b"), _text("c", "a"), _text("true", "c")])],
         [_t([_u("a", "toUInt64(`true`)"), _u("b", "a + 1"), _text("c", "'x'"), _text("true", "'y'")])],
     ) == ["t.a", "t.b", "t.c", "t.true"]
 
@@ -2013,9 +2196,10 @@ def test_a_bare_left_on_the_cycle_is_a_read_of_its_column() -> None:
 
 def test_a_quoted_not_is_no_read_of_a_column_with_that_name() -> None:
     # ClickHouse stores `` `not` + 1 `` as `NOT 1`, so `a` does not read the
-    # column `not` and the table keeps its sorted order.
+    # column `not` and the table keeps its sorted order. `a` keeps its type, so
+    # no type change orders `c` (#814).
     assert _order_of(
-        [_t([{"name": "a", "type": "String"}, _u("b"), _text("c", "a"), _u("not", "length(c)")])],
+        [_t([_u("a"), _u("b"), _text("c", "a"), _u("not", "length(c)")])],
         [_t([_u("a", "`not` + 1"), _u("b", "a + 1"), _text("c", "'x'"), _u("not", "5")])],
     ) == ["t.a", "t.b", "t.c", "t.not"]
 
@@ -2093,13 +2277,13 @@ def _fan_in(m: int) -> tuple[_Schema, _Schema]:
 # keep the sorted order.
 _BUDGET_EDGE: dict[str, tuple[tuple[_Schema, _Schema], int, str, str]] = {
     "nine cycles through 449 links": (
-        _nine_cycles(449), 1292, "c", "7ec17a4b49e8dcdf3beceb5adb5914cee3504df90dd047e9d72b95808538147a"
+        _nine_cycles(449), 1291, "c", "7fc14481e96d7b6347bd4aabe0c280403a5d8ed4e4da69854070032d1b5dc098"
     ),
     "nine cycles through 85 links": (
-        _nine_cycles(85), 564, "c", "7ec17a4b49e8dcdf3beceb5adb5914cee3504df90dd047e9d72b95808538147a"
+        _nine_cycles(85), 563, "c", "7fc14481e96d7b6347bd4aabe0c280403a5d8ed4e4da69854070032d1b5dc098"
     ),
     "nine cycles through 86 links": (
-        _nine_cycles(86), 566, "c", "7ec17a4b49e8dcdf3beceb5adb5914cee3504df90dd047e9d72b95808538147a"
+        _nine_cycles(86), 565, "c", "7fc14481e96d7b6347bd4aabe0c280403a5d8ed4e4da69854070032d1b5dc098"
     ),
     "30 cycles through 30 links": (
         _fan_in(30), 1807, "b000", "c9b8ec508f9b1e19693d8da1e7138fd8055abfd4a2ce8d638c8e7093d593879e"
@@ -2111,7 +2295,7 @@ _BUDGET_EDGE: dict[str, tuple[tuple[_Schema, _Schema], int, str, str]] = {
         _fan_in(60), 4648, "a000", "ee8a4528f50e4af7107b205dbfc26ae7b2dd7bd945d8654f3f2074c9603f2cad"
     ),
     "a chain and a fan-in": (
-        _chain_and_fan_in(), 1816, "m", "f0ea844653d573b9fd93c11b98a1cf6f6e2f31d10c03d08aa9ee0572f4d8fd36"
+        _chain_and_fan_in(), 1808, "m", "f0ea844653d573b9fd93c11b98a1cf6f6e2f31d10c03d08aa9ee0572f4d8fd36"
     ),
 }
 
@@ -2280,3 +2464,255 @@ def test_a_qualifier_that_is_no_column_is_dropped_and_a_column_prefix_is_read() 
         "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `t` Tuple(first UInt64);",
         "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT app.orders.price + orders.qty + t.first;",
     ]
+
+
+# ---------- a column type change ordered against the expressions that read it (#814) ----------
+
+
+def test_changes_the_type_after_the_modify_whose_new_default_stops_reading_the_column() -> None:
+    assert _sqls(
+        [_t([{"name": "a", "type": "String"}, {"name": "b", "type": "UInt64", "default": _expr("length(a)")}])],
+        [_t([{"name": "a", "type": "UInt64"}, {"name": "b", "type": "UInt64", "default": _expr("0")}])],
+    ) == ["ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT 0;", "ALTER TABLE app.t MODIFY COLUMN `a` UInt64;"]
+
+
+def test_changes_the_type_after_the_drop_of_a_column_whose_alias_reads_it() -> None:
+    assert _sqls(
+        [_t([
+            {"name": "a", "type": "String"},
+            {"name": "b", "type": "UInt64", "defaultKind": "ALIAS", "default": _expr("length(a)")},
+        ])],
+        [_t([{"name": "a", "type": "UInt64"}])],
+    ) == ["ALTER TABLE app.t DROP COLUMN IF EXISTS `b`;", "ALTER TABLE app.t MODIFY COLUMN `a` UInt64;"]
+
+
+def test_runs_the_modify_and_the_add_whose_new_default_starts_reading_the_column_after_its_type_change() -> None:
+    assert _sqls(
+        [_t([{"name": "b", "type": "UInt64", "default": _expr("0")}, {"name": "z", "type": "String"}])],
+        [_t([
+            {"name": "b", "type": "UInt64", "default": _expr("z + 1")},
+            {"name": "c", "type": "UInt64", "defaultKind": "MATERIALIZED", "default": _expr("z * 2")},
+            {"name": "z", "type": "UInt64"},
+        ])],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `z` UInt64;",
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT z + 1;",
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `c` UInt64 MATERIALIZED z * 2;",
+    ]
+
+
+# No order of the two MODIFYs applies when both DEFAULTs need their own type of `a`.
+def test_keeps_key_order_when_the_old_and_the_new_default_both_read_the_column() -> None:
+    assert _sqls(
+        [_t([{"name": "a", "type": "String"}, {"name": "b", "type": "UInt64", "default": _expr("length(a)")}])],
+        [_t([{"name": "a", "type": "UInt64"}, {"name": "b", "type": "UInt64", "default": _expr("a + 1")}])],
+    ) == ["ALTER TABLE app.t MODIFY COLUMN `a` UInt64;", "ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT a + 1;"]
+
+
+# Moving MODIFY `a` behind `b` must not move it behind `z`, whose new
+# DEFAULT needs the new type and which ran after it before.
+def test_a_statement_whose_old_and_new_default_both_read_the_column_keeps_its_side_of_the_type_change() -> None:
+    assert _sqls(
+        [_t([
+            {"name": "a", "type": "String"},
+            {"name": "b", "type": "UInt64", "default": _expr("length(a)")},
+            {"name": "z", "type": "UInt64", "default": _expr("length(toString(a))")},
+        ])],
+        [_t([
+            {"name": "a", "type": "UInt64"},
+            {"name": "b", "type": "UInt64", "default": _expr("0")},
+            {"name": "z", "type": "UInt64", "default": _expr("a + 1")},
+        ])],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT 0;",
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64;",
+        "ALTER TABLE app.t MODIFY COLUMN `z` UInt64 DEFAULT a + 1;",
+    ]
+
+
+# `b` would wait for `a`, `z` for `b`, and `a` already waits for `z`: the
+# edge the sort already satisfies goes in, the other is left out.
+def test_keeps_the_sorted_order_when_two_type_change_edges_conflict() -> None:
+    assert _sqls(
+        [_t([{"name": "a", "type": "UInt64", "default": _expr("toUInt64(b)")}, {"name": "b", "type": "UInt8"}])],
+        [_t([
+            {"name": "a", "type": "UInt64", "default": _expr("z")},
+            {"name": "b", "type": "UInt16"},
+            {"name": "z", "type": "UInt64", "default": _expr("toUInt64(b)")},
+        ])],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt16;",
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `z` UInt64 DEFAULT toUInt64(b);",
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT z;",
+    ]
+
+
+# Holding `a` and `b` behind `x` would run `c DEFAULT a` while the old
+# `a DEFAULT b` and `b DEFAULT c` stand, so the sorted order stays.
+def test_keeps_the_sorted_order_when_the_type_change_edges_would_close_a_cycle_of_expressions() -> None:
+    assert _sqls(
+        [_t([
+            {"name": "a", "type": "UInt64", "default": _expr("b")},
+            {"name": "b", "type": "UInt64", "default": _expr("c")},
+            {"name": "c", "type": "UInt64", "default": _expr("0")},
+            {"name": "x", "type": "UInt32"},
+        ])],
+        [_t([
+            {"name": "a", "type": "UInt64", "default": _expr("x")},
+            {"name": "b", "type": "UInt64", "default": _expr("x")},
+            {"name": "c", "type": "UInt64", "default": _expr("a")},
+            {"name": "x", "type": "UInt64"},
+        ])],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT x;",
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT x;",
+        "ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT a;",
+        "ALTER TABLE app.t MODIFY COLUMN `x` UInt64;",
+    ]
+
+
+# The TTL edges would run `b` first, and the unchanged `c` would then add
+# two DateTimes: type changes keep their order, so the sorted order stays.
+def test_keeps_the_sorted_order_when_it_would_reorder_two_type_changes() -> None:
+    assert _sqls(
+        [_t(
+            [
+                {"name": "a", "type": "DateTime"},
+                {"name": "b", "type": "UInt32"},
+                {"name": "c", "type": "String", "default": _expr("toString(a + b)")},
+            ],
+            ttl="toDateTime(toUInt32(a))",
+        )],
+        [_t(
+            [
+                {"name": "a", "type": "UInt32"},
+                {"name": "b", "type": "DateTime"},
+                {"name": "c", "type": "String", "default": _expr("toString(a + b)")},
+            ],
+            ttl="toDateTime(toUInt32(b))",
+        )],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt32;",
+        "ALTER TABLE app.t MODIFY COLUMN `b` DateTime;",
+        "ALTER TABLE app.t MODIFY TTL toDateTime(toUInt32(b));",
+    ]
+
+
+# The unchanged `c DEFAULT if(id = 0, a, b)` sees the types of `a` and `b`
+# in the order their changes run, so that order stays.
+def test_type_changes_keep_their_order_among_themselves() -> None:
+    assert _sqls(
+        [_t([
+            {"name": "a", "type": "Int64"},
+            {"name": "b", "type": "UInt32"},
+            {"name": "c", "type": "UInt64", "default": _expr("if(id = 0, a, b)")},
+            {"name": "d", "type": "UInt64", "default": _expr("toUInt64(a)")},
+        ])],
+        [_t([
+            {"name": "a", "type": "UInt32"},
+            {"name": "b", "type": "UInt64"},
+            {"name": "c", "type": "UInt64", "default": _expr("if(id = 0, a, b)")},
+            {"name": "d", "type": "UInt64", "default": _expr("0")},
+        ])],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `d` UInt64 DEFAULT 0;",
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt32;",
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64;",
+    ]
+
+
+# Each ADD COLUMN appends its column, so moving `a` behind the type change
+# and past the ADD of `b` would change the table's column order.
+def test_keeps_the_sorted_order_when_it_would_change_the_order_of_the_add_columns() -> None:
+    assert _sqls(
+        [_t([{"name": "z", "type": "UInt32"}])],
+        [_t([
+            {"name": "z", "type": "UInt64"},
+            {"name": "a", "type": "UInt64", "default": _expr("toUInt64(z)")},
+            {"name": "b", "type": "String"},
+        ])],
+    ) == [
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT toUInt64(z);",
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `b` String;",
+        "ALTER TABLE app.t MODIFY COLUMN `z` UInt64;",
+    ]
+
+
+# Moving ADD `n` and ADD `k` behind the type change would run ADD `k`
+# while `k.x` exists, which ClickHouse skips: ADDs and DROPs keep their order.
+def test_keeps_the_sorted_order_when_it_would_move_an_add_past_a_drop() -> None:
+    assert _sqls(
+        [_t([
+            {"name": "a", "type": "UInt64", "default": _expr("length(`k.x`)")},
+            {"name": "k.x", "type": "Array(UInt32)"},
+            {"name": "z", "type": "UInt32"},
+        ])],
+        [_t([
+            {"name": "a", "type": "UInt64", "default": _expr("z")},
+            {"name": "k", "type": "UInt64", "default": _expr("n")},
+            {"name": "n", "type": "UInt64"},
+            {"name": "z", "type": "UInt64"},
+        ])],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT z;",
+        "ALTER TABLE app.t DROP COLUMN IF EXISTS `k.x`;",
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `n` UInt64;",
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `k` UInt64 DEFAULT n;",
+        "ALTER TABLE app.t MODIFY COLUMN `z` UInt64;",
+    ]
+
+
+def test_changes_the_type_after_the_table_ttl_stops_reading_the_column() -> None:
+    assert _sqls(
+        [_t([{"name": "a", "type": "String"}], ttl="toDateTime(id) + toIntervalDay(length(a))")],
+        [_t([{"name": "a", "type": "UInt64"}], ttl="toDateTime(id) + INTERVAL 1 DAY")],
+    ) == ["ALTER TABLE app.t MODIFY TTL toDateTime(id) + INTERVAL 1 DAY;", "ALTER TABLE app.t MODIFY COLUMN `a` UInt64;"]
+
+
+# Moving MODIFY `a` behind the TTL change would move it past the ADD INDEX
+# that sits between them, so the sorted order stays.
+def test_keeps_the_sorted_order_when_a_statement_would_move_past_another_alter() -> None:
+    assert _sqls(
+        [_t([{"name": "a", "type": "String"}], ttl="toDateTime(id) + toIntervalDay(length(a))")],
+        [_t(
+            [{"name": "a", "type": "UInt64"}],
+            ttl="toDateTime(id) + INTERVAL 1 DAY",
+            indexes=[{"name": "idx", "expression": "a", "type": "minmax", "granularity": 1}],
+        )],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64;",
+        "ALTER TABLE app.t ADD INDEX IF NOT EXISTS `idx` (a) TYPE minmax GRANULARITY 1;",
+        "ALTER TABLE app.t MODIFY TTL toDateTime(id) + INTERVAL 1 DAY;",
+    ]
+
+
+def test_a_table_with_a_column_rename_keeps_its_type_change_order() -> None:
+    previous: list[SchemaDefinition] = [_t([
+        {"name": "a", "type": "String"},
+        {"name": "b", "type": "UInt64", "default": _expr("length(a)")},
+        {"name": "old", "type": "UInt64"},
+    ])]
+    next_: list[SchemaDefinition] = [_t([
+        {"name": "a", "type": "UInt64"},
+        {"name": "b", "type": "UInt64", "default": _expr("0")},
+        {"name": "new", "type": "UInt64"},
+    ])]
+    rename = ColumnRenameSuggestion.model_validate({
+        "database": "app", "table": "t", "from": "old", "to": "new", "reason": "test",
+        "dropOperationKey": "table:app.t:column:old", "addOperationKey": "table:app.t:column:new",
+        "confirmationSQL": "RENAME",
+    })
+    operations = [
+        MigrationOperation(type="alter_table_modify_column", key="table:app.t:column:a", risk="caution", sql="MODIFY a"),
+        MigrationOperation(type="alter_table_modify_column", key="table:app.t:column:b", risk="caution", sql="MODIFY b"),
+        MigrationOperation(type="alter_table_rename_column", key=column_rename_key(rename), risk="caution", sql="RENAME"),
+    ]
+
+    def order(renames: list[ColumnRenameSuggestion]) -> list[str]:
+        return [
+            op.sql
+            for op in order_column_statements(operations, previous=previous, next_=next_, renames=renames)
+        ]
+
+    assert order([rename]) == ["MODIFY a", "MODIFY b", "RENAME"]
+    assert order([]) == ["MODIFY b", "MODIFY a", "RENAME"]

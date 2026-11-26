@@ -62,6 +62,7 @@ from chkit.clickhouse.client import (
     SUBMIT_CONNECT_TIMEOUT_SECONDS,
     ClickHouseClient,
     QueryStatus,
+    SubmitNotSentError,
     clickhouse_error_message,
 )
 from chkit.core.jsnum import js_math_round, js_number_to_string, js_to_fixed
@@ -594,6 +595,7 @@ def _start_and_poll(
             submission=submission,
             started_at=started_at,
             fingerprint=input_.fingerprint,
+            back_to_prepared=back_to_prepared,
         )
     except BaseException as error:
         if submission.abandon_unsent() and not polling:
@@ -747,6 +749,7 @@ def _poll_until_terminal(
     submission: _Submission | None,
     started_at: str,
     fingerprint: str,
+    back_to_prepared: Callable[[BaseException], None] | None = None,
 ) -> AsyncApplyResult:
     """Poll, then wait for the submit request to close, as TS does.
 
@@ -764,6 +767,7 @@ def _poll_until_terminal(
             submission=submission,
             started_at=started_at,
             fingerprint=fingerprint,
+            back_to_prepared=back_to_prepared,
         )
     except Exception:
         # A run that stopped without an outcome does not wait for a submit
@@ -789,15 +793,38 @@ def _poll(  # noqa: PLR0912, PLR0915 - one branch per poll outcome, as in TS
     submission: _Submission | None,
     started_at: str,
     fingerprint: str,
+    back_to_prepared: Callable[[BaseException], None] | None,
 ) -> AsyncApplyResult:
     poll_started_at = time.monotonic()
     transient_errors = 0
     # Polls in a row that found the query neither running nor in query_log,
     # however polling started (#767).
     unknown_polls = 0
+    # Whether a poll found the query on the server: then its submit was sent,
+    # whatever its error says (#800).
+    seen_on_server = False
 
     while True:
         time.sleep(input_.poll_interval_seconds)
+        # A submit the executor proved was never sent (a refused connect, a
+        # failed host lookup) ran nothing: the attempt goes back to prepared and
+        # the run stops, so a re-run submits it again without an abandon (#800).
+        not_sent = submission.error if submission is not None else None
+        if (
+            submission is not None
+            and isinstance(not_sent, SubmitNotSentError)
+            and not seen_on_server
+            and back_to_prepared is not None
+        ):
+            submission.abandon()
+            back_to_prepared(not_sent)
+            msg = (
+                f"Async migration step {input_.operation_type} (query_id {query_id}) was "
+                "not sent: the submit request never reached ClickHouse "
+                f"({_describe_error(not_sent)}), so it was not submitted. Re-run "
+                "`chkit migrate --apply`: an attempt that was never sent runs again."
+            )
+            raise RuntimeError(msg) from not_sent
         try:
             status = input_.client.query_status(
                 query_id, after_time=poll_after_time, include_before_start=True
@@ -856,6 +883,9 @@ def _poll(  # noqa: PLR0912, PLR0915 - one branch per poll outcome, as in TS
                     f"{unknown_polls}\u00d7 in a row",
                 )
             unknown_polls = 0
+        # After the final check too: it can find the query (#800).
+        if status.status != "unknown":
+            seen_on_server = True
 
         if status.status == "finished":
             finished_op = OperationState(
