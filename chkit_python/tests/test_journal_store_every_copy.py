@@ -15,6 +15,7 @@ from chkit.cli.commands.migrate_async_apply import AsyncApplyInput, apply_async_
 from chkit.cli.commands.migrate_errors import MigrateError
 from chkit.cli.journal_store import EveryCopyRead, JournalStore, OperationState, every_copy_read
 from chkit.clickhouse.client import QueryStatus
+from chkit.clickhouse.replicas import ReplicaFanout
 
 
 def _row(replica: str, applied_at: str, members: list[str] | None = None) -> dict[str, Any]:
@@ -140,10 +141,14 @@ class _TopologyClient:
 
 
 def _store(
-    every_copy: Callable[[], list[dict[str, Any]]], engine: str = "ReplacingMergeTree"
+    every_copy: Callable[[], list[dict[str, Any]]],
+    engine: str = "ReplacingMergeTree",
+    cluster: str | None = "c",
 ) -> tuple[JournalStore, _TopologyClient]:
+    # A journal that is not replicated is read as one copy only on a declared
+    # cluster (#802).
     client = _TopologyClient(every_copy, engine)
-    return JournalStore(cast(Any, client)), client
+    return JournalStore(cast(Any, client), None if engine.startswith("Replicated") else cluster), client
 
 
 def test_one_server_answering_with_string_cells_is_covered_with_its_prepared_record() -> None:
@@ -153,12 +158,31 @@ def test_one_server_answering_with_string_cells_is_covered_with_its_prepared_rec
     assert read.op is not None
     assert read.op.query_id == "qid"
     assert read.op.last_error == "prepared under its own query id; not submitted yet"
-    assert "clusterAllReplicas('default', view(SELECT toString(serverUUID())" in client.reads[0]
+    assert "clusterAllReplicas('c', view(SELECT toString(serverUUID())" in client.reads[0]
     # An unavailable server fails the read; no limit cuts the reply short.
     settings = client.read_settings[0] or {}
     assert settings["skip_unavailable_shards"] == 0
     assert settings["result_overflow_mode"] == "throw"
     assert settings["read_overflow_mode"] == "throw"
+
+
+def test_not_replicated_without_a_declared_cluster_is_not_covered_and_reads_nothing() -> None:
+    # #802: behind a load balancer over independent servers, each lists only
+    # itself in its own clusters, so the one that answers proves nothing about
+    # the copies on the others.
+    store, client = _store(lambda: [_copy(_UUID_A)], cluster=None)
+    assert store.read_operation_on_every_copy("m.sql", 0) == EveryCopyRead(covered=False, op=None)
+    assert client.reads == []
+
+
+def test_a_declared_cluster_is_read_as_declared_even_when_empty() -> None:
+    # As in TS: an empty cluster is declared, and names no server (#802).
+    client = _TopologyClient(lambda: [_copy(_UUID_A)])
+    override = ReplicaFanout(cluster="", replicas=1)
+    JournalStore(cast(Any, client), fanout_override=override).read_operation_on_every_copy(
+        "m.sql", 0
+    )
+    assert "clusterAllReplicas('', view(" in client.reads[0]
 
 
 def test_a_replicated_read_with_string_cells_is_covered_with_its_record() -> None:
@@ -253,20 +277,28 @@ def _unreachable() -> list[dict[str, Any]]:
 
 
 @pytest.mark.parametrize(
-    "every_copy",
-    [lambda: [_copy(_UUID_A), _copy(_UUID_A)], _unreachable],
-    ids=["one-server-twice", "added-server-unreachable"],
+    ("every_copy", "cluster"),
+    [
+        (lambda: [_copy(_UUID_A), _copy(_UUID_A)], "c"),
+        (_unreachable, "c"),
+        (lambda: [_copy(_UUID_A)], None),
+    ],
+    ids=["one-server-twice", "added-server-unreachable", "one-server-no-declared-cluster"],
 )
 def test_recovery_through_the_journal_store_submits_nothing(
-    every_copy: Callable[[], list[dict[str, Any]]], monkeypatch: pytest.MonkeyPatch
+    every_copy: Callable[[], list[dict[str, Any]]],
+    cluster: str | None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#767 (round 7): through the real journal store, a fan-out that answers
     one server twice, or that a server added since cannot answer, never lets a
-    prepared attempt run again: the run stops with nothing submitted."""
+    prepared attempt run again: the run stops with nothing submitted. Nor does
+    one server answering for a journal that is not replicated, without a
+    declared cluster (#802): behind a load balancer it may not be the only one."""
     monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
     client = _RecoveryClient(every_copy)
     client.submitted = []
-    store = JournalStore(cast(Any, client))
+    store = JournalStore(cast(Any, client), cluster)
     with pytest.raises(MigrateError) as info:
         apply_async_statement(
             AsyncApplyInput(

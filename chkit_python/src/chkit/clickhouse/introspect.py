@@ -417,7 +417,13 @@ SELECT database, name, engine, comment
 FROM system.tables
 WHERE is_temporary = 0
   AND database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA')
-  AND NOT startsWith(name, '_chkit_')\
+  AND NOT startsWith(name, '_chkit_')
+  AND (database, name) NOT IN (
+    SELECT database, arrayJoin([
+      concat('.inner_id.', toString(uuid)),
+      concat('.tmp.inner_id.', toString(uuid))
+    ]) FROM system.tables WHERE engine = 'MaterializedView'
+  )\
 """
 
 

@@ -67,6 +67,10 @@ from chkit.cli.commands.generate_rename_mappings import (
     resolve_active_table_mappings,
 )
 from chkit.cli.config_loader import load_config
+from chkit.cli.data_copy_warnings import (
+    collect_data_copy_warnings,
+    collect_migration_data_copy_warnings,
+)
 from chkit.cli.help import TABLE_FLAG_HELP
 from chkit.cli.hook_flags import passed_flags
 from chkit.cli.json_output import emit_json, emit_json_error
@@ -594,6 +598,12 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     )
 
     warnings = [
+        *collect_migration_data_copy_warnings(migrations_dir),
+        *(
+            warning
+            for op in plan.operations
+            for warning in collect_data_copy_warnings(op.sql, op.key, op.type, op.mode)
+        ),
         *(issue.message for issue in collect_definition_warnings(schema_canonical)),
         *detect_dictionary_password_warnings(plan),
         *detect_experimental_codec_warnings(plan),

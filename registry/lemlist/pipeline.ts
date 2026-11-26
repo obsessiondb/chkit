@@ -1,4 +1,4 @@
-import { definePipeline, defineStream, fullSync } from '@chkit/plugin-ingest'
+import { definePipeline, defineStream, fullSync } from '@chkit/plugin-sync'
 
 import { lemlistConfig, type LemlistReaderConfig } from './config.js'
 import { createActivityWindow, lemlist_activitiesRaw, readActivities } from './sources/activities.js'

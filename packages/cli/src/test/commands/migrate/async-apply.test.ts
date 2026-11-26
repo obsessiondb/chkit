@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
 
 import type { ClickHouseExecutor, ClickHouseSettings, QueryStatus, QueryStatusOptions } from '@chkit/clickhouse'
 
@@ -996,6 +996,45 @@ describe('applyAsyncStatement', () => {
     expect(writes).toEqual([])
   })
 
+  // #810: a run with CHKIT_MIGRATE_LOCK=off holds no lock either, so it stops
+  // the same way unless CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK accepts the risk.
+  describe('with CHKIT_MIGRATE_LOCK=off', () => {
+    const saved = { lock: process.env.CHKIT_MIGRATE_LOCK, accept: process.env.CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK }
+    const restore = (name: string, value: string | undefined) => {
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
+    afterEach(() => {
+      restore('CHKIT_MIGRATE_LOCK', saved.lock)
+      restore('CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK', saved.accept)
+    })
+
+    test('a run stops before an async statement with async_needs_lock', async () => {
+      process.env.CHKIT_MIGRATE_LOCK = 'off'
+      delete process.env.CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK
+      const fake = createFakeExecutor([{ status: 'unknown' }])
+      const { store, writes } = createFakeJournalStore(null)
+
+      await expect(
+        applyAsyncStatement({ ...BASE_INPUT, db: fake.db, journalStore: store, log: () => {}, sleep: NO_SLEEP, now: FIXED_NOW }),
+      ).rejects.toMatchObject({ code: 'async_needs_lock', message: expect.stringContaining('CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK=1') })
+      expect(fake.submitCalls).toEqual([])
+      expect(writes).toEqual([])
+    })
+
+    test('CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK=1 submits the statement', async () => {
+      process.env.CHKIT_MIGRATE_LOCK = 'off'
+      process.env.CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK = '1'
+      const fake = createFakeExecutor([{ status: 'unknown' }, { status: 'finished', writtenRows: 1, durationMs: 10 }])
+      const { store } = createFakeJournalStore(null)
+
+      const result = await applyAsyncStatement({ ...BASE_INPUT, db: fake.db, journalStore: store, log: () => {}, sleep: NO_SLEEP, now: FIXED_NOW })
+
+      expect(result.kind).toBe('completed')
+      expect(fake.submitCalls).toHaveLength(1)
+    })
+  })
+
   // #767 (round 2): an attached attempt that disappears from system.processes
   // without a query_log entry stops the run too, instead of polling forever.
   test('an attach that polls unknown past the budget stops with async_outcome_unknown', async () => {
@@ -1871,6 +1910,8 @@ describe('applyAsyncStatement re-run of a started step', () => {
     await expect(run).rejects.toThrow(
       /the ClickHouse user cannot read system\.query_log, which tells whether the previous attempt finished \(Code: 497\..*\)\. Nothing was resubmitted and no before-retry SQL ran\. Grant SELECT ON system\.query_log to the user; until then a re-run of `chkit migrate --apply` stops here too\./,
     )
+    // The attempt's outcome stays unknown (#782).
+    await expect(run).rejects.toMatchObject({ code: 'async_outcome_unknown' })
     expect(submitCalls).toEqual([])
     expect(commandCalls).toEqual([])
     expect(writes).toEqual([])
@@ -2031,17 +2072,20 @@ describe('applyAsyncStatement re-run of a started step', () => {
 
 // #767 (round 7): through the real journal store, a fan-out that answers one
 // server twice, or that a server added since cannot answer, never lets a
-// prepared attempt run again: the run stops with nothing submitted.
+// prepared attempt run again: the run stops with nothing submitted. Nor
+// does one server answering for a journal that is not replicated, without a
+// declared cluster (#802): behind a load balancer it may not be the only one.
 describe('applyAsyncStatement recovery through the journal store', () => {
   const UUID_A = '2dea4dea-c7d6-439c-b8ef-5eaa1d275f14'
   const operations = JSON.stringify([{ operation_index: 0, operation_key: BASE_INPUT.operationKey, operation_type: BASE_INPUT.operationType, query_id: 'prepared-id', status: 'started', started_at: '2026-05-26 10:00:00.000', finished_at: null, last_error: PREPARED_RECORD_MARKER }])
   const copy = { replica: UUID_A, members: JSON.stringify([UUID_A]), present: '1', applied_at: '2026-05-26 10:00:00.000', operations, operation_fingerprints: '[]' }
 
-  for (const [label, everyCopy] of [
-    ['one server answering twice', () => [copy, copy]],
+  for (const [label, everyCopy, cluster] of [
+    ['one server answering twice', () => [copy, copy], 'c'],
     ['a server added since that cannot be reached', () => {
       throw new Error('Code: 279. ALL_CONNECTION_TRIES_FAILED')
-    }],
+    }, 'c'],
+    ['one server answering without a declared cluster', () => [copy], undefined],
   ] as const) {
     test(`${label}: nothing is submitted`, async () => {
       const submits: string[] = []
@@ -2062,7 +2106,7 @@ describe('applyAsyncStatement recovery through the journal store', () => {
       } as unknown as ClickHouseExecutor
 
       await expect(
-        applyAsyncStatement({ ...BASE_INPUT, db, journalStore: createJournalStore(db), log: () => {}, sleep: NO_SLEEP, now: FIXED_NOW }),
+        applyAsyncStatement({ ...BASE_INPUT, db, journalStore: createJournalStore(db, cluster), log: () => {}, sleep: NO_SLEEP, now: FIXED_NOW }),
       ).rejects.toMatchObject({ code: 'async_outcome_unknown', message: expect.stringContaining('query_id prepared-id') })
       expect(submits).toEqual([])
     })

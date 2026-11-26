@@ -7,7 +7,7 @@ sidebar:
 
 Installs an editable provider template into a TypeScript project, including its schema, ingestion readers, environment examples, and required packages.
 
-This command belongs to [chkit Sync (beta)](/sync/). Schema management does not require provider templates.
+This command belongs to [chkit Sync (beta)](/sync/). It is TypeScript only: chkit-py has no `chkit add` (see [Differences from the TypeScript version](/python/overview/#differences-from-the-typescript-version)). Schema management does not require provider templates.
 
 ## Synopsis
 
@@ -44,7 +44,7 @@ The installer validates the artifact, file hashes, running CLI version, and decl
 The install plan can include:
 
 - Provider files under the declared root or `--path`.
-- A new config, or edits that register `ingest()` and include the provider entry in an existing config.
+- A new config, or edits that register `sync()` and include the provider entry in an existing config.
 - Explicit provider re-exports when the project already has an `entry` module.
 - Required packages in `package.json` and missing example values in `.env.example`.
 - Provenance, version, and installed file hashes in `.chkit/registry-lock.json`.
@@ -88,7 +88,7 @@ If the original reference was pinned, keep that version pin. A bare name remains
 
 ### Database and provider access
 
-Installation does not run migrations, query the provider API, start ingestion, or schedule future runs. Configure credentials, inspect `chkit ingest list`, and follow the [template first-run workflow](/api-sync/templates/#first-run).
+Installation does not run migrations, query the provider API, start ingestion, or schedule future runs. Configure credentials, inspect `chkit sync list`, and follow the [template first-run workflow](/api-sync/templates/#first-run).
 
 ## Examples
 
@@ -178,6 +178,6 @@ The same command with `--dry-run` returns `dryRun: true`. A first install report
 
 - [Apps & integrations](/integrations/): browse apps and their complete sync guides.
 - [`chkit registry`](/cli/registry/): discover, inspect, and build templates.
-- [`chkit ingest`](/cli/ingest/): inspect and run the installed pipeline.
+- [`chkit sync`](/cli/sync/): inspect and run the installed pipeline.
 - [`chkit generate`](/cli/generate/): generate destination migrations.
 - [`chkit migrate`](/cli/migrate/): review and apply the destination schema.

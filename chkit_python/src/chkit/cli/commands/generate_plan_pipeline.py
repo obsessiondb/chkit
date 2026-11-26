@@ -18,6 +18,8 @@ from chkit.cli.commands.generate_rename_mappings import (
     DictionaryRenameMapping,
     TableRenameMapping,
 )
+from chkit.core.column_order import is_column_statement, order_column_statements
+from chkit.core.column_reads import column_rename_key
 from chkit.core.identifier import quote_identifier, render_identifier, render_qualified_name
 from chkit.core.model import (
     ColumnRenameSuggestion,
@@ -29,7 +31,6 @@ from chkit.core.model import (
     TableDefinition,
     _RiskSummary,
 )
-from chkit.core.planner import column_rename_key, is_column_statement, order_column_statements
 
 # Rank used to order operations within a plan. Drops happen first so the
 # subsequent create/alter steps see a clean slate; rename comes after

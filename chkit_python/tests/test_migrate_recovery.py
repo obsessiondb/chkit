@@ -68,6 +68,7 @@ from chkit.cli.migration_store import MigrationJournalEntry, checksum_sql
 from chkit.cli.safety_markers import (
     MigrationOperationSummary,
     extract_migration_operation_summaries,
+    extract_statement_operations,
 )
 from chkit.cli.table_scope import TableScope
 from chkit.clickhouse.client import QueryResult, QueryStatus
@@ -227,7 +228,7 @@ def test_statement_identity_uses_marker_or_position() -> None:
     assert statement_identity(operations, 1) == StatementIdentity(
         type="sql_statement", key="statement:1", marked=False
     )
-    assert len(statement_identities(operations, [None, None])) == 2
+    assert len(statement_identities(operations, [None, None], operations)) == 2
 
 
 def test_verify_retry_edit_accepts_kept_completed_prefix() -> None:
@@ -258,7 +259,7 @@ def test_verify_retry_edit_rejects_missing_statement() -> None:
 
 def test_verify_retry_edit_matches_unmarked_statements_by_position() -> None:
     result = verify_retry_edit(
-        [op(0, "completed"), op(1, "completed")], statement_identities([], [None, None, None])
+        [op(0, "completed"), op(1, "completed")], statement_identities([], [None, None, None], [])
     )
     assert result == RetryEditOk(completed=2, unmarked_completed=2, position_only_completed=2, resume_index=2)
 
@@ -423,6 +424,126 @@ def test_rebase_in_progress_state_keeps_completed_and_unchanged() -> None:
             "operations": [op(0, "completed", A), op(1, "failed", B)],
         }
     )
+
+
+# Releases before #831 paired the n-th marker with the n-th statement, and the
+# journal names the marker they gave each statement. After an upgrade, a
+# --retry of such an in-progress migration still matches those records.
+def _order_paired_file(failing: str) -> str:
+    return "\n".join(
+        [
+            "CREATE TABLE db.a (id UInt64) ENGINE = MergeTree ORDER BY id;",
+            "-- operation: load_table_data key=table:db.a risk=caution mode=async",
+            "INSERT INTO db.a SELECT number FROM numbers(10);",
+            failing,
+        ]
+    )
+
+
+def _file_identities(sql: str) -> list[StatementIdentity]:
+    return statement_identities(
+        extract_statement_operations(sql),
+        [None for _ in extract_executable_statements(sql)],
+        extract_migration_operation_summaries(sql),
+    )
+
+
+# What the earlier release recorded: statement 1 ran as the load, statement 2 unmarked.
+_ORDER_PAIRED_RECORDS = [op(0, "completed", LOAD, query_id="q-0"), op(1, "completed"), op(2, "failed")]
+
+
+def test_order_paired_statements_keep_their_own_markers_now() -> None:
+    assert [(i.type, i.key) for i in _file_identities(_order_paired_file("SELECT 2;"))] == [
+        ("sql_statement", "statement:0"),
+        (LOAD.type, LOAD.key),
+        ("sql_statement", "statement:2"),
+    ]
+
+
+def test_retry_accepts_completed_statements_under_the_marker_they_were_recorded_with() -> None:
+    result = verify_retry_edit(_ORDER_PAIRED_RECORDS, _file_identities(_order_paired_file("SELECT 2;")))
+    assert result == RetryEditOk(
+        completed=2, unmarked_completed=1, position_only_completed=1, resume_index=2
+    )
+
+
+def test_retry_refuses_a_recorded_marker_neither_pairing_gives_the_statement() -> None:
+    result = verify_retry_edit(
+        [op(0, "completed", A)], _file_identities(_order_paired_file("SELECT 2;"))
+    )
+    assert isinstance(result, RetryEditMismatch)
+
+
+def test_retry_checks_the_order_pairing_as_a_whole_so_a_shared_marker_keeps_its_count() -> None:
+    shared = "-- operation: alter_table_modify_column key=table:db.t:column:f risk=caution"
+    # The REMOVE DEFAULT that completed was deleted; only the MODIFY after it is left.
+    sql = "\n".join(["SELECT 0;", shared, "ALTER TABLE db.t MODIFY COLUMN f UInt64;"])
+    result = verify_retry_edit(
+        [op(0, "completed", MODIFY_F), op(1, "completed", MODIFY_F), op(2, "failed", MODIFY_F)],
+        _file_identities(sql),
+    )
+    assert isinstance(result, RetryEditMismatch)
+
+
+def test_rebase_drops_a_failed_record_only_the_order_pairing_matches() -> None:
+    sql = "\n".join(
+        [
+            "-- operation: load_table_data key=table:db.a risk=caution",
+            "-- INSERT INTO db.a SELECT bad;",
+            "/* replacement */",
+            "-- operation: load_table_data key=table:db.b risk=caution",
+            "-- before-retry: TRUNCATE TABLE db.b",
+            "INSERT INTO db.b SELECT 1;",
+        ]
+    )
+    state = in_progress([op(0, "failed", LOAD)], checksum="old")
+    rebased = rebase_in_progress_state(
+        state, checksum="new", identities=_file_identities(sql), applied_at="T"
+    )
+    assert rebased.operations == []
+
+
+def test_rebase_keeps_a_failed_attempt_of_the_same_sql_under_the_order_pairing() -> None:
+    sql = "\n".join(
+        [
+            "SELECT 0;",
+            "-- operation: load_table_data key=table:db.a risk=caution",
+            "-- before-retry: TRUNCATE TABLE db.a",
+            "INSERT INTO db.a SELECT number FROM numbers(10);",
+            "-- edited",
+        ]
+    )
+    fingerprints = [statement_fingerprint(s) for s in extract_executable_statements(sql)]
+    failed = op(1, "failed").model_copy(update={"fingerprint": fingerprints[1]})
+    state = in_progress([op(0, "completed", LOAD), failed], checksum="old")
+    identities = statement_identities(
+        extract_statement_operations(sql), fingerprints, extract_migration_operation_summaries(sql)
+    )
+    check = verify_retry_edit(state.operations, identities)
+    assert isinstance(check, RetryEditOk)
+    assert check.resume_index == 1
+    rebased = rebase_in_progress_state(state, checksum="new", identities=identities, applied_at="T")
+    assert rebased.operations == [op(0, "completed", LOAD), failed]
+    # A record of other SQL is another statement's attempt.
+    other = failed.model_copy(update={"fingerprint": "other"})
+    rebased_other = rebase_in_progress_state(
+        state.model_copy(update={"operations": [other]}),
+        checksum="new",
+        identities=identities,
+        applied_at="T",
+    )
+    assert rebased_other.operations == []
+
+
+def test_rebase_keeps_a_started_attempt_recorded_under_the_order_pairing() -> None:
+    state = in_progress([op(0, "started", LOAD, query_id="q-0")], checksum="old")
+    rebased = rebase_in_progress_state(
+        state,
+        checksum="new",
+        identities=_file_identities(_order_paired_file("SELECT 2;")),
+        applied_at="T",
+    )
+    assert rebased.operations == [op(0, "started", LOAD, query_id="q-0")]
 
 
 @pytest.mark.parametrize("fenced", [True, False])
@@ -1260,6 +1381,70 @@ def test_an_async_statement_without_a_readable_outcome_keeps_async_outcome_unkno
         "query_id legacy-query-id): the journal records an attempt of it"
         in info.value.message
     )
+    assert client.calls == []
+    assert store.writes == []
+
+
+class _FailedLookupAsyncClient(_NoOutcomeAsyncClient):
+    """The outcome lookup of the recorded async attempt fails."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self.error = error
+
+    def query_status(
+        self, _query_id: str, **_options: Any
+    ) -> QueryStatus:
+        raise self.error
+
+
+@pytest.mark.parametrize(
+    ("lookup_error", "text"),
+    [
+        (
+            RuntimeError("HTTP 504: gateway timeout"),
+            "could not check whether a previous attempt is still running "
+            "(HTTP 504: gateway timeout)",
+        ),
+        (
+            RuntimeError(
+                "Code: 497. DB::Exception: default: Not enough privileges. To execute "
+                "this query, it's necessary to have the grant SELECT(type, query_id) ON "
+                "system.query_log. (ACCESS_DENIED)"
+            ),
+            "the ClickHouse user cannot read system.query_log",
+        ),
+    ],
+    ids=["a gateway error", "denied system.query_log access"],
+)
+def test_an_async_statement_whose_fenced_attempt_lookup_fails_keeps_async_outcome_unknown(
+    tmp_path: Path, lookup_error: Exception, text: str
+) -> None:
+    """A lookup of a fenced attempt's outcome that fails leaves the outcome
+    unknown, so --json reports async_outcome_unknown, with the request's error
+    as the cause."""
+    statement = "INSERT INTO db.a SELECT 1;"
+    sql = f"-- operation: load_table_data key=table:db.a risk=safe mode=async\n{statement}\n"
+    attempt = op(0, "started", LOAD, query_id="fenced-query-id").model_copy(
+        update={
+            "last_error": "submitted under its own query id; a retry reads its outcome from "
+            "system.query_log",
+            "fingerprint": statement_fingerprint(statement),
+            "attempt_fenced": True,
+        }
+    )
+    store = FakeStore(in_progress([attempt], checksum=checksum_sql(sql)))
+    client = _FailedLookupAsyncClient(lookup_error)
+    with pytest.raises(MigrateError) as info:
+        _apply(_write(tmp_path, sql), cast(Any, client), store)
+    assert info.value.code == "async_outcome_unknown"
+    assert info.value.message.startswith("Migration m.sql failed at statement 1 of 1")
+    assert f"(query_id fenced-query-id): {text}" in info.value.message
+    # The stop's own error, then the request's.
+    stop = info.value.__cause__
+    assert isinstance(stop, MigrateError)
+    assert stop.code == "async_outcome_unknown"
+    assert stop.__cause__ is lookup_error
     assert client.calls == []
     assert store.writes == []
 

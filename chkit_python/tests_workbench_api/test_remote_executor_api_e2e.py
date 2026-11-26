@@ -44,6 +44,22 @@ _READS = 6
 _MIGRATION_CHECKSUM = "c1"
 
 
+def test_the_api_forwards_query_settings_to_clickhouse() -> None:
+    """Every write sends async_insert = 0 and wait_for_async_insert = 1 in the
+    request's settings (#804), so the API must hand them to ClickHouse. Two
+    values, so a profile default can't pass."""
+    remote = _connect()
+
+    def read(value: int) -> str:
+        rows = remote.query(
+            "SELECT toString(toUInt8(getSetting('async_insert'))) AS v",
+            settings={"async_insert": value},
+        ).rows
+        return str(rows[0]["v"])
+
+    assert [read(0), read(1)] == ["0", "1"]
+
+
 def test_submission_keeps_its_id_and_reads_running_on_every_replica() -> None:
     remote = _connect()
     query_id = f"chkit-e2e-py-{uuid.uuid4()}"

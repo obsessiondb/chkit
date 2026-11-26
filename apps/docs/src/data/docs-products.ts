@@ -10,7 +10,7 @@ export function getDocsProduct(slug: string): DocsProduct {
 	const path = slug.replace(/^\/+|\/+$/g, '').replace(/\.md$/, '');
 	return ['sync', 'ingestion', 'api-sync', 'integrations'].some(
 		(prefix) => path === prefix || path.startsWith(`${prefix}/`),
-	) || ['cli/ingest', 'cli/add', 'cli/registry', 'plugins/ingest'].includes(path)
+	) || ['cli/sync', 'cli/add', 'cli/registry', 'plugins/sync'].includes(path)
 		? 'ingestion'
 		: 'schema';
 }

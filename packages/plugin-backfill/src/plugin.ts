@@ -2,11 +2,12 @@ import { type createClickHouseExecutor, createStatelessClickHouseExecutor } from
 import { createPluginRunner, withFactoryDefaults } from '@chkit/core'
 
 import { BackfillInterruptedError, CHECKPOINT_VERSION, executeBackfill, untilAborted } from './async-backfill.js'
-import { buildChunkExecutionSql } from './chunking/sql.js'
+import { assertInsertSettingsKeepPinned, buildChunkExecutionSql, deliveryOverrideWarning, effectiveInsertSettings, type InsertSettings } from './chunking/sql.js'
 import { generateIdempotencyToken } from './chunking/utils/ids.js'
 import { BackfillConfigError } from './errors.js'
 import {
   CheckSchema,
+  insertSettingsFromOptions,
   PLAN_FLAGS,
   PLAN_FLAG_MAP,
   PLAN_ID_FLAGS,
@@ -30,7 +31,7 @@ import {
   type StatusOptions,
 } from './options.js'
 import { planPayload, statusPayload, cancelPayload, doctorPayload } from './payload.js'
-import { assertBackfillTargetSafe, assertPinnedInsertSettingsAccepted, assertReplayColumnsStillInsertable, buildBackfillPlan, unprovableTargetFailures } from './planner.js'
+import { assertBackfillTargetSafe, assertPinnedInsertSettingsAccepted, assertReplayColumnsStillInsertable, buildBackfillPlan, readPinnedSettingAliases, unprovableTargetFailures } from './planner.js'
 import { evaluateBackfillCheck } from './check.js'
 import { cancelBackfillRun, getBackfillDoctorReport, getBackfillStatus } from './queries.js'
 import {
@@ -74,6 +75,7 @@ async function runBackfill(input: {
   clickhouse: NonNullable<Parameters<typeof createClickHouseExecutor>[0]>
   print: (value: unknown) => void
   jsonMode: boolean
+  insertSettings?: InsertSettings
 }): Promise<number> {
   const { plan, stateDir } = await readPlan({
     planId: input.planId,
@@ -98,6 +100,10 @@ async function runBackfillLocked(
   paths: ReturnType<typeof backfillPaths>,
   signal: AbortSignal,
 ): Promise<number> {
+  // insertSettings that would undo what chkit writes on the INSERT are
+  // refused before anything is read or submitted.
+  const cutover = Boolean(plan.execution.cutoverKey?.length && plan.execution.targetColumns?.length)
+  assertInsertSettingsKeepPinned(input.insertSettings, undefined, { cutover })
   // Check for existing run state
   const existingRun = await readRun(paths.runPath)
 
@@ -156,8 +162,17 @@ async function runBackfillLocked(
       signal,
       () => new BackfillInterruptedError(`Backfill plan ${plan.planId}: interrupted.`),
     )
+    const aliases = await untilAborted(
+      readPinnedSettingAliases((sql, settings) => db.query(sql, settings)),
+      signal,
+      () => new BackfillInterruptedError(`Backfill plan ${plan.planId}: interrupted.`),
+    )
+    assertInsertSettingsKeepPinned(input.insertSettings, aliases, { cutover })
+    const insertSettings = effectiveInsertSettings(input.insertSettings, aliases)
+    const warning = deliveryOverrideWarning(insertSettings)
+    if (warning) process.stderr.write(`${warning}\n`)
     await untilAborted(
-      assertPinnedInsertSettingsAccepted({ planId: plan.planId, query: (sql, settings) => db.query(sql, settings) }),
+      assertPinnedInsertSettingsAccepted({ planId: plan.planId, query: (sql, settings) => db.query(sql, settings), insertSettings, cutover, token: plan.execution.requireIdempotencyToken && !cutover }),
       signal,
       () => new BackfillInterruptedError(`Backfill plan ${plan.planId}: interrupted.`),
     )
@@ -205,6 +220,7 @@ async function runBackfillLocked(
           mvReplayQueries: plan.execution.mvReplayQueries,
           targetColumns: plan.execution.targetColumns,
           cutoverKey: plan.execution.cutoverKey,
+          insertSettings,
           idempotencyToken: plan.execution.requireIdempotencyToken
             ? generateIdempotencyToken(plan.planId, planChunk.id)
             : '',
@@ -285,13 +301,14 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
   const runOptionsSchema = withFactoryDefaults(RunSchema, factoryOptions)
   const resumeOptionsSchema = withFactoryDefaults(ResumeSchema, factoryOptions)
   const statusOptionsSchema = withFactoryDefaults(StatusSchema, factoryOptions)
+  const pluginOptionsSchema = withFactoryDefaults(PluginConfigSchema, factoryOptions)
 
   return {
     manifest: {
       name: 'backfill',
       apiVersion: 1,
     },
-    optionsSchema: withFactoryDefaults(PluginConfigSchema, factoryOptions),
+    optionsSchema: pluginOptionsSchema,
     commands: [
       {
         name: 'plan',
@@ -329,8 +346,10 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
                 },
                 // ObsessionDB enables parallel replicas by default, which inflates
                 // aggregate results (count, GROUP BY). Disable for planning queries
-                // until ObsessionDB handles it at the profile level.
-                querySettings: { enable_parallel_replicas: 0 },
+                // until ObsessionDB handles it at the profile level. Under the name
+                // every ClickHouse version accepts: enable_parallel_replicas is only
+                // an alias of it from 24.10 on, and older servers reject it.
+                querySettings: { allow_experimental_parallel_reading_from_replicas: 0 },
               })
 
               const payload = planPayload(output)
@@ -403,6 +422,7 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
               concurrency: opts.concurrency,
               pollIntervalMs: opts.pollIntervalMs,
               stateDir: opts.stateDir,
+              insertSettings: insertSettingsFromOptions(pluginOptionsSchema.safeParse(context.rawOptions)),
               configPath: context.configPath,
               config: context.config,
               clickhouse: context.config.clickhouse,
@@ -437,6 +457,7 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
               concurrency: opts.concurrency,
               pollIntervalMs: opts.pollIntervalMs,
               stateDir: opts.stateDir,
+              insertSettings: insertSettingsFromOptions(pluginOptionsSchema.safeParse(context.rawOptions)),
               resume: { replayFailed: opts.replayFailed, acceptUnknown: opts.acceptUnknown },
               configPath: context.configPath,
               config: context.config,
