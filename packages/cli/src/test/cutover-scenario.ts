@@ -301,25 +301,19 @@ async function sortingKeys(target: CutoverTarget, project: CutoverProject): Prom
   return Object.fromEntries(result.map((row) => [row.name, row.sorting_key.replace(/^\(|\)$/g, '')]))
 }
 
-/** status, drift, check and generate --dryrun report nothing to do. */
+/** check (no pending migration, no drift) and generate --dryrun report nothing to do. */
 function assertChkitClean(project: CutoverProject): void {
-  const status = JSON.parse(expectOk(cli(project, ['status', '--json']), 'status').stdout) as { pending: number }
-  const drift = JSON.parse(expectOk(cli(project, ['drift', '--json']), 'drift').stdout) as {
-    drifted: boolean
-    missing: string[]
-    tableDrift: Array<{ table: string; reasonCodes: string[] }>
-  }
   const check = cli(project, ['check', '--json'])
+  const payload = JSON.parse(check.stdout) as { pendingCount: number; driftEvaluated: boolean; drifted: boolean }
   const plan = JSON.parse(expectOk(cli(project, ['generate', '--dryrun', '--json']), 'generate --dryrun').stdout) as { operationCount: number }
   const summary = {
-    pending: status.pending,
-    drifted: drift.drifted,
-    missing: drift.missing,
-    tableDrift: drift.tableDrift.map((table) => `${table.table}: ${table.reasonCodes.join(', ')}`),
     check: check.exitCode,
+    pending: payload.pendingCount,
+    driftEvaluated: payload.driftEvaluated,
+    drifted: payload.drifted,
     operations: plan.operationCount,
   }
-  if (JSON.stringify(summary) !== JSON.stringify({ pending: 0, drifted: false, missing: [], tableDrift: [], check: 0, operations: 0 })) {
+  if (JSON.stringify(summary) !== JSON.stringify({ check: 0, pending: 0, driftEvaluated: true, drifted: false, operations: 0 })) {
     throw new Error(`chkit not clean after the cutover: ${JSON.stringify(summary)}\n${formatTestDiagnostic('check', check)}`)
   }
 }
@@ -447,16 +441,27 @@ export async function runBackfillScenario(target: CutoverTarget, label: string):
 }
 
 /**
- * Fails every statement of the cutover once and resumes it with --retry, and
- * replays the statements whose acknowledgement can be lost: the snapshot
- * (re-taken after a TRUNCATE), the copy (skips what it wrote), the EXCHANGE
- * (refuses: it must never swap back) and the drop of the old table. Writers
- * insert the whole time; no row may be lost or duplicated.
+ * Which statements of the cutover fail once. `retries`: every statement whose
+ * retry runs other SQL than its first run (before-retry SQL, or the lookup of
+ * an async attempt), and the statement after each one whose acknowledgement
+ * is lost. A retry of any other statement only runs it again, which
+ * apply-resume.test.ts covers. `layout guards`: the EXCHANGE and the drop of
+ * the old table, whose guards compare the tables' layouts.
+ */
+export type RetryFailures = 'retries' | 'layout guards'
+
+/**
+ * Fails statements of the cutover once (see RetryFailures) and resumes them
+ * with --retry, and replays the statements whose acknowledgement can be lost:
+ * the snapshot (re-taken after a TRUNCATE), the copy (skips what it wrote),
+ * the EXCHANGE (refuses: it must never swap back) and the drop of the old
+ * table. Writers insert the whole time; no row may be lost or duplicated.
  */
 export async function runRetryScenario(
   target: CutoverTarget,
   label: string,
   change: CutoverChange = ORDER_BY_CHANGE,
+  failures: RetryFailures = 'retries',
 ): Promise<void> {
   const project = await createCutoverProject(target, label)
   const writers = startWriters(target, project, 1)
@@ -486,9 +491,15 @@ export async function runRetryScenario(
       cliAsync(project, ['migrate', '--apply', '--allow-destructive', '--json', ...(retry ? ['--retry', file] : [])])
     const write = (content: string) => writeFile(join(project.dir, 'chkit/migrations', file), content, 'utf8')
 
-    for (let step = 0; step < types.length; step += 1) {
+    const exchange = types.indexOf('exchange_tables')
+    const retryRunsOtherSql = (step: number) => /^-- before-retry:|^-- operation: .* mode=async\b/m.test(blocks[step + 1] as string)
+    const steps =
+      failures === 'layout guards'
+        ? [exchange, exchange + 1, dropOld]
+        : types.flatMap((_, step) => (retryRunsOtherSql(step) || replayed.has(step - 1) ? [step] : []))
+    for (const [attempt, step] of steps.entries()) {
       await write(injectFailure(blocks, step))
-      const failed = await migrate(step > 0)
+      const failed = await migrate(attempt > 0)
       if (failed.exitCode === 0 || !`${failed.stdout}${failed.stderr}`.includes(`injected failure at statement ${step + 1}`)) {
         throw new Error(formatTestDiagnostic(`statement ${step + 1} (${types[step]}) must fail`, failed))
       }

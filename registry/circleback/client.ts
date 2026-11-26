@@ -1,4 +1,4 @@
-import { HttpError, paginate, rawRows, type Page, type SourceContext } from '@chkit/plugin-ingest'
+import { HttpError, paginate, rawRows, type Page, type SourceContext } from '@chkit/plugin-sync'
 import { z } from 'zod'
 
 import { circlebackReaderConfigSchema, type CirclebackReaderConfig } from './config.js'

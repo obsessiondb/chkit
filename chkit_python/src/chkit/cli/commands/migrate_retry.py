@@ -19,7 +19,10 @@ from chkit.cli.commands.migrate_recovery import (
 )
 from chkit.cli.journal_store import MigrationRowState
 from chkit.cli.migration_store import checksum_sql
-from chkit.cli.safety_markers import extract_migration_operation_summaries
+from chkit.cli.safety_markers import (
+    extract_migration_operation_summaries,
+    extract_statement_operations,
+)
 from chkit.core.sql_fingerprint import statement_fingerprint
 from chkit.core.sql_splitter import extract_executable_statements
 
@@ -106,11 +109,12 @@ def resolve_retry(  # noqa: PLR0911 - one return per TS no-op reason
     # the statements that ran is checked by apply, against what the plugins
     # return, instead of here (#599).
     identities = statement_identities(
-        extract_migration_operation_summaries(sql),
+        extract_statement_operations(sql),
         [
             None if plugins_rewrite_statements else statement_fingerprint(statement)
             for statement in extract_executable_statements(sql)
         ],
+        extract_migration_operation_summaries(sql),
     )
     check = verify_retry_edit(state.operations, identities)
     if isinstance(check, RetryEditMismatch):

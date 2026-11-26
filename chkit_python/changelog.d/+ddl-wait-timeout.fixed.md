@@ -1,4 +1,3 @@
-**Behaviour change:** a DDL propagation wait that times out stops `migrate` with an error,
-as in TS (#464), instead of printing `⚠ DDL propagation wait failed` and recording the
-migration as applied. The wait errors use the TS names (`waitForTable: ... not yet
-visible`).
+`migrate` waits up to 30 seconds for DDL on every replica and repeats an unfinished propagation wait on resume; stalled requests stop at the deadline, programming errors fail immediately, and a timed-out column wait preserves the definition mismatch and releases its session.
+
+- Breaking: a propagation timeout now fails the migration instead of warning and recording it as applied.

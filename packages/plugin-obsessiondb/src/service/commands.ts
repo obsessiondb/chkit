@@ -88,14 +88,15 @@ export const SERVICE_COMMAND: PluginCommand = {
 		const print = (msg: string) => context.print(msg)
 		const [action] = serviceArgs(context.args)
 
-		if (
-			!action ||
-			action === 'help' ||
-			action === '--help' ||
-			action === '-h'
-		) {
+		if (!action) {
+			// One line, so `--json` prints one message, as in chkit-py (#781).
+			print('Usage: chkit plugin obsessiondb service <list|select|claim|alias> [args]')
+			return 1
+		}
+
+		if (action === 'help' || action === '--help' || action === '-h') {
 			printServiceUsage(print)
-			return action ? 0 : 1
+			return 0
 		}
 
 		if (action === 'list' || action === 'ls') {

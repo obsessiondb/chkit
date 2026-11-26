@@ -13,6 +13,8 @@ import {
 import { rejectionRunsNothing } from '../../runtime/safety-markers.js'
 import { CLI_VERSION } from '../../runtime/version.js'
 import { inProgressChecksumMismatchError, MigrateError } from './errors.js'
+import { asCleanup } from './interrupt.js'
+import { asyncWithoutLockAccepted, migrateLockDisabled } from './lock.js'
 import { assertCompletedStatement, hasStatementProgress } from './recovery.js'
 import type { QueryTracker } from './query-intents.js'
 
@@ -73,6 +75,8 @@ export interface AsyncApplyInput {
   queryTracker?: QueryTracker
   /** The run holds no migrate lock because the target database did not exist (#767). */
   locklessBootstrap?: boolean
+  /** Aborted by Ctrl-C: nothing more is sent, and polling stops. */
+  signal?: AbortSignal
   log: (line: string) => void
   pollIntervalMs?: number
   sleep?: (ms: number) => Promise<void>
@@ -169,6 +173,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
       // now gone. We only observe its eventual completion.
       submitPromise: null,
       startedAt: priorOpState.startedAt,
+      signal: input.signal,
     })
   }
 
@@ -199,6 +204,14 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
       `Async migration step ${operationType} (statement ${statementIndex + 1} of ${migrationName}) was not submitted: this run holds no migrate lock, because the target database did not exist when it started, and two runs without the lock could both submit it. The statements before it are recorded. Run chkit migrate --apply again: the database exists now, so that run takes the migrate lock and submits the statement.`,
     )
   }
+  // The same holds for a run with the lock turned off, unless the user
+  // accepts the risk (#810).
+  if (migrateLockDisabled() && !asyncWithoutLockAccepted()) {
+    throw new MigrateError(
+      'async_needs_lock',
+      `Async migration step ${operationType} (statement ${statementIndex + 1} of ${migrationName}) was not submitted: CHKIT_MIGRATE_LOCK is off, so this run holds no migrate lock, and two runs without the lock could both submit it. The statements before it are recorded. Unset CHKIT_MIGRATE_LOCK and run chkit migrate --apply again to submit it under the lock. When the lock cannot work on this target (migrate_lock_unverifiable) and no other migrate runs against it, set CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK=1 to submit it without the lock.`,
+    )
+  }
 
   // 5. Prior in-progress row exists but no replica runs the query → RETRY.
   // Run before-retry compensation, then resubmit forward under a new random
@@ -208,6 +221,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
   // (priorOpState.status === 'completed' was already returned above.)
   // Every attempt's id is random and its own, recorded before its submit
   // (#701, #767).
+  input.signal?.throwIfAborted()
   const attemptQueryId = randomUUID()
   // An attempt that was never sent ran nothing: it is submitted again without
   // the before-retry SQL, which runs only after a rejection or an abandon.
@@ -283,7 +297,8 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
   // again without an abandon (#767).
   const backToPrepared = async (error: unknown): Promise<void> => {
     try {
-      await journalStore.writeMigrationState(upsertOperation(baseState, attemptRecord(PREPARED_RECORD_MARKER), now))
+      // Cleanup: an interrupted run sends it too (#816).
+      await asCleanup(() => journalStore.writeMigrationState(upsertOperation(baseState, attemptRecord(PREPARED_RECORD_MARKER), now)))
     } catch (revertError) {
       throw new Error(notRevertedMessage(error, revertError, migrationName), { cause: error })
     }
@@ -294,7 +309,10 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     // Re-read so we have the row's actual stored applied_at (matters for
     // subsequent ReplacingMergeTree writes during polling).
     stateAfterStart = await journalStore.readMigrationState(migrationName)
+    input.signal?.throwIfAborted()
     await input.queryTracker?.recordAsync({ migration: migrationName, statementIndex, forwardSQL: sql, beforeRetry }, attemptQueryId)
+    // Ctrl-C before the submit: provably not sent.
+    input.signal?.throwIfAborted()
   } catch (error) {
     await backToPrepared(error)
     throw error
@@ -326,6 +344,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     abortSubmit: () => submitAbort.abort(),
     backToPrepared,
     startedAt,
+    signal: input.signal,
   })
 }
 
@@ -354,6 +373,8 @@ interface PollUntilTerminalInput {
   startedAt: string
   /** Whether an ExceptionBeforeStart of the statement shows it applied nothing (#767). */
   rejectionRunsNothing: boolean
+  /** Ctrl-C: polling stops, and the record stays as it is. */
+  signal?: AbortSignal
 }
 
 async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncApplyResult> {
@@ -410,9 +431,23 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
   // Whether a poll found the query on the server: then its submit was sent,
   // whatever its error says (#800).
   let seenOnServer = false
+  const signal = input.signal
+  // Ctrl-C ends the wait at once.
+  let onAbort: (() => void) | undefined
+  const interrupted = signal ? new Promise<void>((resolve) => {
+    onAbort = resolve
+    if (signal.aborted) resolve()
+    else signal.addEventListener('abort', onAbort, { once: true })
+  }) : undefined
+  const stopIfInterrupted = () => {
+    if (!signal?.aborted) return
+    abandonSubmit()
+    throw new Error(`Async migration step ${operationType} (statement ${statementIndex + 1} of ${migrationName}, query_id ${queryId}) was submitted, and the run was interrupted (SIGINT) before its outcome: the query keeps running on the server, its record stays, and a re-run attaches to it or reads its outcome.`)
+  }
   try {
     for (;;) {
-      await sleep(pollIntervalMs)
+      await (interrupted ? Promise.race([sleep(pollIntervalMs), interrupted]) : sleep(pollIntervalMs))
+      stopIfInterrupted()
       // A submit the executor proved was never sent (a refused connect, a
       // failed host lookup) ran nothing: the attempt goes back to prepared and
       // the run stops, so a re-run submits it again without an abandon (#800).
@@ -430,6 +465,7 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
         status = await db.queryStatus(queryId, { afterTime: pollAfterTime, includeBeforeStart: true })
         transientPollErrors = 0
       } catch (pollError) {
+        stopIfInterrupted()
         // The poll request itself failed (e.g. HTTP 524 gateway timeout). The async
         // query is very likely still running server-side, so don't abort the migration —
         // keep polling up to a bounded budget. A re-run re-attaches by the id the journal records.
@@ -444,6 +480,7 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
         )
         continue
       }
+      stopIfInterrupted()
       const elapsedSec = Math.floor((now() - pollStartedAt) / 1000)
 
       // A submit error (a gateway 524, a lost response) says nothing about
@@ -547,6 +584,7 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
       )
     }
   } finally {
+    if (onAbort) signal?.removeEventListener('abort', onAbort)
     if (submitPromiseGuarded && !submitAbandoned) {
       await submitPromiseGuarded.catch(() => {})
     }
@@ -582,7 +620,9 @@ function acceptChangedChecksum(
 // only system.processes is read: the check needs no outcome, and a fresh server
 // has no system.query_log until its first log flush. With one, the check also
 // reads the attempt's outcome from system.query_log (#672), and fails like an
-// unreadable replica when query_log cannot be read.
+// unreadable replica when query_log cannot be read. A failed outcome lookup
+// leaves the attempt's outcome unknown, so it stops with async_outcome_unknown
+// (#782).
 async function checkInFlight(
   db: ClickHouseExecutor,
   queryId: string,
@@ -598,15 +638,16 @@ async function checkInFlight(
     )
   } catch (error) {
     if (attemptLowerBound !== undefined && QUERY_LOG_ACCESS_DENIED.test(describeError(error))) {
-      throw new Error(
+      throw new MigrateError(
+        'async_outcome_unknown',
         `Async migration step ${operationType} (query_id ${queryId}): the ClickHouse user cannot read system.query_log, which tells whether the previous attempt finished (${describeError(error)}). Nothing was resubmitted and no before-retry SQL ran. Grant SELECT ON system.query_log to the user; until then a re-run of \`chkit migrate --apply\` stops here too.`,
         { cause: error },
       )
     }
-    throw new Error(
-      `Async migration step ${operationType} (query_id ${queryId}): could not check whether a previous attempt is still running (${describeError(error)}). Nothing was resubmitted and no before-retry SQL ran — re-run \`chkit migrate --apply\`.`,
-      { cause: error },
-    )
+    const message = `Async migration step ${operationType} (query_id ${queryId}): could not check whether a previous attempt is still running (${describeError(error)}). Nothing was resubmitted and no before-retry SQL ran — re-run \`chkit migrate --apply\`.`
+    throw attemptLowerBound === undefined
+      ? new Error(message, { cause: error })
+      : new MigrateError('async_outcome_unknown', message, { cause: error })
   }
 }
 

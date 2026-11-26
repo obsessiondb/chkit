@@ -1,6 +1,6 @@
 """Live coverage for recovering a migration that failed part-way (#233).
 
-Port of ``packages/cli/src/test/migrate-recovery.e2e.test.ts``: ``--retry``
+Port of ``packages/cli/src/test/migrate-recovery*.e2e.test.ts``: ``--retry``
 with an edited file, ``--abandon`` (preview and perform), the automatic
 restart of an edited file once nothing has completed, and the refusal of
 pending files without executable statements.

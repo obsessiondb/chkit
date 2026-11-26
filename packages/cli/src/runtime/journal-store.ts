@@ -101,7 +101,7 @@ export interface JournalStore {
    * (#767). `covered` is false when that read cannot be shown to cover every
    * copy: a replicated journal with a replica the read did not reach, or with
    * replicas it cannot name, or a journal that is not replicated on a target
-   * with several replicas.
+   * with several replicas or without a declared cluster (#802).
    */
   readOperationOnEveryCopy(migrationName: string, statementIndex: number): Promise<EveryCopyRead>
   writeMigrationState(state: MigrationRowState): Promise<void>
@@ -380,7 +380,13 @@ function rowVersion(appliedAt: string): number {
   return Date.parse(/(Z|[+-]\d{2}:?\d{2})$/.test(iso) ? iso : `${iso}Z`)
 }
 
-export function createJournalStore(db: ClickHouseExecutor, cluster?: string, fanoutOverride?: ReplicaFanout): JournalStore {
+export function createJournalStore(executor: ClickHouseExecutor, cluster?: string, fanoutOverride?: ReplicaFanout): JournalStore {
+  const db: ClickHouseExecutor = {
+    ...executor,
+    query<T>(sql: string, settings?: Parameters<ClickHouseExecutor['query']>[1]) {
+      return executor.query<T>(sql, { ...settings, default_format: 'JSONStrings' })
+    },
+  }
   const journalTable = resolveJournalTableName()
   debug('journal', `journal table: ${journalTable}${process.env.CHKIT_JOURNAL_TABLE ? ' (from CHKIT_JOURNAL_TABLE)' : ''}${cluster ? ` (ON CLUSTER ${cluster})` : ''}`)
   // In cluster mode the journal must be consistent across every node, so it uses
@@ -854,6 +860,12 @@ SETTINGS index_granularity = 1`
         `SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = '${journalTable}'`,
       )
       const replicated = table === undefined || /^(Replicated|Shared)/.test(table.engine)
+      // A journal that is not replicated is one copy only on a single server,
+      // and only a declared cluster can show that (#802): behind a load
+      // balancer each server lists itself alone in its own clusters, so a
+      // cluster chkit guesses proves nothing about the others.
+      const declaredCluster = fanoutOverride?.cluster ?? cluster
+      if (!replicated && declaredCluster === undefined) return { covered: false }
       const fingerprints = fingerprintColumn ? `toJSONString(${FINGERPRINTS_COLUMN})` : `'[]'`
       const name = escapeSqlString(migrationName)
       // Each server answers for itself, in the same query that reads its
@@ -873,7 +885,7 @@ SETTINGS index_granularity = 1`
       // Every server of the cluster answers, or the read fails: an
       // unavailable one is never skipped, and no limit cuts the reply short.
       const rows = await db.query<CopyRow>(
-        `SELECT replica, members, present, applied_at, operations, operation_fingerprints FROM clusterAllReplicas('${escapeSqlString(fanoutOverride?.cluster ?? cluster ?? 'default')}', view(${perCopy}))`,
+        `SELECT replica, members, present, applied_at, operations, operation_fingerprints FROM clusterAllReplicas('${escapeSqlString(declaredCluster ?? 'default')}', view(${perCopy}))`,
         { ...STRICT_CONTROL_SETTINGS, skip_unavailable_shards: 0 },
       )
       // Not replicated: exactly one server, named by its UUID.

@@ -7,6 +7,8 @@ export const ITEM_SCHEMA_URL = 'https://ui.shadcn.com/schema/registry-item.json'
 export const CATALOG_SCHEMA_URL = 'https://ui.shadcn.com/schema/registry.json'
 export const DEFAULT_REGISTRY = 'github:obsessiondb/chkit'
 export const MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
+export const SYNC_PLUGIN_PACKAGES = ['@chkit/plugin-sync', '@chkit/plugin-ingest'] as const
+export type SyncPluginPackage = typeof SYNC_PLUGIN_PACKAGES[number]
 
 const relativePath = z.string().min(1).refine(isSafeRelativePath, 'Expected a normalized project-relative path')
 const version = z.string().refine((value) => valid(value) === value, 'Expected a semantic version')
@@ -120,8 +122,9 @@ export function parseRegistryItem(value: unknown, built = true): RegistryItem {
   if (new Set(names).size !== names.length) throw new Error('Duplicate package dependencies')
   const allNames = [...names, ...(item.devDependencies ?? []).map((spec) => requireDependency(spec).name)]
   if (new Set(allNames).size !== allNames.length) throw new Error('Duplicate package dependencies across dependencies and devDependencies')
-  for (const required of ['@chkit/core', '@chkit/plugin-ingest']) {
-    if (!names.includes(required)) throw new Error(`Registry item must declare ${required} as a dependency`)
+  if (!names.includes('@chkit/core')) throw new Error('Registry item must declare @chkit/core as a dependency')
+  if (!SYNC_PLUGIN_PACKAGES.some((name) => names.includes(name))) {
+    throw new Error('Registry item must declare @chkit/plugin-sync or @chkit/plugin-ingest as a dependency')
   }
   return item
 }

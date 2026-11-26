@@ -272,12 +272,13 @@ class ClickHouseClient:
         settings = {**self._write_settings(), **(settings or {})}
         check()
         try:
-            self._client.command(statement, settings=settings)
+            self._client.command(statement, settings=settings, transport_settings={"X-DDL": "1"})
         except DatabaseError as error:
             if not is_unknown_database_error(error):
                 raise
             check()
-            self._client.command(statement, settings=settings, use_database=False)
+            self._client.command(statement, settings=settings, use_database=False,
+                                 transport_settings={"X-DDL": "1"})
 
     def execute_tracked(
         self,
@@ -315,6 +316,7 @@ class ClickHouseClient:
                     **(settings or {}), "query_id": query_id,
                 },
                 use_database=use_database,
+                transport_settings={"X-DDL": "1"},
             )
         finally:
             self._client.http = pool
@@ -329,28 +331,35 @@ class ClickHouseClient:
             url = httpx.URL(scheme=parsed.scheme, host=parsed.hostname or "", port=parsed.port)
             username = unquote(parsed.username) if parsed.username else self._config.username
             password = unquote(parsed.password) if parsed.password else self._config.password
+            bodyless = bool(re.match(
+                r"INSERT\b|KILL\b[\s\S]*\bASYNC\s*;?$", statement.lstrip(), re.I
+            ))
             with httpx.Client(transport=httpx.HTTPTransport(retries=0)) as control:
                 response = control.post(
                     url,
                     auth=(username, password),
                     params={
-                        "database": self._config.database, "default_format": "JSONEachRow",
+                        "database": self._config.database,
                         **{key: str(value) for key, value in (settings or {}).items()
-                           if key != "query_id" and value is not None},
+                           if key not in ("query_id", "default_format") and value is not None},
                         **STRICT_CONTROL_SETTINGS,
                         "wait_end_of_query": "1",
                         **({"query_id": query_id} if query_id else {}),
                     },
                     headers={"Connection": "close"},
-                    content=statement,
+                    content=(statement if bodyless else
+                             statement.rstrip().rstrip(";") + "\nFORMAT JSONStrings"),
                     timeout=remaining_control_seconds(deadline),
                 )
                 if response.is_error or response.headers.get("X-ClickHouse-Exception-Code") not in (
                     None, "", "0",
                 ):
                     raise DatabaseError(response.text)
-                rows = [json.loads(line) for line in response.text.splitlines() if line.strip()]
-                return QueryResult(column_names=list(rows[0]) if rows else [], rows=rows)
+                if bodyless:
+                    return QueryResult(column_names=[], rows=[])
+                payload = response.json()
+                return QueryResult(column_names=[column["name"] for column in payload["meta"]],
+                                   rows=payload["data"])
 
         return run_control_request(request, timeout_ms)
 
@@ -370,7 +379,16 @@ class ClickHouseClient:
             if settings is not None
             else None
         )
-        result = self._client.query(statement, settings=effective_settings)
+        if effective_settings and effective_settings.get("default_format") == "JSONStrings":
+            effective_settings.pop("default_format")
+            payload = json.loads(
+                self._client.raw_query(statement, settings=effective_settings, fmt="JSONStrings",
+                                       transport_settings={"X-DDL": "1"})
+            )
+            return QueryResult(column_names=[column["name"] for column in payload["meta"]],
+                               rows=payload["data"])
+        result = self._client.query(statement, settings=effective_settings,
+                                    transport_settings={"X-DDL": "1"})
         column_names: list[str] = list(result.column_names)
         rows: list[dict[str, Any]] = [
             dict(zip(column_names, row, strict=True)) for row in result.result_rows
@@ -388,7 +406,8 @@ class ClickHouseClient:
         """
         query_id = str(uuid.uuid4())
         body = self._client.raw_query(
-            js_trim(statement).rstrip(";"), settings={"query_id": query_id}, fmt="JSON"
+            js_trim(statement).rstrip(";"), settings={"query_id": query_id}, fmt="JSON",
+            transport_settings={"X-DDL": "1"}
         )
         return ClickHouseJsonQueryResult.model_validate(
             {**parse_json_result(body), "query_id": query_id}
@@ -617,7 +636,9 @@ class ClickHouseClient:
         def source(table: str) -> str:
             return all_replicas(fanout, table) if fanout else table
 
-        read_settings = {"skip_unavailable_shards": 0 if every_replica else 1}
+        read_settings = {
+            "skip_unavailable_shards": 0 if every_replica else 1, "default_format": "JSONStrings"
+        }
         running_sql = (
             "SELECT read_rows, read_bytes, written_rows, written_bytes, elapsed "
             f"FROM {source('system.processes')} "

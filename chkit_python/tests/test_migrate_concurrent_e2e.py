@@ -28,6 +28,7 @@ from chkit.core.model import ChxResolvedClickHouseConfig
 from tests.e2e_testkit import (
     create_journal_table_name,
     create_prefix,
+    poll_until,
     quote_ident,
     resolve_live_env,
     wait_for_table_on_every_replica,
@@ -196,7 +197,11 @@ def test_two_runs_at_once_apply_a_pending_load_once(
     assert any(run.exit_code == 0 for run in runs), "\n".join(
         _diagnostic("run", run) for run in runs
     )
-    count = fixture.client.query(
-        f"SELECT count() AS n FROM {quote_ident(fixture.database)}.events"
-    ).rows[0]["n"]
+    count = poll_until(
+        lambda: fixture.client.query(
+            f"SELECT count() AS n FROM {quote_ident(fixture.database)}.events "
+            "SETTINGS select_sequential_consistency = 1, enable_parallel_replicas = 0"
+        ).rows[0]["n"],
+        lambda n: int(n) == _ROWS,
+    )
     assert int(count) == _ROWS
