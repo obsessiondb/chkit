@@ -47,16 +47,20 @@ def read_abandonable_state(
     migration: str,
     applied_names: Collection[str],
     journal_store: JournalStateStore,
+    action: str = "abandon",
 ) -> MigrationRowState:
-    """Read the in-progress state --abandon resets; raises when there is none."""
+    """Read the in-progress state --abandon resets; raises when there is none.
+
+    Or --mark-applied and --mark-not-applied, named by ``action``.
+    """
     if migration in applied_names:
-        raise _already_applied_error(migration)
+        raise _already_applied_error(migration, action)
     state = journal_store.read_migration_state(migration)
     if state is None:
-        msg = f"Cannot abandon {migration}: the journal has no in-progress state for it."
+        msg = f"Cannot {action} {migration}: the journal has no in-progress state for it."
         raise MigrateError("migration_not_in_progress", msg)
     if state.migration_completed:
-        raise _already_applied_error(migration)
+        raise _already_applied_error(migration, action)
     return state
 
 
@@ -111,7 +115,7 @@ def _abandoned_state(state: MigrationRowState, now: str) -> MigrationRowState:
             update={
                 "status": "failed",
                 "finished_at": op.finished_at if op.finished_at is not None else now,
-                "last_error": _abandoned_error(op.status),
+                "last_error": abandoned_error(op.status),
             }
         )
         for op in state.operations
@@ -126,19 +130,19 @@ def _abandoned_from(op: OperationState) -> OperationStatus | None:
     if op.status != "failed":
         return None
     return next(
-        (s for s in _OPERATION_STATUSES if op.last_error == _abandoned_error(s)),
+        (s for s in _OPERATION_STATUSES if op.last_error == abandoned_error(s)),
         None,
     )
 
 
-def _abandoned_error(previous: OperationStatus) -> str:
+def abandoned_error(previous: OperationStatus) -> str:
     return f"abandoned via chkit migrate --abandon (was {previous})"
 
 
-def _already_applied_error(migration: str) -> MigrateError:
+def _already_applied_error(migration: str, action: str) -> MigrateError:
     return MigrateError(
         "migration_already_applied",
-        f"Cannot abandon {migration}: it is already applied. --abandon only resets a "
+        f"Cannot {action} {migration}: it is already applied. --{action} only resets a "
         "migration that failed part-way; to undo an applied migration, write a new "
         "migration.",
     )

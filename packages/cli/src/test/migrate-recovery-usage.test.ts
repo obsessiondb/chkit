@@ -35,6 +35,22 @@ describe('@chkit/cli migrate --retry / --abandon usage (#233)', () => {
     }
   })
 
+  test('--mark-applied and --mark-not-applied reject each other and the flags that mean nothing for a journal change', async () => {
+    for (const [args, message] of [
+      [['--mark-applied', 'x', '--mark-not-applied', 'x'], '--mark-applied and --mark-not-applied cannot be combined'],
+      [['--mark-applied', 'x', '--abandon', 'x'], '--mark-applied cannot be combined with --abandon'],
+      [['--mark-not-applied', 'x', '--retry', 'x'], '--mark-not-applied cannot be combined with --retry'],
+      [['--mark-applied', 'x', '--table', 'app.users'], '--mark-applied cannot be combined with --table'],
+      [['--mark-not-applied', 'x', '--allow-destructive'], '--mark-not-applied cannot be combined with --allow-destructive'],
+      [['--mark-applied='], '--mark-applied requires a migration file name'],
+    ] as const) {
+      const { exitCode, envelope } = await runMigrate([...args])
+      expect(exitCode).toBe(1)
+      expect(envelope.error.code).toBe('invalid_usage')
+      expect(envelope.error.message).toContain(message)
+    }
+  })
+
   test('an empty migration name is a usage error', async () => {
     const retry = await runMigrate(['--retry='])
     expect(retry.exitCode).toBe(1)
