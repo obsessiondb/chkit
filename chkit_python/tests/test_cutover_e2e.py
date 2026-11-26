@@ -195,8 +195,8 @@ def test_accepts_a_nested_column_stored_without_flattening_at_the_first_statemen
         target,
         "cutover_nested_whole",
         tmp_path,
-        columns="id UInt64, user_id UInt64, payload String, n Nested(x UInt64, y Decimal64(2))",
-        schema_columns=[*BASE, {"name": "n", "type": "Nested(x UInt64, y Decimal64(2))"}],
+        columns="id UInt64, user_id UInt64, payload String, n Nested(x UInt64, `y z` Decimal64(2))",
+        schema_columns=[*BASE, {"name": "n", "type": "Nested(x UInt64, `y z` Decimal64(2))"}],
         settings={"flatten_nested": 0},
         stops_later="SELECT query outputs column with name 'n', which is not found in the target table",
     )

@@ -465,7 +465,8 @@ def test_checks_the_table_stores_the_old_column_types() -> None:
     def server(type_: str) -> str:
         return (
             "replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, "
-            f"'c {type_}', '{{}}')), ',\\n *', ', '), '\\n *', '')"
+            f"'c {type_}', '{{}}') SETTINGS input_format_force_null_for_omitted_fields = 0), "
+            "',\\n *', ', '), '\\n *', '')"
         )
 
     assert (
@@ -473,8 +474,8 @@ def test_checks_the_table_stores_the_old_column_types() -> None:
         f"AND NOT has([('id', {server('UInt64')}), ('user_id', {server('UInt64')}), "
         f"('payload', {server('String')}), ('price', {server('Nullable(Decimal64(2))')}), "
         f"('n.x', {server('Array(UInt8)')}), ('n.y z', {server('Array(Decimal64(2))')}), "
-        f"('n', concat('Nested(', 'x ', {server('UInt8')}, ', y z ', "
-        f"{server('Decimal64(2)')}, ')'))], "
+        f"('n', concat('Nested(', substring({server('Tuple(`x` UInt8, `y z` Decimal64(2))')}, "
+        "7)))], "
         "(name, type))) FROM system.columns WHERE database = 'app' AND table = 'events' "
         "AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')) AS mistyped_columns"
     ) in start

@@ -1396,22 +1396,26 @@ def _column_checks(
     # server gives the schema's type in its stored form too. It reads the type
     # from a one-row format() table, without building a value of it:
     # defaultValueOfTypeName fails for some types before ClickHouse 26.4, such
-    # as AggregateFunction(argMax, LowCardinality(String), DateTime).
+    # as AggregateFunction(argMax, LowCardinality(String), DateTime). The row
+    # omits the column, which input_format_force_null_for_omitted_fields would
+    # refuse for a type that is not Nullable.
     # toTypeName prints a named Tuple over several lines, and system.columns
     # on one: the line breaks go. A newline in an Enum label is escaped, so no
     # label changes.
     def stored_type(type_: str) -> str:
         return (
             "replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, "
-            f"{_string_literal(f'c {type_}')}, '{{}}')), ',\\n *', ', '), '\\n *', '')"
+            f"{_string_literal(f'c {type_}')}, '{{}}') "
+            "SETTINGS input_format_force_null_for_omitted_fields = 0), "
+            "',\\n *', ', '), '\\n *', '')"
         )
 
+    # An unflattened Nested column is stored as `Nested(...)` with the fields a
+    # Tuple of them prints, names quoted as ClickHouse quotes them.
     def nested_type(fields: list[tuple[str, str]]) -> str:
-        parts = ", ".join(
-            f"{_string_literal(('' if index == 0 else ', ') + name + ' ')}, {stored_type(type_)}"
-            for index, (name, type_) in enumerate(fields)
-        )
-        return f"concat('Nested(', {parts}, ')')"
+        tuple_fields = ", ".join(f"{quote_identifier(name)} {type_}" for name, type_ in fields)
+        tuple_type = f"Tuple({tuple_fields})"
+        return f"concat('Nested(', substring({stored_type(tuple_type)}, 7))"
 
     type_pairs = (
         "["

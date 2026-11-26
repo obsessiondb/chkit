@@ -554,14 +554,18 @@ function createCutoverSql(input: {
   // server gives the schema's type in its stored form too. It reads the type
   // from a one-row format() table, without building a value of it:
   // defaultValueOfTypeName fails for some types before ClickHouse 26.4, such
-  // as AggregateFunction(argMax, LowCardinality(String), DateTime).
+  // as AggregateFunction(argMax, LowCardinality(String), DateTime). The row
+  // omits the column, which input_format_force_null_for_omitted_fields would
+  // refuse for a type that is not Nullable.
   // toTypeName prints a named Tuple over several lines, and system.columns
   // on one: the line breaks go. A newline in an Enum label is escaped, so no
   // label changes.
   const storedType = (type: string) =>
-    `replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, ${stringLiteral(`c ${type}`)}, '{}')), ',\\n *', ', '), '\\n *', '')`
+    `replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, ${stringLiteral(`c ${type}`)}, '{}') SETTINGS input_format_force_null_for_omitted_fields = 0), ',\\n *', ', '), '\\n *', '')`
+  // An unflattened Nested column is stored as `Nested(...)` with the fields a
+  // Tuple of them prints, names quoted as ClickHouse quotes them.
   const nestedType = (fields: Array<{ name: string; type: string }>) =>
-    `concat('Nested(', ${fields.map((field, index) => `${stringLiteral(`${index > 0 ? ', ' : ''}${field.name} `)}, ${storedType(field.type)}`).join(', ')}, ')')`
+    `concat('Nested(', substring(${storedType(`Tuple(${fields.map((field) => `${quoteColumn(field.name)} ${field.type}`).join(', ')})`)}, 7))`
   const typePairs = `[${[
     ...stored.map((leaf) => `(${stringLiteral(leaf.name)}, ${storedType(leaf.type)})`),
     ...storedNested.map((column) => `(${stringLiteral(column.name)}, ${nestedType(column.fields)})`),
