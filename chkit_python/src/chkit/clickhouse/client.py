@@ -58,6 +58,17 @@ QueryStatusKind = Literal["running", "finished", "failed", "unknown"]
 # TS's PROGRESS_SETTINGS (``@chkit/clickhouse``): a progress header every 30 s.
 PROGRESS_INTERVAL_MS = "30000"
 
+# TS's DURABLE_INSERT_SETTINGS: a write is stored when it returns. No
+# asynchronous INSERT, and one that a table's own async_insert setting still
+# makes asynchronous waits for its flush (#790).
+_DURABLE_INSERT_SETTINGS: dict[str, Any] = {"async_insert": 0, "wait_for_async_insert": 1}
+
+
+def _plain_setting_value(value: object) -> str:
+    """A boolean setting's value in plain form, ``true`` and ``false`` as 1 and 0."""
+    text = ("true" if value else "false") if isinstance(value, bool) else str(value).lower()
+    return {"true": "1", "false": "0"}.get(text, text)
+
 # Column types whose JSON numbers a float cannot hold exactly: 64-bit and wider
 # integers and Decimals. The TS port (``@chkit/clickhouse``, ``exact-json.ts``)
 # uses the same patterns.
@@ -205,6 +216,10 @@ class ClickHouseClient:
         except Exception as error:
             wrap_connection_error(error, config.url, config.username)
         client.database = config.database
+        # ``profile`` (a settings profile) is not in system.settings, so
+        # clickhouse-connect would refuse it as an unknown setting; TS sends it,
+        # as the server accepts it (``migrate --setting profile=...``, #790).
+        client.valid_transport_settings = {*client.valid_transport_settings, "profile"}
         _use_ts_timeouts(client)
         return client
 
@@ -257,19 +272,54 @@ class ClickHouseClient:
         it, which lets the ``CREATE DATABASE`` of a first migration run."""
         self.execute_guarded(statement, lambda: None, settings)
 
-    def _write_settings(self) -> dict[str, Any]:
-        """No asynchronous INSERT, as TS sends with every write, so a write is
-        stored when it returns. A user that cannot change the setting
-        (readonly = 1) cannot write either, so it is left out there, where
-        clickhouse-connect would refuse it before the server's own error."""
-        setting = self._client.server_settings.get("async_insert")
-        return {"async_insert": 0} if setting is not None and not setting.readonly else {}
+    def _write_settings(
+        self, settings: dict[str, Any] | None = None, driver: Any = None
+    ) -> dict[str, Any]:
+        """``settings``, then the settings that make a write stored when it
+        returns: no asynchronous INSERT, and one that a table's own
+        async_insert setting still makes asynchronous waits for its flush, as
+        TS sends with every write (#790). These are defaults: a caller's own
+        value of either is sent as written. They go last, since the server
+        applies a request's settings in order and a settings profile among the
+        caller's would otherwise change them. A setting the user cannot change
+        (readonly = 1, or a constraint) is left out when it already has that
+        value, where clickhouse-connect would refuse it before the server's
+        own error. Fixed at another value, the write is refused, as the server
+        refuses TS's. A readonly = 1 user gets the server's own error, which
+        refuses its writes. Read from ``driver``, the one that sends the write
+        (the main one by default)."""
+        own = settings or {}
+        server_settings = (driver or self._client).server_settings
+        mode = server_settings.get("readonly")
+        if mode is not None and str(mode.value) == "1":
+            return dict(own)
+        sent = {key: value for key, value in own.items() if key not in _DURABLE_INSERT_SETTINGS}
+        for name, default in _DURABLE_INSERT_SETTINGS.items():
+            value = own.get(name, default)
+            setting = server_settings.get(name)
+            if setting is None:
+                if name in own:
+                    sent[name] = value
+                continue
+            if not setting.readonly:
+                sent[name] = value
+            elif str(setting.value) != _plain_setting_value(value):
+                need = (
+                    f"this write sends {name} = {value}." if name in own
+                    else f"chkit writes need {name} = {value} to be stored when they return."
+                )
+                msg = (
+                    f"Setting {name} is fixed at {setting.value} for this ClickHouse user, "
+                    f"and {need}"
+                )
+                raise RuntimeError(msg)
+        return sent
 
     def execute_guarded(
         self, statement: str, check: Callable[[], None], settings: dict[str, Any] | None = None
     ) -> None:
         """Check ownership before each command attempt, including an internal retry."""
-        settings = {**self._write_settings(), **(settings or {})}
+        settings = self._write_settings(settings)
         check()
         try:
             self._client.command(statement, settings=settings, transport_settings={"X-DDL": "1"})
@@ -288,6 +338,8 @@ class ClickHouseClient:
         settings: dict[str, Any] | None = None,
     ) -> None:
         """Persist an id before each physical send; never replay an ambiguous send."""
+        # Refused before an id is recorded, as execute is (#790).
+        settings = self._write_settings(settings)
         check()
         query_id = before_attempt()
         check()
@@ -312,8 +364,7 @@ class ClickHouseClient:
             self._client.command(
                 statement,
                 settings={
-                    "wait_end_of_query": 1, "async_insert": 0,
-                    **(settings or {}), "query_id": query_id,
+                    "wait_end_of_query": 1, **(settings or {}), "query_id": query_id,
                 },
                 use_database=use_database,
                 transport_settings={"X-DDL": "1"},
@@ -450,7 +501,10 @@ class ClickHouseClient:
         try:
             # Opening the driver sends the statement nothing.
             driver = self._submit_driver()
-            driver.command(statement, settings={**(settings or {}), "query_id": qid})
+            # Stored when it finishes, as execute sends: an asynchronous INSERT
+            # would finish while its rows are still buffered (#790).
+            sent = {**self._write_settings(settings, driver), "query_id": qid}
+            driver.command(statement, settings=sent)
         except Exception as error:
             # The driver sends each request once (#767), so a failure before
             # its first byte proves the query was never sent (#800).
@@ -483,13 +537,15 @@ class ClickHouseClient:
         ``SendNotAdmittedError`` is raised. ``prepare_submit_once`` opens
         that driver ahead of the send."""
         driver = self.prepare_submit_once()
+        # Stored when it finishes, as submit sends (#790); refused before the send.
+        sent = {**self._write_settings(settings, driver), "query_id": query_id}
         pool = driver.http
         with self._submit_client_lock:
             self._send_once_inflight[id(pool)] = self._send_once_inflight.get(id(pool), 0) + 1
         send = _Send(SEND_ADMISSION.get())
         token = _CURRENT_SEND.set(send)
         try:
-            driver.command(statement, settings={**(settings or {}), "query_id": query_id})
+            driver.command(statement, settings=sent)
         except SendNotAdmittedError:
             raise
         except Exception as error:

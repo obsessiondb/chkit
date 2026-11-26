@@ -65,8 +65,47 @@ def test_a_statement_is_no_asynchronous_insert_under_a_fire_and_forget_profile(
             # The insert API too, as TS's insert sends (#767, round 4).
             client.insert(f"{prefix}t", [{"id": 2}], database=env.clickhouse_database)
             after_insert = client.query(f"SELECT toString(count()) AS n FROM {table}").rows
+            # And submit, which async migrate statements go through (#790).
+            client.submit(f"INSERT INTO {table} VALUES (3)")
+            after_submit = client.query(f"SELECT toString(count()) AS n FROM {table}").rows
         assert after_execute == [{"n": "1"}]
         assert after_insert == [{"n": "2"}]
+        assert after_submit == [{"n": "3"}]
+    finally:
+        admin.execute(f"DROP USER IF EXISTS {quote_ident(user)}")
+        admin.execute(f"DROP TABLE IF EXISTS {table} SYNC")
+
+
+@pytest.mark.skipif(_ON_OBSESSIONDB, reason="ObsessionDB users have no CREATE USER grant (#430)")
+def test_a_write_into_a_table_that_turns_on_async_inserts_waits_for_the_flush(
+    admin: ClickHouseClient,
+) -> None:
+    """#790: a table's own async_insert setting makes an INSERT asynchronous
+    even with async_insert = 0 in the query; it is stored when it returns only
+    because it waits for the flush, as in TS."""
+    env = resolve_live_env()
+    prefix = create_prefix("write_settings_table_py")
+    user = f"{prefix}user"
+    password = "Pw-790-write-settings"
+    table = f"{quote_ident(env.clickhouse_database)}.{quote_ident(f'{prefix}t')}"
+    try:
+        admin.execute(
+            f"CREATE TABLE {table} (id UInt64) ENGINE = MergeTree ORDER BY id "
+            "SETTINGS async_insert = 1"
+        )
+        admin.execute(
+            f"CREATE USER {quote_ident(user)} IDENTIFIED BY '{password}' SETTINGS "
+            "wait_for_async_insert = 0, "
+            "async_insert_use_adaptive_busy_timeout = 0, async_insert_busy_timeout_max_ms = 3000"
+        )
+        admin.execute(f"GRANT SELECT, INSERT ON {table} TO {quote_ident(user)}")
+        with ClickHouseClient.connect(_config(user, password)) as client:
+            client.execute(f"INSERT INTO {table} VALUES (1)")
+            after_execute = client.query(f"SELECT toString(count()) AS n FROM {table}").rows
+            client.submit(f"INSERT INTO {table} VALUES (2)")
+            after_submit = client.query(f"SELECT toString(count()) AS n FROM {table}").rows
+        assert after_execute == [{"n": "1"}]
+        assert after_submit == [{"n": "2"}]
     finally:
         admin.execute(f"DROP USER IF EXISTS {quote_ident(user)}")
         admin.execute(f"DROP TABLE IF EXISTS {table} SYNC")

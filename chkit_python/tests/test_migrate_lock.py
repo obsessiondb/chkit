@@ -578,6 +578,7 @@ def test_guarded_client_checks_before_every_request_but_close() -> None:
 def test_missing_database_retry_checks_lock_ownership_again(lose_lock: bool) -> None:
     held = True
     driver = MagicMock()
+    driver.server_settings = {}
 
     def first_request(*_args: Any, **_kwargs: Any) -> None:
         nonlocal held

@@ -65,7 +65,7 @@ import {
 import { resolveRecoveryTargets } from './recovery.js'
 import { resolveRetry, type RetryResolution } from './retry.js'
 import { filterPendingByScope } from './scope.js'
-import { parseSettingFlags } from './settings.js'
+import { assertInsertSettingsChangeable, insertSettingsOverrideWarning, parseSettingFlags } from './settings.js'
 import { extractExecutableStatements, extractStatementOperations } from '../../runtime/safety-markers.js'
 import { createQueryTracker, queryTrackingDisabled, type QueryContext, type QueryIdentity, type QueryTracker } from './query-intents.js'
 import { abandonRecovery, assertCancellationClear, assertCancellationUnfinished, cancelPredecessor, freshRecoveryExecutor, finishRecovery, expandRecoveryPlan, markCancellationPending, settleCompensation, prepareCancellation, resolveQueryIdentity } from './cancellation.js'
@@ -241,6 +241,8 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
   const executeRequested = f['--apply'] === true || f['--execute'] === true
   const allowDestructive = f['--allow-destructive'] === true
   const settings = parseSettingFlags(f['--setting'])
+  const overrideWarning = insertSettingsOverrideWarning(settings)
+  if (overrideWarning) console.error(overrideWarning)
   const tableSelector = f['--table']
   const jsonMode = f['--json'] === true
   const { retryTarget, abandonTarget, markTarget } = resolveRecoveryTargets(flags)
@@ -289,6 +291,8 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
     return await withInterrupt(interrupt, lock, () => withLockHeld(fn, options, lock))
   }
   const withLockHeld = async <T>(fn: () => Promise<T>, { selectedFiles = [], abandon }: WithLockOptions, interruptLock: InterruptLock): Promise<T> => {
+    // Every run that writes passes here first, interactive or not (#790).
+    await assertInsertSettingsChangeable(rawDb, settings)
     if (migrateLockDisabled()) {
       console.error('⚠ CHKIT_MIGRATE_LOCK is off: this run takes no migrate lock, so a concurrent migrate can apply the same statements.')
       const target = await journalStore.lockTarget()
@@ -403,6 +407,8 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
       `--retry: no migration file named ${retryTarget} in ${migrationsDir}. To reset the journal state of a migration whose file was deleted, use chkit migrate --abandon ${retryTarget}.`,
     )
   }
+  // Reading the journal can upgrade its schema, a write (#790).
+  if (executeRequested) await assertInsertSettingsChangeable(rawDb, settings)
   const journal = await journalStore.readJournal()
   const appliedNames = new Set(journal.applied.map((entry) => entry.name))
   const pendingAll = files.filter((file) => !appliedNames.has(file))

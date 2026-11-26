@@ -27,6 +27,7 @@ MigrateErrorCode = Literal[
     "async_outcome_unknown",
     "async_attempt_unfenced",
     "async_needs_lock",
+    "insert_settings_fixed",
 ]
 
 EMPTY_MIGRATIONS_SUMMARY = (

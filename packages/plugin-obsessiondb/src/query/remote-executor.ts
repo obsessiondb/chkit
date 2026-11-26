@@ -174,10 +174,13 @@ export function createRemoteExecutor(deps: {
 		return settingRows
 	}
 
-	// Sent with writes (command, insert, submit) under the caller's settings, as
-	// a direct connection sends.
+	// Sent with writes (command, insert, submit), as a direct connection sends:
+	// defaults a caller's own value replaces, placed after the caller's other
+	// settings so that a settings profile among them cannot change them (#790).
 	async function writeSettings(settings?: ClickHouseSettings): Promise<ClickHouseSettings> {
-		return { ...durableInsertSettings(await settingRowsOnce()), ...settings }
+		const { async_insert, wait_for_async_insert, ...rest } = settings ?? {}
+		const own = Object.fromEntries(Object.entries({ async_insert, wait_for_async_insert }).filter(([, value]) => value !== undefined))
+		return { ...rest, ...durableInsertSettings(await settingRowsOnce()), ...own }
 	}
 
 	const executor: ClickHouseExecutor = {
