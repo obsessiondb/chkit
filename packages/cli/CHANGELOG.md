@@ -1,5 +1,18 @@
 # chkit
 
+## 0.2.0-beta.19
+
+### Patch Changes
+
+- f1912dd: With `CHKIT_MIGRATE_LOCK=off`, `chkit migrate --apply` now stops before an async statement with `async_needs_lock`, because two concurrent runs could both submit it. Set `CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK=1` to submit it anyway when no other migrate runs against the target.
+- c0af2a5: `chkit migrate` no longer submits an async statement again behind a load balancer over independent servers: without `clickhouse.cluster`, a prepared attempt in a journal that is not replicated now stops with `async_outcome_unknown` instead of being treated as never sent.
+- ee6c032: `chkit migrate` now pairs each `-- operation:` marker with the statement right after it, so a statement without a marker no longer shifts later markers onto the wrong statements, for example running a `CREATE TABLE` as the async load below it (#831). Such a hand-written file may now need `--allow-destructive` for an unmarked destructive statement that used to inherit another statement's marker.
+- a7851fe: Ctrl-C during `migrate` now stops the run cleanly, as chkit-py does: it starts no new statement, puts an async statement that wasn't sent yet back to prepared, and releases the migrate lock before exiting with 130. A second Ctrl-C exits at once and leaves the lock claim in place.
+- ab00efd: Warn about migration data copies in `check` and `generate`, including JSON output, without changing exit status.
+- e4514c9: `check` and `drift` recognize stored SQL UDF arithmetic on ObsessionDB without hiding changes to the function body.
+- 99f3950: Install `@chkit/plugin-sync`, register `sync()`, and use `chkit sync` or `chkit plugin sync` with your existing checkpoints. The deprecated `@chkit/plugin-ingest` package, `ingest()` registration, and CLI commands remain available during the transition.
+- Updated dependencies: `@chkit/core@0.2.0-beta.19`, `@chkit/clickhouse@0.2.0-beta.19`, `@chkit/codegen@0.2.0-beta.19`
+
 ## 0.2.0-beta.18
 
 ### Patch Changes
