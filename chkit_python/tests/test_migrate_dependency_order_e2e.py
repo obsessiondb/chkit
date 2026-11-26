@@ -448,6 +448,25 @@ _COLUMN_CHANGES: list[dict[str, Any]] = [
         "columns": ["b", "id", "y"],
     },
     {
+        # #799: ALTER's check for cyclic defaults counts a lambda parameter
+        # named like a column as a read of it, so MODIFY `a` first met the
+        # other side of the cycle: Cyclic alias detected.
+        "label": "lambdaold",
+        "before": f"{{'name': 'a', 'type': 'UInt64'}}, "
+        f"{{'name': 'b', 'type': 'UInt64', {_e('arraySum(arrayMap(a -> 1, [1]))')}}}",
+        "after": f"{{'name': 'a', 'type': 'UInt64', {_e('b')}}}, {{'name': 'b', 'type': 'UInt64'}}",
+        "order": ["column:b", "column:a"],
+        "columns": ["a", "b", "id"],
+    },
+    {
+        "label": "lambdanew",
+        "before": f"{{'name': 'a', 'type': 'UInt64'}}, {{'name': 'b', 'type': 'UInt64', {_e('a')}}}",
+        "after": f"{{'name': 'a', 'type': 'UInt64', {_e('arraySum(arrayMap(b -> 1, [1]))')}}}, "
+        "{'name': 'b', 'type': 'UInt64'}",
+        "order": ["column:b", "column:a"],
+        "columns": ["a", "b", "id"],
+    },
+    {
         # #768: reading the lambda parameter `c` as the new column `c` ran
         # MODIFY `a` last, so MODIFY `b` DEFAULT a met the old `a DEFAULT b`:
         # Cyclic alias detected in column DEFAULT expressions.
@@ -458,6 +477,48 @@ _COLUMN_CHANGES: list[dict[str, Any]] = [
         f"{{'name': 'b', 'type': 'UInt64', {_e('a')}}}, {{'name': 'c', 'type': 'UInt64', {_e('id')}}}",
         "order": ["column:a", "column:b"],
         "columns": ["a", "b", "c", "id"],
+    },
+    # #775: in key order each of these fails with `Cyclic alias detected`: a
+    # MODIFY closes a cycle that more than one other MODIFY could break first.
+    {
+        "label": "breakany",
+        "before": "{'name': 'a', 'type': 'UInt64'}, "
+        f"{{'name': 'b', 'type': 'UInt64', {_e('c')}}}, {{'name': 'c', 'type': 'UInt64', {_e('a')}}}",
+        "after": f"{{'name': 'a', 'type': 'UInt64', {_e('b')}}}, "
+        f"{{'name': 'b', 'type': 'UInt64', {_e('id')}}}, {{'name': 'c', 'type': 'UInt64', {_e('id')}}}",
+        "order": ["column:b", "column:a", "column:c"],
+        "columns": ["a", "b", "c", "id"],
+    },
+    {
+        "label": "breaktwo",
+        "before": "{'name': 'a', 'type': 'UInt64'}, {'name': 'b', 'type': 'UInt64'}, "
+        f"{{'name': 'c', 'type': 'UInt64', {_e('a')}}}",
+        "after": f"{{'name': 'a', 'type': 'UInt64', {_e('b')}}}, "
+        f"{{'name': 'b', 'type': 'UInt64', {_e('c')}}}, {{'name': 'c', 'type': 'UInt64'}}",
+        "order": ["column:a", "column:c", "column:b"],
+        "columns": ["a", "b", "c", "id"],
+    },
+    {
+        "label": "breakcomment",
+        "before": "{'name': 'a', 'type': 'UInt64'}, "
+        f"{{'name': 'b', 'type': 'UInt64', {_e('c')}, 'comment': 'x'}}, "
+        f"{{'name': 'c', 'type': 'UInt64', {_e('a')}}}",
+        "after": f"{{'name': 'a', 'type': 'UInt64', {_e('b')}}}, "
+        f"{{'name': 'b', 'type': 'UInt64'}}, {{'name': 'c', 'type': 'UInt64', {_e('id')}}}",
+        "order": ["column:b", "column:a", "column:c"],
+        "columns": ["a", "b", "c", "id"],
+    },
+    # #827: ClickHouse rewrites the expressions that read a renamed column, so
+    # the rename keeps `x` (now `y`) on the cycle a -> b -> x -> a.
+    {
+        "label": "breakrename",
+        "before": "{'name': 'a', 'type': 'UInt64'}, "
+        f"{{'name': 'b', 'type': 'UInt64', {_e('x')}}}, {{'name': 'x', 'type': 'UInt64', {_e('a')}}}",
+        "after": f"{{'name': 'a', 'type': 'UInt64', {_e('b')}}}, "
+        f"{{'name': 'b', 'type': 'UInt64', {_e('id')}}}, {{'name': 'y', 'type': 'UInt64', {_e('a')}}}",
+        "rename": "x=y",
+        "order": ["column:b", "column:a", "column_rename:x:y"],
+        "columns": ["a", "b", "id", "y"],
     },
 ]
 

@@ -2,4 +2,4 @@
 "@chkit/plugin-pull": patch
 ---
 
-`chkit pull` reads refreshable materialized view `DEPENDS ON` names as ClickHouse quotes them: escaped backticks are unescaped, and names containing dots, commas or keywords are kept whole.
+`pull` preserves quoted refreshable-view `DEPENDS ON` names, including escaped backticks, dots, commas and keywords, and refuses to overwrite a dangling output symlink without `--force`.

@@ -5,8 +5,8 @@
   "title": "Lemlist",
   "description": "Seven independent Lemlist raw resource streams with acknowledged activity intervals and complete replayable reads.",
   "dependencies": [
-    "@chkit/core@^0.2.0-beta.12",
-    "@chkit/plugin-ingest@^0.2.0-beta.12",
+    "@chkit/core@^0.2.0-beta.19",
+    "@chkit/plugin-sync@^0.2.0-beta.19",
     "zod@^4.3.6"
   ],
   "files": [
@@ -86,8 +86,14 @@
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.3.1",
+      "version": "0.3.2",
       "changelog": [
+        {
+          "version": "0.3.2",
+          "changes": [
+            "Use the `@chkit/plugin-sync` package and `chkit sync` commands with chkit 0.2.0-beta.19 or later."
+          ]
+        },
         {
           "version": "0.3.1",
           "changes": [
@@ -131,8 +137,8 @@
       "logo": "https://chkit.obsessiondb.com/logos/lemlist.svg",
       "language": "typescript",
       "license": "MIT",
-      "chkit": "^0.2.0-beta.12",
-      "ingest": "^0.2.0-beta.12",
+      "chkit": "^0.2.0-beta.19",
+      "ingest": "^0.2.0-beta.19",
       "clickhouse": ">=25.3.0",
       "root": "src/integrations/lemlist",
       "entry": "index.ts",
@@ -286,7 +292,7 @@
       "views": [],
       "sync": {
         "description": "Activities checkpoint acknowledged creation-time intervals; six other resources record independent full-read completion and replay mutable pagination from the beginning.",
-        "schedule": "Run bunx chkit ingest run --tag provider:lemlist from a scheduler.",
+        "schedule": "Run bunx chkit sync run --tag provider:lemlist from a scheduler.",
         "deletions": "Missing records are not deleted automatically. Activities need historical reconciliation for older metadata edits; other resources revisit current accessible parents on each full read."
       }
     }

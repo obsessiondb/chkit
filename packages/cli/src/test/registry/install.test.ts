@@ -16,6 +16,7 @@ test.serial('planning an empty install is a dry run and applying needs no provid
   expect(plan.dependencies).toEqual([...fixture.item.dependencies, `chkit@${FIXTURE_VERSION}`])
   await applyInstallation(plan, { install: async () => { throw new Error('--no-install must not run a package manager') } })
   expect(await readFile(join(fixture.project, 'src/integrations/fixture/index.ts'), 'utf8')).toContain('fixturePipeline')
+  expect(await readFile(join(fixture.project, 'clickhouse.config.ts'), 'utf8')).toContain("import { sync } from '@chkit/plugin-sync'")
   expect(await readFile(join(fixture.project, '.env.example'), 'utf8')).toContain('FIXTURE_TOKEN=""')
   const repeated = await planInstallation({ cwd: fixture.project, item: fixture.item, origin: fixture.origin, cliVersion: FIXTURE_VERSION, noInstall: true })
   expect(repeated.alreadyInstalled).toBe(false)
@@ -30,6 +31,15 @@ test.serial('planning an empty install is a dry run and applying needs no provid
   await applyInstallation(installed, { install: async () => { throw new Error('complete installs must be a no-op') } })
 })
 
+test.serial('a legacy artifact can still be installed and retried with its original plugin dependency', async () => {
+  const fixture = await fixtures.create(false, '@chkit/plugin-ingest')
+  const input = { cwd: fixture.project, item: fixture.item, origin: fixture.origin, cliVersion: FIXTURE_VERSION, noInstall: true }
+  await applyInstallation(await planInstallation(input))
+  expect(await readFile(join(fixture.project, 'clickhouse.config.ts'), 'utf8')).toContain("import { ingest } from '@chkit/plugin-ingest'")
+  expect(await readFile(join(fixture.project, 'package.json'), 'utf8')).not.toContain('@chkit/plugin-sync')
+  expect((await planInstallation(input)).files).toEqual([])
+})
+
 test.serial('schema projects preserve existing definitions, plugins, manifest fields and env values', async () => {
   const fixture = await fixtures.create()
   await write(join(fixture.project, 'clickhouse.config.ts'), `import { ingest as load } from '@chkit/plugin-ingest'
@@ -42,6 +52,7 @@ export default { schema: ['./db/**/*.ts'], plugins: [load({ journalTable: 'kept'
   const config = await readFile(join(fixture.project, 'clickhouse.config.ts'), 'utf8')
   expect(config).toContain("'./db/**/*.ts'")
   expect(config).toContain("load({ journalTable: 'kept' })")
+  expect(config).not.toContain('@chkit/plugin-sync')
   const manifest = JSON.parse(await readFile(join(fixture.project, 'package.json'), 'utf8'))
   expect(manifest.scripts).toEqual({ custom: 'echo retained' })
   expect(manifest.devDependencies.unrelated).toBe('^1.0.0')
@@ -178,7 +189,7 @@ test.serial('installer calls the selected package manager after files exist and 
   await expect(applyInstallation(plan, { install: async (cwd, pm) => {
     expect(cwd).toBe(fixture.project)
     expect(pm).toBe('pnpm')
-    expect(await readFile(join(cwd, 'package.json'), 'utf8')).toContain('@chkit/plugin-ingest')
+    expect(await readFile(join(cwd, 'package.json'), 'utf8')).toContain('@chkit/plugin-sync')
     throw failure
   } })).rejects.toThrow('pnpm install failed')
   expect(await readFile(join(fixture.project, 'src/integrations/fixture/index.ts'), 'utf8')).toContain('fixturePipeline')
@@ -208,11 +219,12 @@ test.serial('an installed registry lock without local packages retries installat
   expect((await planInstallation(input)).alreadyInstalled).toBe(true)
 })
 
-test.serial('explicit CLI and core dependency ranges must fit registry compatibility metadata', async () => {
+test.serial('explicit CLI, core, and Sync plugin dependency ranges must fit registry compatibility metadata', async () => {
   const fixture = await fixtures.create()
   const input = { cwd: fixture.project, item: fixture.item, origin: fixture.origin, cliVersion: FIXTURE_VERSION }
   await expect(planInstallation({ ...input, item: { ...fixture.item, dependencies: [...fixture.item.dependencies, 'chkit@99.0.0'] } })).rejects.toThrow('outside the template compatibility range')
   await expect(planInstallation({ ...input, item: { ...fixture.item, dependencies: ['@chkit/core@99.0.0', ...fixture.item.dependencies.slice(1)] } })).rejects.toThrow('outside the template compatibility range')
+  await expect(planInstallation({ ...input, item: { ...fixture.item, dependencies: [`@chkit/core@${FIXTURE_VERSION}`, '@chkit/plugin-sync@99.0.0'] } })).rejects.toThrow('outside the template compatibility range')
   expect(await readdir(fixture.project)).toEqual([])
 })
 

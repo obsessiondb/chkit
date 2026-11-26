@@ -34,7 +34,7 @@ class _Client:
     queries: list[str] = field(default_factory=list[str])
     executed: list[str] = field(default_factory=list[str])
 
-    def query(self, sql: str) -> _Result:
+    def query(self, sql: str, settings: object = None) -> _Result:
         self.queries.append(sql)
         error = self.fail(sql, self.executed)
         if error is not None:

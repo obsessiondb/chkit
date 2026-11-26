@@ -91,7 +91,8 @@ def _probe_replicas(client: Any, cluster: str) -> ReplicaFanout | None:
     try:
         rows = client.query(
             "SELECT count(DISTINCT hostName()) AS replicas "
-            f"FROM clusterAllReplicas({string_literal(cluster)}, system.one)"
+            f"FROM clusterAllReplicas({string_literal(cluster)}, system.one)",
+            settings={"default_format": "JSONStrings"},
         ).rows
     except Exception as error:
         if _is_missing_cluster(error) or _is_access_denied(error):

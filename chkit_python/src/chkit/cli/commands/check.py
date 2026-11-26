@@ -32,6 +32,7 @@ from chkit.cli.command_target import (
 from chkit.cli.commands.drift_compare import summarize_drift_reasons
 from chkit.cli.commands.drift_payload import build_drift_payload
 from chkit.cli.config_loader import load_config
+from chkit.cli.data_copy_warnings import collect_migration_data_copy_warnings
 from chkit.cli.help import TABLE_FLAG_HELP
 from chkit.cli.hook_flags import passed_flags
 from chkit.cli.journal_store import JournalStore
@@ -77,6 +78,8 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         typer.Option(
             "--live",
             help="No-op, kept for existing scripts: check always reads the live server",
+            # TS has no --live, so the help leaves it out, as TS does (#776).
+            hidden=True,
         ),
     ] = False,
     output_json: Annotated[
@@ -199,7 +202,10 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     )
     ok = not failed_checks
     snapshot_definitions = snapshot.definitions if snapshot is not None else []
-    warnings = [issue.message for issue in collect_definition_warnings(snapshot_definitions)]
+    warnings = [
+        *(issue.message for issue in collect_definition_warnings(snapshot_definitions)),
+        *collect_migration_data_copy_warnings(migrations_dir, pending),
+    ]
 
     # TS envelope: top-level ``policy`` + ``driftEvaluated`` + scope + plugins map.
     policy_payload: dict[str, bool] = {

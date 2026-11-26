@@ -4,7 +4,7 @@ import { join } from 'node:path'
 
 import { describe, expect, test } from 'bun:test'
 
-import type { ClickHouseExecutor } from '@chkit/clickhouse'
+import { allReplicas, resolveReplicaFanoutOrThrow, type ClickHouseExecutor } from '@chkit/clickhouse'
 
 import {
   type CliResult,
@@ -42,16 +42,28 @@ describe('async ALTER rejected before it started (#767)', () => {
       const fixture = await createFixture('bskill', 'ORDER BY k', 'v = v + 100 + sleepEachRow(0.5) * 0')
       try {
         const db = quoteIdent(fixture.database)
+        const fanout = await resolveReplicaFanoutOrThrow(fixture.executor)
+        const processes = fanout ? allReplicas(fanout, 'system.processes') : 'system.processes'
+        const control = fixture.executor.queryControl
+        if (!control) throw new Error('The live executor must support query control')
         const first = migrate(fixture)
         const running = await pollUntil(
           () => fixture.executor.query<{ query_id: string }>(
-            `SELECT query_id FROM system.processes WHERE current_database = '${fixture.database}' AND query LIKE 'ALTER TABLE t UPDATE%'`,
+            `SELECT query_id FROM ${processes} WHERE current_database = '${fixture.database}' AND query LIKE 'ALTER TABLE t UPDATE%'`,
           ),
           (rows) => rows.length > 0,
           { timeoutMs: 60_000, intervalMs: 200 },
         )
-        await fixture.executor.command(`KILL QUERY WHERE query_id = '${running[0]?.query_id}' SYNC`)
-        await first.result
+        expect(running.length).toBeGreaterThan(0)
+        const killed = await pollUntil(
+          () => control<{ kill_status: string }>(`KILL QUERY WHERE query_id = '${running[0]?.query_id}' SYNC`, 10_000),
+          (rows) => rows.length > 0,
+          { timeoutMs: 10_000, intervalMs: 100 },
+        )
+        expect(killed.map((row) => row.kill_status)).toContain('finished')
+        const stopped = await first.result
+        expect(stopped.exitCode, formatTestDiagnostic('killed run', stopped)).toBe(1)
+        expect(JSON.parse(stopped.stdout).error.code).toBe('async_outcome_unknown')
         const completed = await waitForValues(fixture, [100, 101, 102, 103, 104])
 
         const again = await migrate(fixture).result

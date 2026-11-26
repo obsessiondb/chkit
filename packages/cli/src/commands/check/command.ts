@@ -5,6 +5,7 @@ import { collectDefinitionWarnings, configuredIndexGranularity } from '@chkit/co
 
 import { typedFlags, type ChxPluginCommand } from '../../plugins.js'
 import { resolveDirs } from '../../runtime/config.js'
+import { collectMigrationDataCopyWarnings } from '../../runtime/data-copy-warnings.js'
 import { debug } from '../../runtime/debug.js'
 import { GLOBAL_FLAGS, TABLE_FLAG } from '../../runtime/global-flags.js'
 import { emitJson } from '../../runtime/json-output.js'
@@ -105,7 +106,10 @@ export const checkCommand: ChxPluginCommand = {
       tableScope,
       databaseMissing,
       database,
-      warnings: collectDefinitionWarnings(snapshot?.definitions ?? []).map((issue) => issue.message),
+      warnings: [
+        ...collectDefinitionWarnings(snapshot?.definitions ?? []).map((issue) => issue.message),
+        ...await collectMigrationDataCopyWarnings(migrationsDir, pending),
+      ],
     }
     const result = evaluateCheck(inputs)
 

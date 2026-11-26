@@ -40,7 +40,7 @@ class _ProbeFailingClient:
     executed: list[str] = field(default_factory=list[str])
     create_attempts: int = 0
 
-    def query(self, sql: str) -> Any:
+    def query(self, sql: str, settings: object = None) -> Any:
         if sql.startswith("SELECT currentDatabase()"):
             return SimpleNamespace(rows=[{"database": "app"}])
         if not any(executed.startswith("CREATE TABLE") for executed in self.executed):

@@ -2,4 +2,6 @@
 "chkit": patch
 ---
 
-`chkit plugin <name> <command>` passes a plugin command only its positional arguments in `args`, as `chkit <name> <command>` does, instead of every token including its flags; `--` now ends a plugin command's flags, so the tokens after it reach `args` as they are, instead of failing with `Unknown flag: --` (#568).
+Plugin commands receive only positional arguments through either spelling, honor `--`, reject invalid flags before hooks, and can reject positionals with `takesArgs: false` or declare short flags with `FlagDef.short`. Plugin listings show only configured plugins and fail clearly when none are configured.
+
+- Breaking: a plugin command that skipped `args[0]` because it held its own name must stop doing so.

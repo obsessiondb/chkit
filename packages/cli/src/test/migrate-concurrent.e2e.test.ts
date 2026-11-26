@@ -16,6 +16,7 @@ import {
   quoteIdent,
   startCli,
   waitForTable,
+  waitForRows,
 } from './e2e-testkit.js'
 
 // #716: two `migrate --apply` runs at once against one target both applied
@@ -123,6 +124,10 @@ function lockErrorCode(run: CliResult): string | undefined {
 
 async function countEvents(fixture: Fixture): Promise<number> {
   const db = quoteIdent(fixture.database)
-  const [row] = await fixture.executor.query<{ n: string }>(`SELECT toString(count()) AS n FROM ${db}.events`)
-  return Number(row?.n)
+  const rows = await waitForRows<{ n: string }>(fixture.executor,
+    `SELECT toString(count()) AS n FROM ${db}.events SETTINGS select_sequential_consistency = 1, enable_parallel_replicas = 0`,
+    (rows) => Number(rows[0]?.n) === ROWS,
+    'the winning migration rows are visible',
+  )
+  return Number(rows[0]?.n)
 }

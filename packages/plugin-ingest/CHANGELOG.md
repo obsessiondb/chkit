@@ -1,5 +1,25 @@
 # @chkit/plugin-ingest
 
+## 0.2.0-beta.19
+
+### Patch Changes
+
+- Updated dependencies: `@chkit/plugin-sync@0.2.0-beta.19`
+
+## 0.2.0-beta.18
+
+### Patch Changes
+
+- 05c5a1f: Configure execution-wide source retries with `ingest({ retry: { retries: 2 } })` or override the retry count for one run with `chkit ingest run --retries 2`; the default remains 5.
+- b216be6: Ingestion rejects blank or incomplete journal responses instead of treating them as missing checkpoints.
+- Updated dependencies: `@chkit/core@0.2.0-beta.18`, `@chkit/clickhouse@0.2.0-beta.18`
+
+## 0.2.0-beta.17
+
+### Patch Changes
+
+- Updated dependencies: `@chkit/core@0.2.0-beta.17`, `@chkit/clickhouse@0.2.0-beta.17`
+
 ## 0.2.0-beta.16
 
 ### Patch Changes

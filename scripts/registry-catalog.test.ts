@@ -74,7 +74,7 @@ test.serial('modular provider artifacts install runnable readers, discoverable s
   const names = ['circleback', 'github', 'google-calendar', 'google-meet', 'lemlist', 'linear']
   const source = await readRegistrySourceCatalog()
   const catalog = { ...source, items: source.items.filter((item) => names.includes(item.name)).map((item) => ({
-    ...item, dependencies: [`@chkit/core@${CLI_VERSION}`, `@chkit/plugin-ingest@${CLI_VERSION}`],
+    ...item, dependencies: [`@chkit/core@${CLI_VERSION}`, `@chkit/plugin-sync@${CLI_VERSION}`],
     meta: { chkit: { ...item.meta.chkit, chkit: CLI_VERSION, ingest: CLI_VERSION } },
   })) }
   expect(catalog.items.map((item) => item.name)).toEqual(names)
@@ -93,7 +93,7 @@ test.serial('modular provider artifacts install runnable readers, discoverable s
     await applyInstallation(plan)
   }
   const credentials = Object.fromEntries(built.items.flatMap((item) => Object.keys(item.meta.chkit.env).map((name) => [name, ''])))
-  const list = runCli(project, ['ingest', 'list', '--json'], credentials)
+  const list = runCli(project, ['sync', 'list', '--json'], credentials)
   expect(list.exitCode, formatTestDiagnostic('installed provider discovery without credentials', list)).toBe(0)
   const streams: Array<{ pipelineId: string; destination: string; tags: string[] }> = JSON.parse(list.stdout).streams
   for (const item of built.items) {

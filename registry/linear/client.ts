@@ -1,4 +1,4 @@
-import { HttpError, paginate, type Page, type SourceContext, type TimestampRange } from '@chkit/plugin-ingest'
+import { HttpError, paginate, type Page, type SourceContext, type TimestampRange } from '@chkit/plugin-sync'
 import { z } from 'zod'
 
 import { linearConfigSchema, type LinearConfig } from './config.js'
