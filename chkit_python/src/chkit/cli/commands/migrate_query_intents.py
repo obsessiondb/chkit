@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from chkit import __version__
 from chkit.cli.commands.migrate_errors import MigrateError
 from chkit.cli.commands.migrate_interrupt import interrupted, raise_if_interrupted
+from chkit.cli.commands.migrate_settings import plain_setting_value
 from chkit.core.identifier import quote_identifier
 from chkit.core.sql_fingerprint import statement_fingerprint
 from chkit.core.sql_lexer import SQLToken, identifier_name, is_trivia, tokenize_sql
@@ -209,9 +210,10 @@ class QueryTracker:
             settings is not None and (
                 any(key not in CANCELLABLE_SETTINGS for key, value in settings.items()
                     if value is not None)
-                or ("async_insert" in settings and str(settings["async_insert"]) != "0")
+                or ("async_insert" in settings
+                    and plain_setting_value(settings["async_insert"]) != "0")
                 or ("wait_for_async_insert" in settings
-                    and str(settings["wait_for_async_insert"]) != "1")
+                    and plain_setting_value(settings["wait_for_async_insert"]) != "1")
             )
         )
         recorded_target = classification.target

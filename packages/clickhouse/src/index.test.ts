@@ -432,6 +432,31 @@ SETTINGS index_granularity = 8192;`
     await executor.close()
   })
 
+  // #790: async_insert and wait_for_async_insert are defaults a caller may
+  // override, sent after the caller's other settings: the server applies a
+  // request's settings in order, so a settings profile would change them.
+  test('a write sends the durable insert settings last, the caller\'s value as written', async () => {
+    const sent: unknown[] = []
+    const client = {
+      async command(params: { clickhouse_settings?: unknown }) {
+        sent.push(params.clickhouse_settings)
+        return { query_id: 'q', response_headers: {} }
+      },
+      async close() {},
+    } as unknown as ReturnType<typeof createStatelessClickHouseClient>
+    const executor = createExecutorWithClient(
+      { url: 'http://localhost:8123', username: 'default', password: '', database: 'default', secure: false },
+      client,
+    )
+    await executor.command('INSERT INTO t VALUES (1)', { async_insert: 'TRUE' as unknown as 1, profile: 'bulk' })
+    await executor.command('INSERT INTO t VALUES (2)', { profile: 'bulk' })
+    expect(sent.map((settings) => Object.entries(settings as object))).toEqual([
+      [...Object.entries(progress), ['profile', 'bulk'], ['async_insert', 'TRUE'], ['wait_for_async_insert', 1]],
+      [...Object.entries(progress), ['profile', 'bulk'], ['async_insert', 0], ['wait_for_async_insert', 1]],
+    ])
+    await executor.close()
+  })
+
   test('a failed readonly lookup fails the read and is looked up again on the next one', async () => {
     let lookups = 0
     const client = {

@@ -92,7 +92,7 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(migrate, "open_client", lambda *_args: nullcontext(None))
     monkeypatch.setattr(migrate, "JournalStore", _EmptyJournalStore)
     # No server: the insert settings check (#790) has nothing to read.
-    monkeypatch.setattr(migrate, "assert_insert_settings_changeable", lambda _client: None)
+    monkeypatch.setattr(migrate, "assert_insert_settings_changeable", lambda _client, _settings=None: None)
     _reset_for_testing()  # an earlier --json run in this process marks JSON as written
     return tmp_path
 

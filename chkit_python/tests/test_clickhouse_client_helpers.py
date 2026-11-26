@@ -192,6 +192,56 @@ def test_execute_sends_no_asynchronous_insert_as_ts_does() -> None:
     assert fake.command.call_args.kwargs["settings"] == {}
 
 
+def test_durable_insert_settings_are_defaults_sent_after_the_callers_others() -> None:
+    """#790: a caller's value of either setting is sent as written, and both go
+    after the caller's other settings, since the server applies a request's
+    settings in order and a settings profile would otherwise change them. One
+    the user cannot change is checked in plain form, as TS's server does."""
+    client, fake = _stub_client()
+    fake.server_settings = {
+        "async_insert": SimpleNamespace(readonly=False, value="0"),
+        "wait_for_async_insert": SimpleNamespace(readonly=False, value="1"),
+    }
+    client.execute("INSERT INTO t VALUES (1)", settings={"async_insert": "TRUE", "profile": "bulk"})
+    client.execute("INSERT INTO t VALUES (2)", settings={"profile": "bulk", "max_threads": 2})
+    sent = [call.kwargs["settings"] for call in fake.command.call_args_list]
+    assert [list(settings.items()) for settings in sent] == [
+        [("profile", "bulk"), ("async_insert", "TRUE"), ("wait_for_async_insert", 1)],
+        [("profile", "bulk"), ("max_threads", 2), ("async_insert", 0),
+         ("wait_for_async_insert", 1)],
+    ]
+
+    fake.server_settings = {
+        "async_insert": SimpleNamespace(readonly=True, value="1"),
+        "wait_for_async_insert": SimpleNamespace(readonly=False, value="1"),
+    }
+    client.execute("INSERT INTO t VALUES (3)", settings={"async_insert": "true"})
+    assert fake.command.call_args.kwargs["settings"] == {"wait_for_async_insert": 1}
+    with pytest.raises(
+        RuntimeError,
+        match="Setting async_insert is fixed at 1 for this ClickHouse user, and this write "
+        "sends async_insert = false",
+    ):
+        client.execute("INSERT INTO t VALUES (4)", settings={"async_insert": "false"})
+    assert fake.command.call_count == 3
+
+
+def test_every_driver_accepts_a_settings_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#790: clickhouse-connect refuses a setting system.settings does not
+    list, and ``profile`` is none; TS sends it, and the server applies it."""
+    monkeypatch.setattr(clickhouse_connect, "get_client", lambda **_kwargs: MagicMock(
+        valid_transport_settings={"database", "query_id"}
+    ))
+    client = ClickHouseClient.connect(
+        ChxResolvedClickHouseConfig(
+            url="http://localhost:8123", username="default", password="pw",
+            database="analytics", secure=False,
+        )
+    )
+    assert client._client.valid_transport_settings == {"database", "query_id", "profile"}
+    assert "profile" in client.open_concurrent()._client.valid_transport_settings
+
+
 def test_tracked_execute_applies_the_same_durable_settings_check_as_execute() -> None:
     """#790: a setting fixed at chkit's value is left out, one fixed at another
     value is refused before an id is recorded or anything is sent."""

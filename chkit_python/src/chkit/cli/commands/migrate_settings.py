@@ -37,26 +37,26 @@ _RESERVED_NAMES = frozenset({
 })
 
 
-# migrate journals a statement as completed when the server finishes it, and
-# an asynchronous INSERT finishes before its rows leave the buffer unless it
-# waits for the flush. chkit sends ``async_insert = 0`` and
-# ``wait_for_async_insert = 1`` with every statement, so ``--setting`` may only
-# repeat them, as 0 or 1, and may not name a settings profile that would apply
-# over them (#790).
-_DURABLE_INSERT_SETTINGS: dict[str, tuple[str, tuple[str, ...]]] = {
-    "async_insert": ("0", ("0", "false")),
-    "wait_for_async_insert": ("1", ("1", "true")),
+# What every migration write sends unless ``--setting`` names it, so that a
+# statement migrate journals as applied is stored (#790), each with the
+# guarantee another value turns off. The client sends them after the other
+# settings, so a settings profile among those cannot change them. TS
+# ``INSERT_SETTING_DEFAULTS``.
+_INSERT_SETTING_DEFAULTS: dict[str, tuple[str, str]] = {
+    "async_insert": (
+        "0", "an INSERT is queued as an asynchronous insert, which migrate cannot cancel",
+    ),
+    "wait_for_async_insert": (
+        "1", "an asynchronous INSERT can be journaled as applied before its rows are stored",
+    ),
 }
 
 
-def _durable_insert_value(name: str, value: str) -> str | None:
-    if name == "profile":
-        return None
-    durable = _DURABLE_INSERT_SETTINGS.get(name)
-    if durable is None:
-        return value
-    stored, spellings = durable
-    return stored if value.lower() in spellings else None
+def plain_setting_value(value: object) -> str:
+    """A boolean setting's value in plain form, ``true`` and ``false`` as 1
+    and 0. TS ``plainSettingValue``."""
+    text = ("true" if value else "false") if isinstance(value, bool) else str(value).lower()
+    return {"true": "1", "false": "0"}.get(text, text)
 
 
 def parse_setting_flags(values: Sequence[str] | None) -> dict[str, str] | None:
@@ -88,27 +88,38 @@ def parse_setting_flags(values: Sequence[str] | None) -> dict[str, str] | None:
                 "parameter, not a query setting."
             )
             raise MigrateError("invalid_usage", msg)
-        raw = js_trim(value)
-        durable = _durable_insert_value(name, raw)
-        if durable is None:
-            msg = (
-                f"--setting {name}={raw} is not allowed: migrate would record an "
-                "asynchronous INSERT as applied while its rows may still be buffered. "
-                "Nothing ran."
-            )
-            raise MigrateError("invalid_usage", msg)
-        settings[name] = durable
+        settings[name] = js_trim(value)
     return settings
 
 
-def assert_insert_settings_changeable(client: ClickHouseClient) -> None:
+def insert_settings_override_warning(settings: dict[str, str] | None) -> str | None:
+    """The one warning line a migrate run prints when ``--setting`` gives
+    ``async_insert`` or ``wait_for_async_insert`` another value than chkit's
+    default, or None (#790). TS ``insertSettingsOverrideWarning``."""
+    overridden = [
+        f"{name}={(settings or {})[name]} ({guarantee})"
+        for name, (default, guarantee) in _INSERT_SETTING_DEFAULTS.items()
+        if name in (settings or {}) and plain_setting_value((settings or {})[name]) != default
+    ]
+    if not overridden:
+        return None
+    return (
+        "Warning: --setting overrides what every migration write sets by default: "
+        f"{'; '.join(overridden)}."
+    )
+
+
+def assert_insert_settings_changeable(
+    client: ClickHouseClient, settings: dict[str, str] | None = None
+) -> None:
     """Refuse an applying run, before anything is sent, for a user whose
     settings constraints fix ``async_insert`` or ``wait_for_async_insert`` at
-    another value than chkit sends: its writes could not be made to be stored
-    when they return (#790). A ``readonly = 1`` user is left to the server's
-    own refusal of its writes. A failed read stops the run, as any failed
-    request does, except while the configured database does not exist yet: a
-    run that creates it is then left to the server's refusal of its writes.
+    another value than a write sends: a migration statement sends the
+    ``--setting`` value if any, chkit's own journal writes chkit's default
+    (#790). A ``readonly = 1`` user is left to the server's own refusal of its
+    writes. A failed read stops the run, as any failed request does, except
+    while the configured database does not exist yet: a run that creates it is
+    then left to the server's refusal of its writes.
     TS ``assertInsertSettingsChangeable``."""
     try:
         rows = client.query(
@@ -123,11 +134,22 @@ def assert_insert_settings_changeable(client: ClickHouseClient) -> None:
     mode = by_name.get("readonly")
     if mode is not None and str(mode["value"]) == "1":
         return
-    for name, (durable, _spellings) in _DURABLE_INSERT_SETTINGS.items():
+    for name, (default, _guarantee) in _INSERT_SETTING_DEFAULTS.items():
         row = by_name.get(name)
-        if row is not None and str(row["readonly"]) != "0" and str(row["value"]) != durable:
-            msg = insert_settings_fixed_message(name, str(row["value"]), durable)
+        if row is None or str(row["readonly"]) == "0":
+            continue
+        fixed = str(row["value"])
+        own = (settings or {}).get(name)
+        if own is not None and plain_setting_value(own) != fixed:
+            msg = (
+                f"Setting {name} is fixed at {fixed} for this ClickHouse user, so "
+                f"--setting {name}={own} cannot apply. Nothing ran."
+            )
             raise MigrateError("insert_settings_fixed", msg)
+        if default != fixed:
+            raise MigrateError(
+                "insert_settings_fixed", insert_settings_fixed_message(name, fixed, default)
+            )
 
 
 def insert_settings_fixed_message(name: str, value: str, durable: str) -> str:

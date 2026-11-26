@@ -8,6 +8,7 @@ import type { RecoveryObligation } from './cancellation.js'
 import { CLI_VERSION } from '../../runtime/version.js'
 import { MigrateError } from './errors.js'
 import type { LockTarget, MigrateLock } from './lock.js'
+import { plainSettingValue } from './settings.js'
 
 export const QUERY_INTENT_PREFIX = '__chkit_migrate_query__/'
 /** Suffix of the row that marks a claim as having run untracked statements. */
@@ -115,8 +116,8 @@ export function createQueryTracker(input: {
       lock.assertHeld()
     }
     const unsafeSettings = Object.entries(settings ?? {}).some(([key, value]) => value !== undefined && !CANCELLABLE_SETTINGS.has(key))
-      || (settings?.async_insert !== undefined && String(settings.async_insert) !== '0')
-      || (settings?.wait_for_async_insert !== undefined && String(settings.wait_for_async_insert) !== '1')
+      || (settings?.async_insert !== undefined && plainSettingValue(settings.async_insert) !== '0')
+      || (settings?.wait_for_async_insert !== undefined && plainSettingValue(settings.wait_for_async_insert) !== '1')
     const intent: QueryIntent = {
       ...identity, claim, queryId, migration: context.migration, statementIndex: context.statementIndex,
       phase, fingerprint: statementFingerprint(sql), forwardFingerprint: statementFingerprint(context.forwardSQL),

@@ -141,7 +141,7 @@ describe('attested table source admission', () => {
       } as unknown as ClickHouseExecutor
       const tracker = createQueryTracker({ db, identity: { ...identity, cluster: 'declared' }, target: { database: 'app', journalTable: '_chkit_migrations', fanout: undefined }, lock: { claimId: 'claim', assertHeld() { if (!held) throw new Error('ownership lost') }, release: async () => {} } })
       const sql = 'INSERT INTO app.events SELECT id FROM app.frozen'
-      const run = tracker.command({ ...context, forwardSQL: sql }, fault === 'compensation source' ? 'compensation' : 'forward', fault === 'compensation source' ? context.beforeRetry : sql, fault === 'parallel read setting' ? { cluster_for_parallel_replicas: 'other' } : { max_threads: 1, async_insert: '0', wait_for_async_insert: '1' })
+      const run = tracker.command({ ...context, forwardSQL: sql }, fault === 'compensation source' ? 'compensation' : 'forward', fault === 'compensation source' ? context.beforeRetry : sql, fault === 'parallel read setting' ? { cluster_for_parallel_replicas: 'other' } : { max_threads: 1, async_insert: 'false', wait_for_async_insert: 'TRUE' })
       if (fault === 'ownership') {
         await expect(run).rejects.toThrow('ownership lost')
         expect(events).not.toContain('user SQL')

@@ -306,8 +306,7 @@ def test_migrate_apply_refuses_a_user_with_async_insert_fixed_before_the_journal
             "ENGINE = ReplacingMergeTree(applied_at) ORDER BY name"
         )
 
-        apply = as_user("migrate", "--apply", exit_code=1)
-        assert apply["error"] == {
+        fixed = {
             "code": "insert_settings_fixed",
             "message": (
                 "Setting async_insert is fixed at 1 for this ClickHouse user, and chkit migrate "
@@ -315,6 +314,11 @@ def test_migrate_apply_refuses_a_user_with_async_insert_fixed_before_the_journal
                 "Nothing ran."
             ),
         }
+        assert as_user("migrate", "--apply", exit_code=1)["error"] == fixed
+        # An override at the fixed value is checked as sent, and still refused:
+        # chkit's own journal writes send its default.
+        override = as_user("migrate", "--apply", "--setting", "async_insert=true", exit_code=1)
+        assert override["error"] == fixed
         columns = admin.query(
             "SELECT name FROM system.columns "
             f"WHERE database = '{env.clickhouse_database}' AND table = '{journal_table}' "

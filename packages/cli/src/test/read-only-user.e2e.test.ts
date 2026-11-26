@@ -243,11 +243,15 @@ describe('read-only commands (#402)', () => {
         `CREATE TABLE ${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(project.journalTable)} (name String, applied_at DateTime64(3, 'UTC'), checksum String, chkit_version String) ENGINE = ReplacingMergeTree(applied_at) ORDER BY name`,
       )
 
-      const apply = json(project.cli(user, ['migrate', '--apply', '--json']), 'migrate --apply', 1)
-      expect(apply.error).toEqual({
+      const fixed = {
         code: 'insert_settings_fixed',
         message: 'Setting async_insert is fixed at 1 for this ClickHouse user, and chkit migrate needs async_insert = 0 so that a statement it records as applied is stored. Nothing ran.',
-      })
+      }
+      expect(json(project.cli(user, ['migrate', '--apply', '--json']), 'migrate --apply', 1).error).toEqual(fixed)
+      // An override at the fixed value is checked as sent, and still refused:
+      // chkit's own journal writes send its default.
+      const override = json(project.cli(user, ['migrate', '--apply', '--json', '--setting', 'async_insert=true']), 'migrate --apply --setting', 1)
+      expect(override.error).toEqual(fixed)
       const columns = await executor.query<{ name: string }>(
         `SELECT name FROM system.columns WHERE database = '${env.clickhouseDatabase}' AND table = '${project.journalTable}' ORDER BY position`,
       )

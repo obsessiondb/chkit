@@ -122,6 +122,7 @@ from chkit.cli.commands.migrate_retry import (
 from chkit.cli.commands.migrate_scope import filter_pending_by_scope
 from chkit.cli.commands.migrate_settings import (
     assert_insert_settings_changeable,
+    insert_settings_override_warning,
     parse_setting_flags,
 )
 from chkit.cli.config_loader import load_config
@@ -431,6 +432,9 @@ def _run(
             "an enabled migrate lock and query tracking, and no --abandon.",
         )
     settings = parse_setting_flags(setting)
+    override_warning = insert_settings_override_warning(settings)
+    if override_warning:
+        typer.echo(override_warning, err=True)
     config = load_config(config_path, ChxConfigEnv(command="migrate"))
     plugin_runtime = load_plugin_runtime(
         [p for p in config.plugins if isinstance(p, ChxPlugin)]
@@ -515,7 +519,7 @@ def _run(
         )
         # Reading the journal can upgrade its schema, a write (#790).
         if execute_requested:
-            assert_insert_settings_changeable(cast(ClickHouseClient, raw_client))
+            assert_insert_settings_changeable(cast(ClickHouseClient, raw_client), settings)
         journal = journal_store.read_journal(project_files=files)
         applied_names = {entry.name for entry in journal.applied}
         ctx = _MigrateContext(
@@ -538,6 +542,7 @@ def _run(
             retry_target=targets.retry_target,
             with_lock=_MigrateLockRunner(
                 raw_client=raw_client,
+                settings=settings,
                 journal_store=journal_store,
                 initial_identity=initial_identity,
                 migrations_dir=migrations_dir,
@@ -1080,6 +1085,7 @@ class _MigrateLockRunner(WithLock):
         self,
         *,
         raw_client: Any,
+        settings: dict[str, str] | None = None,
         journal_store: JournalStore,
         holder: _LockHolder,
         break_lock: str | None,
@@ -1091,6 +1097,7 @@ class _MigrateLockRunner(WithLock):
         initial_identity: QueryIdentity | None = None,
     ) -> None:
         self._raw_client = raw_client
+        self._settings = settings
         self._initial_identity = initial_identity
         self._journal_store = journal_store
         self._holder = holder
@@ -1140,7 +1147,7 @@ class _MigrateLockRunner(WithLock):
         abandon: str | None, lock_state: InterruptLock,
     ) -> _T:
         # Every run that writes passes here first, interactive or not (#790).
-        assert_insert_settings_changeable(self._raw_client)
+        assert_insert_settings_changeable(self._raw_client, self._settings)
         if migrate_lock_disabled():
             typer.echo(
                 "⚠ CHKIT_MIGRATE_LOCK is off: this run takes no migrate lock, so a "

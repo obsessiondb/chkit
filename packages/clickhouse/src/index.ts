@@ -823,17 +823,19 @@ const PROGRESS_SETTINGS: ClickHouseSettings = {
 
 // A write is stored when it returns: no asynchronous INSERT, and one that a
 // table's own async_insert setting still makes asynchronous waits for its
-// flush (#790).
-const DURABLE_INSERT_SETTINGS: ClickHouseSettings = {
-	async_insert: 0,
-	wait_for_async_insert: 1,
+// flush (#790). These are defaults: a caller's own value of either is sent as
+// written. They go after the caller's other settings, since the server
+// applies a request's settings in order and a settings profile among them
+// would otherwise change them.
+function withDurableInsertSettings(settings: ClickHouseSettings | undefined): ClickHouseSettings {
+	const { async_insert, wait_for_async_insert, ...rest } = settings ?? {}
+	return { ...rest, async_insert: async_insert ?? 0, wait_for_async_insert: wait_for_async_insert ?? 1 }
 }
 
 // Sent with writes only (command and insert): stored writes, and progress
 // headers that keep a long migration's connection alive.
-const WRITE_SETTINGS: ClickHouseSettings = {
-	...DURABLE_INSERT_SETTINGS,
-	...PROGRESS_SETTINGS,
+function writeSettings(settings: ClickHouseSettings | undefined): ClickHouseSettings {
+	return withDurableInsertSettings({ ...PROGRESS_SETTINGS, ...settings })
 }
 
 // A readonly = 1 user cannot change any setting: ClickHouse rejects a query
@@ -955,7 +957,7 @@ export function createExecutorWithClient(
 
 	async function command(sql: string, settings?: ClickHouseSettings, check?: () => void, beforeAttempt?: () => Promise<string>): Promise<void> {
 		const { query_id: _ignored, ...trackedSettings } = settings ?? {}
-		const commandSettings: ClickHouseSettings = beforeAttempt ? { ...WRITE_SETTINGS, ...trackedSettings } : { ...WRITE_SETTINGS, ...settings }
+		const commandSettings = writeSettings(beforeAttempt ? trackedSettings : settings)
 		check?.()
 		let queryId: string | undefined
 		if (beforeAttempt) {
@@ -1189,7 +1191,7 @@ export function createExecutorWithClient(
 					values: params.stream ? Readable.from(params.values) : params.values,
 					format: 'JSONEachRow',
 					...(isNonEmpty(params.columns) ? { columns: params.columns } : {}),
-					clickhouse_settings: { ...WRITE_SETTINGS, ...params.settings },
+					clickhouse_settings: writeSettings(params.settings),
 				})
 				assertStreamedQuerySucceeded({
 					response_headers: result.response_headers,
@@ -1249,7 +1251,7 @@ export function createExecutorWithClient(
 					query_id: id,
 					// Stored when it finishes, as a command is: an asynchronous INSERT
 					// would finish while its rows are still buffered (#790).
-					clickhouse_settings: { ...DURABLE_INSERT_SETTINGS, ...clickhouseSettings },
+					clickhouse_settings: withDurableInsertSettings(clickhouseSettings),
 					...(submitOptions?.signal ? { abort_signal: submitOptions.signal } : {}),
 				})
 			} catch (error) {

@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
 
-import { assertInsertSettingsChangeable, parseSettingFlags } from '../../../commands/migrate/settings.js'
+import { assertInsertSettingsChangeable, insertSettingsOverrideWarning, parseSettingFlags } from '../../../commands/migrate/settings.js'
 
 describe('migrate --setting parsing (#321)', () => {
   test('no --setting yields no settings', () => {
@@ -35,19 +35,30 @@ describe('migrate --setting parsing (#321)', () => {
     }
   })
 
-  test('async inserts may only stay off and waited for (#790)', () => {
-    expect(parseSettingFlags(['async_insert=0', ' async_insert = FALSE '])).toEqual({ async_insert: '0' })
-    expect(parseSettingFlags(['wait_for_async_insert=True'])).toEqual({ wait_for_async_insert: '1' })
-    const refused = [
-      ...['1', 'true', 'True', '2', ''].map((value) => `async_insert=${value}`),
-      ...['0', 'false', ''].map((value) => `wait_for_async_insert=${value}`),
-      'profile=bulk',
-    ]
-    for (const entry of refused) {
-      expect(() => parseSettingFlags(['max_threads=1', entry])).toThrow(
-        `--setting ${entry} is not allowed: migrate would record an asynchronous INSERT as applied while its rows may still be buffered. Nothing ran.`,
-      )
-    }
+  test('async_insert, wait_for_async_insert and profile are kept as written (#790)', () => {
+    expect(parseSettingFlags(['async_insert=TRUE', 'wait_for_async_insert = 0', 'profile=bulk'])).toEqual({
+      async_insert: 'TRUE',
+      wait_for_async_insert: '0',
+      profile: 'bulk',
+    })
+  })
+})
+
+describe('migrate --setting insert overrides warning (#790)', () => {
+  test('values equal to chkit\'s defaults, in any spelling, warn about nothing', () => {
+    expect(insertSettingsOverrideWarning(undefined)).toBeUndefined()
+    expect(insertSettingsOverrideWarning({ max_threads: '1', profile: 'bulk' })).toBeUndefined()
+    expect(insertSettingsOverrideWarning({ async_insert: 'FALSE', wait_for_async_insert: '1' })).toBeUndefined()
+    expect(insertSettingsOverrideWarning({ async_insert: '0', wait_for_async_insert: 'true' })).toBeUndefined()
+  })
+
+  test('one line names each overridden setting as written, with the guarantee it turns off', () => {
+    expect(insertSettingsOverrideWarning({ async_insert: 'True' })).toBe(
+      'Warning: --setting overrides what every migration write sets by default: async_insert=True (an INSERT is queued as an asynchronous insert, which migrate cannot cancel).',
+    )
+    expect(insertSettingsOverrideWarning({ wait_for_async_insert: '0', async_insert: '1' })).toBe(
+      'Warning: --setting overrides what every migration write sets by default: async_insert=1 (an INSERT is queued as an asynchronous insert, which migrate cannot cancel); wait_for_async_insert=0 (an asynchronous INSERT can be journaled as applied before its rows are stored).',
+    )
   })
 })
 
@@ -81,4 +92,17 @@ describe('migrate refuses a user whose insert settings are fixed (#790)', () => 
       })
     })
   }
+
+  test('an override is checked as sent, and chkit\'s default as its journal writes send it', async () => {
+    const fixedAt = (name: string, value: string) => changeable.map((row) => (row.name === name ? { name, value, readonly: 1 } : row))
+    await assertInsertSettingsChangeable(executor(fixedAt('async_insert', '0')), { async_insert: 'false' })
+    await expect(assertInsertSettingsChangeable(executor(fixedAt('async_insert', '0')), { async_insert: '1' })).rejects.toMatchObject({
+      code: 'insert_settings_fixed',
+      message: 'Setting async_insert is fixed at 0 for this ClickHouse user, so --setting async_insert=1 cannot apply. Nothing ran.',
+    })
+    await expect(assertInsertSettingsChangeable(executor(fixedAt('wait_for_async_insert', '0')), { wait_for_async_insert: 'false' })).rejects.toMatchObject({
+      code: 'insert_settings_fixed',
+      message: 'Setting wait_for_async_insert is fixed at 0 for this ClickHouse user, and chkit migrate needs wait_for_async_insert = 1 so that a statement it records as applied is stored. Nothing ran.',
+    })
+  })
 })
