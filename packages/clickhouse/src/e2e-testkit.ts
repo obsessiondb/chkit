@@ -228,9 +228,12 @@ export async function runOnceVisible<T>(run: () => Promise<T>, options: PollUnti
  * sends the statement, tagged with a `log_comment`, once per replica in a row,
  * then flushes the query log once per replica, until every replica
  * `clusterAllReplicas` reaches has logged it. A round with any other request
- * between two of its own could keep reaching the same replica. The statement
- * must be safe to repeat. On a single node it runs once, through `executor`.
- * chkit-py's twin is `run_on_every_replica`.
+ * between two of its own could keep reaching the same replica, so rounds are
+ * a random time apart, which moves them against concurrent callers. The
+ * statement must be safe to repeat, and its table must already be on every
+ * replica: `SYSTEM STOP MERGES` on a missing table succeeds and does nothing.
+ * On a single node it runs once, through `executor`. chkit-py's twin is
+ * `run_on_every_replica`.
  */
 export async function runOnEveryReplica(
   executor: ClickHouseExecutor,
@@ -263,7 +266,7 @@ export async function runOnEveryReplica(
     if (Date.now() >= deadline) {
       throw new Error(`runOnEveryReplica: ${statement} ran on ${ran} of ${replicas} replicas after ${timeoutMs} ms`)
     }
-    await sleep(intervalMs)
+    await sleep(intervalMs * (0.5 + Math.random()))
   }
 }
 

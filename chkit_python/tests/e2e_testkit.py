@@ -27,6 +27,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import random
 import secrets
 import time
 import urllib.error
@@ -335,8 +336,11 @@ def run_on_every_replica(
     replica in a row, then flushes the query log once per replica, until every
     replica ``clusterAllReplicas`` reaches has logged it. A round with any
     other request between two of its own could keep reaching the same
-    replica. The statement must be safe to repeat. On a single node it runs
-    once, through ``client``. TS twin: ``runOnEveryReplica``.
+    replica, so rounds are a random time apart, which moves them against
+    concurrent callers. The statement must be safe to repeat, and its table
+    must already be on every replica: ``SYSTEM STOP MERGES`` on a missing
+    table succeeds and does nothing. On a single node it runs once, through
+    ``client``. TS twin: ``runOnEveryReplica``.
     """
     fanout = resolve_replica_fanout_or_raise(client)
     if fanout is None:
@@ -368,7 +372,7 @@ def run_on_every_replica(
                 f"replicas after {timeout}s"
             )
             raise AssertionError(msg)
-        time.sleep(interval)
+        time.sleep(interval * (0.5 + random.random()))
 
 
 def _send_on_new_connection(env: LiveEnv, sql: str, settings: dict[str, str] | None = None) -> None:
