@@ -1,0 +1,5 @@
+---
+"chkit": patch
+---
+
+Add `chkit migrate --mark-applied <migration>` and `--mark-not-applied <migration>` to record whether the statement that stopped with `async_outcome_unknown` ran, so the next apply continues from it without running the completed statements again, as `--abandon` does.
