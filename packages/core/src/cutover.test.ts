@@ -176,10 +176,10 @@ describe('planCutover', () => {
     const nested = [...columns, { name: 'meta', type: 'String' }, { name: 'n', type: 'Nested(x UInt8)' }] as TableDefinition['columns']
     const start = plan({ oldDef: events({ columns: nested }), newDef: events({ columns: nested, primaryKey: ['user_id', 'id'], orderBy: ['user_id', 'id'] }) }).operations[0]?.sql ?? ''
     const stored = "FROM system.columns WHERE database = 'app' AND table = 'events' AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')"
-    // ClickHouse stores `n Nested(x UInt8)` as `n.x Array(UInt8)`.
-    expect(start).toContain(`(SELECT countIf(NOT has(['id', 'user_id', 'payload', 'meta', 'n.x'], name)) ${stored}) AS undeclared_columns`)
+    // ClickHouse stores `n Nested(x UInt8)` as `n.x Array(UInt8)`, or as `n` with flatten_nested = 0.
+    expect(start).toContain(`(SELECT countIf(NOT has(['id', 'user_id', 'payload', 'meta', 'n.x', 'n'], name)) ${stored}) AS undeclared_columns`)
     expect(start).toContain(
-      `((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR (SELECT hasAll(groupArray(name), ['id', 'user_id', 'payload', 'meta', 'n.x']) ${stored})) AS declared_columns`
+      `((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR (SELECT hasAll(groupArray(name), ['id', 'user_id', 'payload', 'meta']) AND (hasAll(groupArray(name), ['n.x']) OR has(groupArray(name), 'n')) ${stored})) AS declared_columns`
     )
     expect(start).toContain("throwIf(max(undeclared_columns) > 0, 'app.events stores a column that the schema does not declare")
     expect(start).toContain("throwIf(min(declared_columns) = 0, 'app.events lacks a column that the schema declares")
@@ -192,8 +192,11 @@ describe('planCutover', () => {
     // ClickHouse stores Decimal64(2) as Decimal(18, 2), so the server renders the schema's types too.
     const typed = [...columns, { name: 'price', type: 'Decimal64(2)', nullable: true }, { name: 'n', type: 'Nested(x UInt8, `y z` Decimal64(2))' }] as TableDefinition['columns']
     const start = plan({ oldDef: events({ columns: typed }), newDef: events({ columns: typed, primaryKey: ['user_id', 'id'], orderBy: ['user_id', 'id'] }) }).operations[0]?.sql ?? ''
+    // The server reads each type from a one-row format() table: defaultValueOfTypeName
+    // fails for some types before ClickHouse 26.4. With flatten_nested = 0, `n` is stored
+    // as one Nested column.
     expect(start).toContain(
-      "(SELECT countIf(has(['id', 'user_id', 'payload', 'price', 'n.x', 'n.y z'], name) AND NOT has([('id', replaceRegexpAll(replaceRegexpAll(toTypeName(defaultValueOfTypeName('UInt64')), ',\\n *', ', '), '\\n *', '')), ('user_id', replaceRegexpAll(replaceRegexpAll(toTypeName(defaultValueOfTypeName('UInt64')), ',\\n *', ', '), '\\n *', '')), ('payload', replaceRegexpAll(replaceRegexpAll(toTypeName(defaultValueOfTypeName('String')), ',\\n *', ', '), '\\n *', '')), ('price', replaceRegexpAll(replaceRegexpAll(toTypeName(defaultValueOfTypeName('Nullable(Decimal64(2))')), ',\\n *', ', '), '\\n *', '')), ('n.x', replaceRegexpAll(replaceRegexpAll(toTypeName(defaultValueOfTypeName('Array(UInt8)')), ',\\n *', ', '), '\\n *', '')), ('n.y z', replaceRegexpAll(replaceRegexpAll(toTypeName(defaultValueOfTypeName('Array(Decimal64(2))')), ',\\n *', ', '), '\\n *', ''))], (name, type))) FROM system.columns WHERE database = 'app' AND table = 'events' AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')) AS mistyped_columns"
+      "(SELECT countIf(has(['id', 'user_id', 'payload', 'price', 'n.x', 'n.y z', 'n'], name) AND NOT has([('id', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c UInt64', '{}')), ',\\n *', ', '), '\\n *', '')), ('user_id', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c UInt64', '{}')), ',\\n *', ', '), '\\n *', '')), ('payload', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c String', '{}')), ',\\n *', ', '), '\\n *', '')), ('price', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c Nullable(Decimal64(2))', '{}')), ',\\n *', ', '), '\\n *', '')), ('n.x', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c Array(UInt8)', '{}')), ',\\n *', ', '), '\\n *', '')), ('n.y z', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c Array(Decimal64(2))', '{}')), ',\\n *', ', '), '\\n *', '')), ('n', concat('Nested(', 'x ', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c UInt8', '{}')), ',\\n *', ', '), '\\n *', ''), ', y z ', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c Decimal64(2)', '{}')), ',\\n *', ', '), '\\n *', ''), ')'))], (name, type))) FROM system.columns WHERE database = 'app' AND table = 'events' AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')) AS mistyped_columns"
     )
     expect(start).toContain("throwIf(max(mistyped_columns) > 0, 'app.events stores a column with another type than the schema declares")
   })
@@ -226,10 +229,29 @@ describe('planCutover', () => {
     // AS keeps the table's TTLs. chkit-py's test_cutover.py asserts the same.
     const start = plan().operations[0]?.sql ?? ''
     expect(start).toContain("(SELECT any(NOT match(replaceRegexpAll(create_table_query, ")
-    expect(start).toContain(", '\\\\bTTL\\\\b')) FROM system.tables WHERE database = 'app' AND name = 'events')) AS no_ttl")
+    // Every identifier is quoted, so a column named TTL is not taken for one.
+    expect(start).toContain(
+      ", '\\\\bTTL\\\\b')) FROM system.tables WHERE database = 'app' AND name = 'events' SETTINGS show_create_query_identifier_quoting_rule = 'always')) AS no_ttl"
+    )
     expect(start).toContain("throwIf(min(no_ttl) = 0, 'app.events has a TTL")
     const fromDefinition = plan({ oldDef: { ...OLD, engine: 'ReplicatedMergeTree' }, newDef: { ...NEW, engine: 'ReplicatedMergeTree' }, options: { cluster: 'c2' } }).operations[0]?.sql ?? ''
     expect(fromDefinition).not.toContain('no_ttl')
+  })
+
+  test('checks on every replica that the table stores the engine of the old definition, before it creates anything', () => {
+    // AS copies the table's engine: a SummingMergeTree snapshot would merge rows away before the copy.
+    // On ObsessionDB, engine is SharedMergeTree for every Shared engine; engine_full names it.
+    // chkit-py's test_cutover.py asserts the same.
+    for (const [engine, name] of [
+      ['MergeTree', 'MergeTree'],
+      ["ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}')", 'ReplicatedMergeTree'],
+    ]) {
+      const start = plan({ oldDef: { ...OLD, engine }, newDef: { ...NEW, engine }, options: name === 'MergeTree' ? {} : { cluster: 'c2' } }).operations[0]?.sql ?? ''
+      expect(start).toContain(
+        `((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR (SELECT any(extract(engine_full, '^\\\\w+') IN ('${name}', 'SharedMergeTree')) FROM system.tables WHERE database = 'app' AND name = 'events')) AS stored_engine`
+      )
+      expect(start).toContain(`throwIf(min(stored_engine) = 0, 'app.events does not use the engine the schema declares (${name}).`)
+    }
   })
 
   test('checks a table whose snapshot comes from the old definition declares PRIMARY KEY, before ClickHouse 26.7', () => {

@@ -212,6 +212,7 @@ export function planCutover(input: {
     names,
     columns,
     oldColumns: oldDef.columns,
+    oldEngine: engineName(oldDef.engine),
     snapshotFromDefinition: snapshotFromDefinition(oldDef),
     key: request.key,
     cluster: options.cluster,
@@ -482,6 +483,8 @@ function createCutoverSql(input: {
   columns: string[]
   /** Every column the old definition declares. */
   oldColumns: ColumnDefinition[]
+  /** The engine name of the old definition. */
+  oldEngine: string
   /** The snapshot is rendered from the old definition, not created AS the table. */
   snapshotFromDefinition: boolean
   key: string[]
@@ -492,7 +495,7 @@ function createCutoverSql(input: {
   oldSettings: TableDefinition['settings']
   indexGranularity: number
 }): CutoverSql {
-  const { database, table, names, columns, oldColumns, snapshotFromDefinition, key, cluster, readonlySettings, oldSettings, indexGranularity } = input
+  const { database, table, names, columns, oldColumns, oldEngine, snapshotFromDefinition, key, cluster, readonlySettings, oldSettings, indexGranularity } = input
   const q = (name: string) => renderQualifiedName(database, name)
   const target = `${database}.${table}`
   const columnList = columns.map(quoteColumn).join(', ')
@@ -516,35 +519,62 @@ function createCutoverSql(input: {
   // The snapshot holds every column the table stores, but the mirror and the
   // copy move only the columns of the old definition: a column only the server
   // has would not reach the new table, and a copied column it lacks stops the
-  // mirror. ClickHouse stores `n Nested(x T)` as the column `n.x Array(T)`.
+  // mirror. ClickHouse stores `n Nested(x T)` as the column `n.x Array(T)`,
+  // or with flatten_nested = 0 as the one column `n Nested(x T)`: either is
+  // accepted.
   const literals = (values: string[]) => `[${values.map(stringLiteral).join(', ')}]`
   const leaves = oldColumns.flatMap((column) =>
     columnLeaves(column).map((leaf) => ({ ...leaf, column: column.name, stored: isStored(column) }))
   )
+  const nested = oldColumns.flatMap((column) => {
+    const fields = nestedFields(column)
+    return fields ? [{ name: column.name, fields, stored: isStored(column) }] : []
+  })
   const stored = leaves.filter((leaf) => leaf.stored)
+  const storedNested = nested.filter((column) => column.stored)
+  const known = [...leaves.map((leaf) => leaf.name), ...nested.map((column) => column.name)]
   const liveColumns = `FROM system.columns WHERE database = ${stringLiteral(database)} AND table = ${stringLiteral(table)}`
   const storedColumns = `${liveColumns} AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')`
-  const undeclaredColumns = `(SELECT countIf(NOT has(${literals(leaves.map((leaf) => leaf.name))}, name)) ${storedColumns}) AS undeclared_columns`
-  const declaredColumns = `(${tableCount(table)} = 0 OR (SELECT hasAll(groupArray(name), ${literals(stored.filter((leaf) => columns.includes(leaf.column)).map((leaf) => leaf.name))}) ${storedColumns})) AS declared_columns`
+  const undeclaredColumns = `(SELECT countIf(NOT has(${literals(known)}, name)) ${storedColumns}) AS undeclared_columns`
+  const copiedNested = storedNested.filter((column) => columns.includes(column.name))
+  const hasNested = copiedNested.map(
+    (column) => ` AND (hasAll(groupArray(name), ${literals(column.fields.map((field) => `${column.name}.${field.name}`))}) OR has(groupArray(name), ${stringLiteral(column.name)}))`
+  )
+  const plainLeaves = stored.filter((leaf) => columns.includes(leaf.column) && !copiedNested.some((column) => column.name === leaf.column))
+  const declaredColumns = `(${tableCount(table)} = 0 OR (SELECT hasAll(groupArray(name), ${literals(plainLeaves.map((leaf) => leaf.name))})${hasNested.join('')} ${storedColumns})) AS declared_columns`
   // The mirror, the copy and the verify skip a column the schema declares
   // ALIAS or EPHEMERAL. If the table stores that column, its values would not
   // reach the new table, so the kinds must match too.
-  const kindPairs = `[${leaves.map((leaf) => `(${stringLiteral(leaf.name)}, ${leaf.stored ? 1 : 0})`).join(', ')}]`
-  const columnKinds = `(SELECT countIf(has(${literals(leaves.map((leaf) => leaf.name))}, name) AND NOT has(${kindPairs}, (name, toUInt8(default_kind NOT IN ('ALIAS', 'EPHEMERAL'))))) ${liveColumns}) AS column_kinds`
+  const kindPairs = `[${[...leaves, ...nested].map((leaf) => `(${stringLiteral(leaf.name)}, ${leaf.stored ? 1 : 0})`).join(', ')}]`
+  const columnKinds = `(SELECT countIf(has(${literals(known)}, name) AND NOT has(${kindPairs}, (name, toUInt8(default_kind NOT IN ('ALIAS', 'EPHEMERAL'))))) ${liveColumns}) AS column_kinds`
   // The snapshot takes the column types the server stores, and the copy then
   // converts each value to the new type. The verify hash does not see every
   // change: cityHash64 is the same for UInt32 and UInt64. ClickHouse stores
   // some types in another spelling (`Decimal64(2)` as `Decimal(18, 2)`), so the
-  // server gives the schema's type in its stored form too.
+  // server gives the schema's type in its stored form too. It reads the type
+  // from a one-row format() table, without building a value of it:
+  // defaultValueOfTypeName fails for some types before ClickHouse 26.4, such
+  // as AggregateFunction(argMax, LowCardinality(String), DateTime).
   // toTypeName prints a named Tuple over several lines, and system.columns
   // on one: the line breaks go. A newline in an Enum label is escaped, so no
   // label changes.
   const storedType = (type: string) =>
-    `replaceRegexpAll(replaceRegexpAll(toTypeName(defaultValueOfTypeName(${stringLiteral(type)})), ',\\n *', ', '), '\\n *', '')`
-  const typePairs = `[${stored.map((leaf) => `(${stringLiteral(leaf.name)}, ${storedType(leaf.type)})`).join(', ')}]`
-  const mistypedColumns = `(SELECT countIf(has(${literals(stored.map((leaf) => leaf.name))}, name) AND NOT has(${typePairs}, (name, type))) ${storedColumns}) AS mistyped_columns`
-  const storedTable = (condition: string, alias: string) =>
-    `(${tableCount(table)} = 0 OR (SELECT any(${condition}) FROM system.tables WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(table)})) AS ${alias}`
+    `replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, ${stringLiteral(`c ${type}`)}, '{}')), ',\\n *', ', '), '\\n *', '')`
+  const nestedType = (fields: Array<{ name: string; type: string }>) =>
+    `concat('Nested(', ${fields.map((field, index) => `${stringLiteral(`${index > 0 ? ', ' : ''}${field.name} `)}, ${storedType(field.type)}`).join(', ')}, ')')`
+  const typePairs = `[${[
+    ...stored.map((leaf) => `(${stringLiteral(leaf.name)}, ${storedType(leaf.type)})`),
+    ...storedNested.map((column) => `(${stringLiteral(column.name)}, ${nestedType(column.fields)})`),
+  ].join(', ')}]`
+  const mistypedColumns = `(SELECT countIf(has(${literals([...stored.map((leaf) => leaf.name), ...storedNested.map((column) => column.name)])}, name) AND NOT has(${typePairs}, (name, type))) ${storedColumns}) AS mistyped_columns`
+  const storedTable = (condition: string, alias: string, settings = '') =>
+    `(${tableCount(table)} = 0 OR (SELECT any(${condition}) FROM system.tables WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(table)}${settings})) AS ${alias}`
+  // AS copies the table's engine, which can differ from the schema's. An
+  // engine such as SummingMergeTree or ReplacingMergeTree would merge rows of
+  // the snapshot away before the copy, and the EXCHANGE guard would pass, as
+  // both tables have it. engine_full names it: on ObsessionDB, engine is
+  // SharedMergeTree for every Shared engine, and every table is Shared.
+  const storedEngine = storedTable(`extract(engine_full, ${stringLiteral(String.raw`^\w+`)}) IN (${stringLiteral(oldEngine)}, 'SharedMergeTree')`, 'stored_engine')
   // AS copies the replication path the server stores, which can differ from
   // the schema's. Without {uuid} the snapshot would register at the table's
   // own path, and ClickHouse refuses that only after the mirror exists. The
@@ -554,10 +584,15 @@ function createCutoverSql(input: {
     : storedTable(`NOT startsWith(engine, 'Replicated') OR position(extract(engine_full, ${stringLiteral(REPLICATED_PATH_SQL_REGEX)}), '{uuid}') > 0`, 'uuid_path')
   // AS also copies the table's TTLs. A TTL merge on the snapshot could change
   // rows before the copy, and the verify would compare the changed rows on
-  // both sides. The query is read without its strings, quoted names and comments.
+  // both sides. The query is read with every identifier quoted, then without
+  // its strings, quoted names and comments: a column named TTL is not a TTL.
   const storedTtl = snapshotFromDefinition
     ? undefined
-    : storedTable(`NOT match(replaceRegexpAll(create_table_query, ${stringLiteral(SQL_QUOTED_REGEX)}, ' '), ${stringLiteral(String.raw`\bTTL\b`)})`, 'no_ttl')
+    : storedTable(
+        `NOT match(replaceRegexpAll(create_table_query, ${stringLiteral(SQL_QUOTED_REGEX)}, ' '), ${stringLiteral(String.raw`\bTTL\b`)})`,
+        'no_ttl',
+        " SETTINGS show_create_query_identifier_quoting_rule = 'always'"
+      )
   // A snapshot rendered from the old definition always declares PRIMARY KEY.
   // Before ClickHouse 26.7 parts attach only between tables that both declare
   // it or both leave it out; 26.7 compares the key by value.
@@ -637,6 +672,7 @@ function createCutoverSql(input: {
       'SELECT',
       `  throwIf(min(atomic) = 0, ${stringLiteral(`Database ${database} must use the Atomic or Replicated engine: EXCHANGE TABLES needs it.`)}),`,
       `  throwIf(min(present) = 0, ${stringLiteral(`Table ${target} does not exist.`)}),`,
+      `  throwIf(min(stored_engine) = 0, ${stringLiteral(`${target} does not use the engine the schema declares (${oldEngine}). The cutover's snapshot, created AS the table, would take its engine, and an engine such as SummingMergeTree or ReplacingMergeTree merges rows away before they are copied. Nothing was created or copied. Run chkit drift, change the schema to match the table, and generate the cutover again.`)}),`,
       `  throwIf(max(undeclared_columns) > 0, ${stringLiteral(`${target} stores a column that the schema does not declare, so its values would not reach the new table. Nothing was created or copied. Run chkit drift, change the schema to match the table, and generate the cutover again.`)}),`,
       `  throwIf(min(declared_columns) = 0, ${stringLiteral(`${target} lacks a column that the schema declares, so the mirror cannot read it. Nothing was created or copied. Run chkit drift, change the schema to match the table, and generate the cutover again.`)}),`,
       `  throwIf(max(column_kinds) > 0, ${stringLiteral(`${target} stores a column that the schema declares ALIAS or EPHEMERAL, or computes a column that the schema stores, so the cutover would not copy its values. Nothing was created or copied. Run chkit drift, change the schema to match the table, and generate the cutover again.`)}),`,
@@ -667,6 +703,7 @@ function createCutoverSql(input: {
         [
           `SELECT (SELECT count() FROM system.databases WHERE name = ${stringLiteral(database)} AND engine IN ('Atomic', 'Replicated')) AS atomic,`,
           `${tableCount(table)} AS present,`,
+          `${storedEngine},`,
           `${undeclaredColumns},`,
           `${declaredColumns},`,
           `${columnKinds},`,
@@ -925,15 +962,24 @@ const SQL_QUOTED_REGEX = String.raw`'(?:[^'\\]|\\.)*'|\`(?:[^\`\\]|\\.)*\`|"(?:[
  * the default flatten_nested = 1, `n Nested(x T)` is stored as `n.x Array(T)`.
  */
 function columnLeaves(column: ColumnDefinition): Array<{ name: string; type: string }> {
-  const fields = /^Nested\s*\((.*)\)$/s.exec(column.type.trim())?.[1]
+  const fields = nestedFields(column)
+  // A field chkit cannot read keeps the Nested name, which ClickHouse does not store flattened: the check refuses it.
   if (fields === undefined) return [{ name: column.name, type: renderColumnType(column) }]
-  return splitTopLevelComma(fields).map((field) => {
+  return fields.map((field) => ({ name: `${column.name}.${field.name}`, type: `Array(${field.type})` }))
+}
+
+/** The fields of a `Nested(...)` column, or undefined for another type or a field chkit cannot read. */
+function nestedFields(column: ColumnDefinition): Array<{ name: string; type: string }> | undefined {
+  const body = /^Nested\s*\((.*)\)$/s.exec(column.type.trim())?.[1]
+  if (body === undefined) return undefined
+  const fields: Array<{ name: string; type: string }> = []
+  for (const field of splitTopLevelComma(body)) {
     const token = tokenizeSQL(field).find((candidate) => !isTrivia(candidate))
     const name = token ? identifierName(token) : undefined
-    // A field chkit cannot read keeps the Nested name, which ClickHouse does not store: the check refuses it.
-    if (!token || name === undefined) return { name: column.name, type: renderColumnType(column) }
-    return { name: `${column.name}.${name}`, type: `Array(${field.slice(token.end).trim()})` }
-  })
+    if (!token || name === undefined) return undefined
+    fields.push({ name, type: field.slice(token.end).trim() })
+  }
+  return fields
 }
 
 function replicatedPath(engine: string): string | undefined {

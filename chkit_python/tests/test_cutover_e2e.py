@@ -20,6 +20,7 @@ from tests.cutover_scenario import (
     GRANULARITY_CHANGE,
     CutoverTarget,
     run_backfill_scenario,
+    run_created_outside_chkit_scenario,
     run_keep_scenario,
     run_refused_at_start_scenario,
     run_retry_scenario,
@@ -146,6 +147,72 @@ def test_cuts_over_a_table_whose_types_clickhouse_stores_in_another_spelling(
             {"name": "prices", "type": "Array(Decimal64(2))"},
             {"name": "pair", "type": "Tuple(a Decimal128(4), `b c` INT)"},
         ],
+    )
+
+
+# defaultValueOfTypeName fails for this type on ClickHouse 26.3 (ClickHouse#102403), and so
+# does the default of an omitted column: the DEFAULT expression lets the scenario insert
+# without it.
+def test_cuts_over_a_table_with_an_aggregate_function_column_over_low_cardinality(
+    target: CutoverTarget, tmp_path: Path
+) -> None:
+    run_stored_spelling_scenario(
+        target,
+        "cutover_aggregate",
+        tmp_path,
+        [
+            *BASE,
+            {
+                "name": "last",
+                "type": "AggregateFunction(argMax, LowCardinality(String), DateTime)",
+                "default": "fn:arrayReduce('argMaxState', [toLowCardinality('')], [toDateTime(0)])",
+            },
+        ],
+    )
+
+
+# AS copies the table's engine: a SummingMergeTree snapshot would merge rows away before the copy.
+def test_stops_before_it_creates_anything_on_summing_merge_tree_where_the_schema_says_merge_tree(
+    target: CutoverTarget, tmp_path: Path
+) -> None:
+    run_refused_at_start_scenario(
+        target,
+        "cutover_summing",
+        tmp_path,
+        columns="id UInt64, user_id UInt64, payload String",
+        engine=lambda _table: "SummingMergeTree",
+        message="does not use the engine the schema declares",
+    )
+
+
+# With flatten_nested = 0, ClickHouse stores `n Nested(x UInt64)` as one column, not as `n.x`.
+# The first statement accepts it; the mirror then stops on any Nested column, flattened or
+# not (it selects `n`, which the flattened shadow table lacks), a separate limitation.
+def test_accepts_a_nested_column_stored_without_flattening_at_the_first_statement(
+    target: CutoverTarget, tmp_path: Path
+) -> None:
+    run_created_outside_chkit_scenario(
+        target,
+        "cutover_nested_whole",
+        tmp_path,
+        columns="id UInt64, user_id UInt64, payload String, n Nested(x UInt64, y Decimal64(2))",
+        schema_columns=[*BASE, {"name": "n", "type": "Nested(x UInt64, y Decimal64(2))"}],
+        settings={"flatten_nested": 0},
+        stops_later="SELECT query outputs column with name 'n', which is not found in the target table",
+    )
+
+
+# ClickHouse writes the column name TTL unquoted in the key: it is not a TTL.
+def test_cuts_over_a_table_with_a_column_named_ttl_in_its_key(
+    target: CutoverTarget, tmp_path: Path
+) -> None:
+    run_created_outside_chkit_scenario(
+        target,
+        "cutover_ttl_column",
+        tmp_path,
+        columns="id UInt64, user_id UInt64, payload String, TTL DateTime",
+        schema_columns=[*BASE, {"name": "TTL", "type": "DateTime"}],
+        order_by="(id, TTL)",
     )
 
 

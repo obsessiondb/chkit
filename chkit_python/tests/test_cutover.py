@@ -424,14 +424,16 @@ def test_checks_the_table_stores_the_old_columns_no_more_and_no_fewer() -> None:
         "FROM system.columns WHERE database = 'app' AND table = 'events' "
         "AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')"
     )
-    # ClickHouse stores `n Nested(x UInt8)` as `n.x Array(UInt8)`.
+    # ClickHouse stores `n Nested(x UInt8)` as `n.x Array(UInt8)`, or as one column `n`
+    # when flatten_nested is off.
     assert (
-        "(SELECT countIf(NOT has(['id', 'user_id', 'payload', 'meta', 'n.x'], name)) "
+        "(SELECT countIf(NOT has(['id', 'user_id', 'payload', 'meta', 'n.x', 'n'], name)) "
         f"{stored}) AS undeclared_columns"
     ) in start
     assert (
         "((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR "
-        f"(SELECT hasAll(groupArray(name), ['id', 'user_id', 'payload', 'meta', 'n.x']) "
+        "(SELECT hasAll(groupArray(name), ['id', 'user_id', 'payload', 'meta']) AND "
+        "(hasAll(groupArray(name), ['n.x']) OR has(groupArray(name), 'n')) "
         f"{stored})) AS declared_columns"
     ) in start
     assert (
@@ -447,8 +449,10 @@ def test_checks_the_table_stores_the_old_columns_no_more_and_no_fewer() -> None:
 def test_checks_the_table_stores_the_old_column_types() -> None:
     # The snapshot takes the types the server stores, and cityHash64 hides UInt32 vs
     # UInt64. ClickHouse stores Decimal64(2) as Decimal(18, 2), so the server renders
-    # the schema's types too. Before it creates anything; TS cutover.test.ts asserts
-    # the same.
+    # the schema's types too, from a one-row format() table: defaultValueOfTypeName
+    # fails for some types before ClickHouse 26.4. With flatten_nested = 0, `n` is
+    # stored as one Nested column. Before it creates anything; TS cutover.test.ts
+    # asserts the same.
     typed: list[Any] = [
         *COLUMNS,
         {"name": "price", "type": "Decimal64(2)", "nullable": True},
@@ -460,15 +464,17 @@ def test_checks_the_table_stores_the_old_column_types() -> None:
 
     def server(type_: str) -> str:
         return (
-            f"replaceRegexpAll(replaceRegexpAll(toTypeName(defaultValueOfTypeName('{type_}')), "
-            "',\\n *', ', '), '\\n *', '')"
+            "replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, "
+            f"'c {type_}', '{{}}')), ',\\n *', ', '), '\\n *', '')"
         )
 
     assert (
-        "(SELECT countIf(has(['id', 'user_id', 'payload', 'price', 'n.x', 'n.y z'], name) AND "
-        f"NOT has([('id', {server('UInt64')}), ('user_id', {server('UInt64')}), "
+        "(SELECT countIf(has(['id', 'user_id', 'payload', 'price', 'n.x', 'n.y z', 'n'], name) "
+        f"AND NOT has([('id', {server('UInt64')}), ('user_id', {server('UInt64')}), "
         f"('payload', {server('String')}), ('price', {server('Nullable(Decimal64(2))')}), "
-        f"('n.x', {server('Array(UInt8)')}), ('n.y z', {server('Array(Decimal64(2))')})], "
+        f"('n.x', {server('Array(UInt8)')}), ('n.y z', {server('Array(Decimal64(2))')}), "
+        f"('n', concat('Nested(', 'x ', {server('UInt8')}, ', y z ', "
+        f"{server('Decimal64(2)')}, ')'))], "
         "(name, type))) FROM system.columns WHERE database = 'app' AND table = 'events' "
         "AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')) AS mistyped_columns"
     ) in start
@@ -530,9 +536,10 @@ def test_checks_every_replica_has_no_ttl_when_the_snapshot_is_created_as_it() ->
     # AS keeps the table's TTLs. TS cutover.test.ts asserts the same.
     start = plan().operations[0].sql
     assert "(SELECT any(NOT match(replaceRegexpAll(create_table_query, " in start
+    # Every identifier is quoted, so a column named TTL is not taken for one.
     assert (
-        r", '\\bTTL\\b')) FROM system.tables WHERE database = 'app' AND name = 'events')) "
-        "AS no_ttl"
+        r", '\\bTTL\\b')) FROM system.tables WHERE database = 'app' AND name = 'events' "
+        "SETTINGS show_create_query_identifier_quoting_rule = 'always')) AS no_ttl"
     ) in start
     assert "throwIf(min(no_ttl) = 0, 'app.events has a TTL" in start
     engine = "ReplicatedMergeTree"
@@ -542,6 +549,35 @@ def test_checks_every_replica_has_no_ttl_when_the_snapshot_is_created_as_it() ->
         cluster="c2",
     ).operations[0].sql
     assert "no_ttl" not in from_definition
+
+
+def test_checks_every_replica_stores_the_engine_of_the_old_definition() -> None:
+    # AS copies the table's engine: a SummingMergeTree snapshot would merge rows away
+    # before the copy. On ObsessionDB, engine is SharedMergeTree for every Shared
+    # engine; engine_full names it. TS cutover.test.ts asserts the same.
+    for engine, name, cluster in [
+        ("MergeTree", "MergeTree", None),
+        (
+            "ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}')",
+            "ReplicatedMergeTree",
+            "c2",
+        ),
+    ]:
+        start = plan(
+            old_def=events(["id"], engine=engine),
+            new_def=events(["user_id", "id"], engine=engine),
+            cluster=cluster,
+        ).operations[0].sql
+        assert (
+            "((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 "
+            r"OR (SELECT any(extract(engine_full, '^\\w+') IN "
+            f"('{name}', 'SharedMergeTree')) FROM system.tables WHERE database = 'app' AND "
+            "name = 'events')) AS stored_engine"
+        ) in start
+        assert (
+            "throwIf(min(stored_engine) = 0, 'app.events does not use the engine the schema "
+            f"declares ({name})."
+        ) in start
 
 
 def test_checks_primary_key_before_26_7_when_the_snapshot_comes_from_the_definition() -> None:

@@ -2,6 +2,7 @@ import { describe, test } from 'bun:test'
 
 import {
   liveCutoverTarget,
+  runCreatedOutsideChkitScenario,
   runKeepScenario,
   runRefusedAtStartScenario,
   runStoredSpellingScenario,
@@ -49,6 +50,52 @@ describe('generate --cutover e2e (#202)', () => {
       { name: 'prices', type: 'Array(Decimal64(2))' },
       { name: 'pair', type: 'Tuple(a Decimal128(4), `b c` INT)' },
     ])
+  }, 300_000)
+
+  // defaultValueOfTypeName fails for this type on ClickHouse 26.3 (ClickHouse#102403), and so does
+  // the default of an omitted column: the DEFAULT expression lets the scenario insert without it.
+  test('cuts over a table with an AggregateFunction column over LowCardinality', async () => {
+    await runStoredSpellingScenario(liveCutoverTarget(), 'cutover_aggregate', [
+      ...BASE,
+      {
+        name: 'last',
+        type: 'AggregateFunction(argMax, LowCardinality(String), DateTime)',
+        default: { expression: "arrayReduce('argMaxState', [toLowCardinality('')], [toDateTime(0)])" },
+      },
+    ])
+  }, 300_000)
+
+  // AS copies the table's engine: a SummingMergeTree snapshot would merge rows away before the copy.
+  test('stops before it creates anything when the table uses SummingMergeTree where the schema says MergeTree', async () => {
+    await runRefusedAtStartScenario(
+      liveCutoverTarget(),
+      'cutover_summing',
+      { columns: 'id UInt64, user_id UInt64, payload String', engine: () => 'SummingMergeTree' },
+      'does not use the engine the schema declares',
+    )
+  }, 300_000)
+
+  // With flatten_nested = 0, ClickHouse stores `n Nested(x UInt64)` as one column, not as `n.x`.
+  // The first statement accepts it; the mirror then stops on any Nested column, flattened or not
+  // (it selects `n`, which the flattened shadow table lacks), a separate limitation.
+  test('accepts a Nested column stored without flattening at the first statement', async () => {
+    await runCreatedOutsideChkitScenario(
+      liveCutoverTarget(),
+      'cutover_nested_whole',
+      { columns: 'id UInt64, user_id UInt64, payload String, n Nested(x UInt64, y Decimal64(2))', settings: { flatten_nested: 0 } },
+      [...BASE, { name: 'n', type: 'Nested(x UInt64, y Decimal64(2))' }],
+      "SELECT query outputs column with name 'n', which is not found in the target table",
+    )
+  }, 300_000)
+
+  // ClickHouse writes the column name TTL unquoted in the key: it is not a TTL.
+  test('cuts over a table with a column named TTL in its key', async () => {
+    await runCreatedOutsideChkitScenario(
+      liveCutoverTarget(),
+      'cutover_ttl_column',
+      { columns: 'id UInt64, user_id UInt64, payload String, TTL DateTime', orderBy: '(id, TTL)' },
+      [...BASE, { name: 'TTL', type: 'DateTime' }],
+    )
   }, 300_000)
 
   test('stops before it creates anything when the table lacks a Nested column of the schema', async () => {

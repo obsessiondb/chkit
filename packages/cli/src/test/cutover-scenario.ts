@@ -640,6 +640,54 @@ export async function runRefusedAtStartScenario(
 }
 
 /**
+ * The table is created outside chkit with `columns`, `clauses` after its
+ * ORDER BY and the query `settings`, in a form the schema (`schemaColumns`)
+ * describes but chkit would not write: the cutover must accept it. With
+ * `stopsLater`, the cutover passes its first statement, creates its tables
+ * and stops later with that message.
+ */
+export async function runCreatedOutsideChkitScenario(
+  target: CutoverTarget,
+  label: string,
+  created: { columns: string; orderBy?: string; clauses?: string; settings?: Record<string, number> },
+  schemaColumns: Array<Record<string, unknown>>,
+  stopsLater?: string,
+): Promise<void> {
+  const project = await createCutoverProject(target, label, schemaColumns)
+  try {
+    const fqn = `${target.database}.${project.table}`
+    await target.admin.command(`DROP TABLE ${fqn} SYNC`)
+    await target.admin.command(
+      `CREATE TABLE ${fqn} (${created.columns}) ENGINE = ${target.engine} ORDER BY ${created.orderBy ?? 'id'}${created.clauses ? ` ${created.clauses}` : ''}`,
+      created.settings,
+    )
+    await pollUntil(
+      () => target.admin.query<{ name: string }>(`SELECT name FROM system.tables WHERE database = '${target.database}' AND name = '${project.table}'`),
+      (found) => found.length > 0,
+    )
+    await target.admin.command(`INSERT INTO ${fqn} (id, user_id, payload) SELECT number, number % 97, 'historic' FROM numbers(1000)`)
+
+    await writeSchema(target, project, ['user_id', 'id'])
+    expectOk(cli(project, ['generate', '--name', 'cutover', '--cutover', `${fqn}=id`, '--json']), 'generate --cutover')
+    if (stopsLater !== undefined) {
+      const stopped = cli(project, ['migrate', '--apply', '--json'])
+      const output = `${stopped.stdout}${stopped.stderr}`
+      if (stopped.exitCode === 0 || !output.includes(stopsLater) || output.includes('failed at statement 1 of')) {
+        throw new Error(formatTestDiagnostic(`migrate --apply must pass the first statement and stop with "${stopsLater}"`, stopped))
+      }
+      return
+    }
+    expectOk(cli(project, ['migrate', '--apply', '--json']), 'migrate --apply (cutover)')
+    const keys = await sortingKeys(target, project)
+    if (keys[project.table] !== 'user_id, id') throw new Error(`layouts after the cutover: ${JSON.stringify(keys)}`)
+    const [count] = await rows<{ total: number | string }>(target, `SELECT count() AS total FROM ${target.rowsOf(project.table)}`)
+    if (Number(count?.total) !== 1000) throw new Error(`the new table must hold the 1000 rows, found ${JSON.stringify(count)}`)
+  } finally {
+    await dropCutoverProject(target, project)
+  }
+}
+
+/**
  * The schema declares `columns`, and chkit creates the table from it.
  * ClickHouse stores some types in another spelling (`Decimal64(2)` as
  * `Decimal(18, 2)`), and the cutover must still accept the unchanged table.

@@ -720,6 +720,65 @@ def run_refused_at_start_scenario(
         drop_cutover_project(target, project)
 
 
+def run_created_outside_chkit_scenario(
+    target: CutoverTarget,
+    label: str,
+    directory: Path,
+    *,
+    columns: str,
+    schema_columns: list[dict[str, Any]],
+    order_by: str = "id",
+    clauses: str = "",
+    settings: dict[str, Any] | None = None,
+    stops_later: str | None = None,
+) -> None:
+    """The table is created outside chkit with ``columns``, ``clauses`` after
+    its ORDER BY and the query ``settings``, in a form the schema
+    (``schema_columns``) describes but chkit would not write: the cutover must
+    accept it. With ``stops_later``, the cutover passes its first statement,
+    creates its tables and stops later with that message. TS
+    ``runCreatedOutsideChkitScenario``."""
+    project = create_cutover_project(target, label, directory, schema_columns)
+    try:
+        fqn = f"{target.database}.{project.table}"
+        target.admin.execute(f"DROP TABLE {fqn} SYNC")
+        target.admin.execute(
+            f"CREATE TABLE {fqn} ({columns}) ENGINE = {target.engine} ORDER BY {order_by}"
+            + (f" {clauses}" if clauses else ""),
+            settings,
+        )
+        created = poll_until(
+            lambda: target.admin.query(
+                "SELECT name FROM system.tables "
+                f"WHERE database = '{target.database}' AND name = '{project.table}'"
+            ).rows,
+            bool,
+        )
+        assert created, "the table is not listed"
+        target.admin.execute(
+            f"INSERT INTO {fqn} (id, user_id, payload) "
+            "SELECT number, number % 97, 'historic' FROM numbers(1000)"
+        )
+
+        _generate_cutover(target, project)
+        if stops_later is not None:
+            stopped = cli(["migrate", "--apply", "--json"])
+            diagnostic = format_test_diagnostic(
+                f'migrate --apply must pass the first statement and stop with "{stops_later}"',
+                stopped,
+            )
+            assert stopped.exit_code != 0, diagnostic
+            assert stops_later in stopped.output, diagnostic
+            assert "failed at statement 1 of" not in stopped.output, diagnostic
+        else:
+            expect_ok(cli(["migrate", "--apply", "--json"]), "migrate --apply (cutover)")
+            assert sorting_keys(target, project)[project.table] == "user_id, id"
+            total = rows(target, f"SELECT count() AS total FROM {target.rows_of(project.table)}")
+            assert int(total[0]["total"]) == 1000
+    finally:
+        drop_cutover_project(target, project)
+
+
 def run_stored_spelling_scenario(
     target: CutoverTarget, label: str, directory: Path, columns: list[dict[str, Any]]
 ) -> None:
