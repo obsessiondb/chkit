@@ -1,6 +1,6 @@
 {
   "name": "@chkit/plugin-ingest",
-  "version": "0.2.0-beta.18",
+  "version": "0.2.0-beta.19",
   "description": "Compatibility package for @chkit/plugin-sync",
   "license": "MIT",
   "author": "ObsessionDB",

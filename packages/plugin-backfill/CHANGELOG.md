@@ -1,5 +1,16 @@
 # @chkit/plugin-backfill
 
+## 0.2.0-beta.19
+
+### Minor Changes
+
+- 8d0290a: A backfill chunk into a `Distributed` table is no longer marked done while its rows are still queued: chunk INSERTs default to `distributed_foreground_insert = 1` and `materialized_views_ignore_errors = 0`, and always run with `log_queries_probability = 1`. The new `insertSettings` plugin option adds settings to every chunk INSERT (`run`, `resume` and managed `submit`) and can override those two defaults with a warning; settings chkit sets itself, such as `async_insert` or the dedup token, cannot be named in it.
+
+### Patch Changes
+
+- ff7087f: `chkit plugin backfill plan` no longer leaves rows out of a plan, and `run` no longer copies 0 rows for a chunk, when a numeric sort-key bound has the same text as its partition id (for example `PARTITION BY id % 8 ORDER BY id`) (#826). Plans made before this release keep their gaps: plan again, and check tables that an affected plan already backfilled.
+- Updated dependencies: `@chkit/core@0.2.0-beta.19`, `@chkit/clickhouse@0.2.0-beta.19`
+
 ## 0.2.0-beta.18
 
 ### Patch Changes

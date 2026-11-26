@@ -1,5 +1,11 @@
 # @chkit/plugin-ingest
 
+## 0.2.0-beta.19
+
+### Patch Changes
+
+- Updated dependencies: `@chkit/plugin-sync@0.2.0-beta.19`
+
 ## 0.2.0-beta.18
 
 ### Patch Changes
