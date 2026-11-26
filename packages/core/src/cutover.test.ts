@@ -145,13 +145,124 @@ describe('planCutover', () => {
     ])
   })
 
-  test('creates the shadow with the new layout and the snapshot with the old one', () => {
+  test('creates the shadow with the new layout and the snapshot AS the table, as the server stores it (#524)', () => {
+    // chkit-py's test_cutover.py asserts the same.
     const [, shadow, , , snapshot] = plan().operations
     expect(shadow?.sql).toContain('CREATE TABLE IF NOT EXISTS app.events__cutover_20261024120000')
     expect(shadow?.sql).toContain('ORDER BY (`user_id`, `id`)')
-    expect(snapshot?.sql).toContain('CREATE TABLE IF NOT EXISTS app.events__cutover_20261024120000_snapshot')
-    expect(snapshot?.sql).toContain('ORDER BY (`id`)')
-    expect(snapshot?.sql).toContain(`COMMENT 'chkit cutover {"chkitCutover":1,"database":"app","table":"events"`)
+    expect(snapshot?.sql).toStartWith(
+      `CREATE TABLE IF NOT EXISTS app.events__cutover_20261024120000_snapshot AS app.events\nCOMMENT 'chkit cutover {"chkitCutover":1,"database":"app","table":"events"`
+    )
+  })
+
+  test('creates a Replicated snapshot AS the table only when the replication path has {uuid}', () => {
+    // ClickHouse expands {table} when it creates a table, so a copy could share its path.
+    const snapshotOf = (engine: string) => {
+      const cutover = plan({ oldDef: { ...OLD, engine }, newDef: { ...NEW, engine }, options: { cluster: 'c2' } })
+      const ops = applyOnClusterToPlan({ operations: cutover.operations, riskSummary: { safe: 0, caution: 0, danger: 0 }, renameSuggestions: [] }, 'c2').operations
+      return ops.find((op) => op.key === 'table:app.events__cutover_20261024120000_snapshot')?.sql ?? ''
+    }
+    expect(snapshotOf("ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}')")).toStartWith(
+      "CREATE TABLE IF NOT EXISTS app.events__cutover_20261024120000_snapshot ON CLUSTER 'c2' AS app.events\nCOMMENT "
+    )
+    for (const engine of ["ReplicatedMergeTree('/clickhouse/tables/{shard}/{database}/{table}', '{replica}')", 'ReplicatedMergeTree']) {
+      expect(snapshotOf(engine)).toContain(`ENGINE = ${engine}`)
+      expect(snapshotOf(engine)).toContain('ORDER BY (`id`)')
+    }
+  })
+
+  test('checks the table stores the columns of the old definition, no more and no fewer, before it creates anything', () => {
+    // chkit-py's test_cutover.py asserts the same.
+    const nested = [...columns, { name: 'meta', type: 'String' }, { name: 'n', type: 'Nested(x UInt8)' }] as TableDefinition['columns']
+    const start = plan({ oldDef: events({ columns: nested }), newDef: events({ columns: nested, primaryKey: ['user_id', 'id'], orderBy: ['user_id', 'id'] }) }).operations[0]?.sql ?? ''
+    const stored = "FROM system.columns WHERE database = 'app' AND table = 'events' AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')"
+    // ClickHouse stores `n Nested(x UInt8)` as `n.x Array(UInt8)`, or as `n` with flatten_nested = 0.
+    expect(start).toContain(`(SELECT countIf(NOT has(['id', 'user_id', 'payload', 'meta', 'n.x', 'n'], name)) ${stored}) AS undeclared_columns`)
+    expect(start).toContain(
+      `((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR (SELECT hasAll(groupArray(name), ['id', 'user_id', 'payload', 'meta']) AND (hasAll(groupArray(name), ['n.x']) OR has(groupArray(name), 'n')) ${stored})) AS declared_columns`
+    )
+    expect(start).toContain("throwIf(max(undeclared_columns) > 0, 'app.events stores a column that the schema does not declare")
+    expect(start).toContain("throwIf(min(declared_columns) = 0, 'app.events lacks a column that the schema declares")
+    expect(start).not.toContain('declared_key')
+  })
+
+  test('checks the table stores the column types of the old definition, before it creates anything', () => {
+    // The snapshot takes the types the server stores, and cityHash64 hides UInt32 vs UInt64.
+    // chkit-py's test_cutover.py asserts the same.
+    // ClickHouse stores Decimal64(2) as Decimal(18, 2), so the server renders the schema's types too.
+    const typed = [...columns, { name: 'price', type: 'Decimal64(2)', nullable: true }, { name: 'n', type: 'Nested(x UInt8, `y z` Decimal64(2))' }] as TableDefinition['columns']
+    const start = plan({ oldDef: events({ columns: typed }), newDef: events({ columns: typed, primaryKey: ['user_id', 'id'], orderBy: ['user_id', 'id'] }) }).operations[0]?.sql ?? ''
+    // The server reads each type from a one-row format() table: defaultValueOfTypeName
+    // fails for some types before ClickHouse 26.4. With flatten_nested = 0, `n` is stored
+    // as one Nested column.
+    expect(start).toContain(
+      "(SELECT countIf(has(['id', 'user_id', 'payload', 'price', 'n.x', 'n.y z', 'n'], name) AND NOT has([('id', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c UInt64', '{}') SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0), ',\\n *', ', '), '\\n *', '')), ('user_id', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c UInt64', '{}') SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0), ',\\n *', ', '), '\\n *', '')), ('payload', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c String', '{}') SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0), ',\\n *', ', '), '\\n *', '')), ('price', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c Nullable(Decimal64(2))', '{}') SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0), ',\\n *', ', '), '\\n *', '')), ('n.x', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c Array(UInt8)', '{}') SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0), ',\\n *', ', '), '\\n *', '')), ('n.y z', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c Array(Decimal64(2))', '{}') SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0), ',\\n *', ', '), '\\n *', '')), ('n', concat('Nested(', substring(replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c Tuple(`x` UInt8, `y z` Decimal64(2))', '{}') SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0), ',\\n *', ', '), '\\n *', ''), 7)))], (name, type))) FROM system.columns WHERE database = 'app' AND table = 'events' AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')) AS mistyped_columns"
+    )
+    expect(start).toContain("throwIf(max(mistyped_columns) > 0, 'app.events stores a column with another type than the schema declares")
+  })
+
+  test('checks on every replica that the table stores {uuid} in its replication path when the snapshot is created AS it', () => {
+    // AS copies the path the server stores, not the schema's.
+    // chkit-py's test_cutover.py asserts the same.
+    const engine = "ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}')"
+    const start = plan({ oldDef: { ...OLD, engine }, newDef: { ...NEW, engine }, options: { cluster: 'c2' } }).operations[0]?.sql ?? ''
+    // Only the engine's first argument is the path: {uuid} in a key or a setting does not count.
+    expect(start).toContain(
+      "((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR (SELECT any(NOT startsWith(engine, 'Replicated') OR position(extract(engine_full, '^Replicated\\\\w*MergeTree\\\\(\\\\s*\\'((?:[^\\'\\\\\\\\]|\\\\\\\\.)*)\\''), '{uuid}') > 0) FROM system.tables WHERE database = 'app' AND name = 'events')) AS uuid_path"
+    )
+    expect(start).toContain("throwIf(min(uuid_path) = 0, 'The replication path that app.events stores has no {uuid}")
+    expect(start).toContain("FROM clusterAllReplicas('c2', view(")
+  })
+
+  test('checks the table stores the columns the schema stores, and computes the ALIAS and EPHEMERAL ones', () => {
+    // The mirror, the copy and the verify skip an ALIAS column, so a stored one would lose its values.
+    // chkit-py's test_cutover.py asserts the same.
+    const kinds = [...columns, { name: 'label', type: 'String', defaultKind: 'ALIAS', default: { expression: 'payload' } }] as TableDefinition['columns']
+    const start = plan({ oldDef: events({ columns: kinds }), newDef: events({ columns: kinds, primaryKey: ['user_id', 'id'], orderBy: ['user_id', 'id'] }) }).operations[0]?.sql ?? ''
+    expect(start).toContain(
+      "(SELECT countIf(has(['id', 'user_id', 'payload', 'label'], name) AND NOT has([('id', 1), ('user_id', 1), ('payload', 1), ('label', 0)], (name, toUInt8(default_kind NOT IN ('ALIAS', 'EPHEMERAL'))))) FROM system.columns WHERE database = 'app' AND table = 'events') AS column_kinds"
+    )
+    expect(start).toContain("throwIf(max(column_kinds) > 0, 'app.events stores a column that the schema declares ALIAS or EPHEMERAL")
+  })
+
+  test('checks on every replica that the table has no TTL when the snapshot is created AS it', () => {
+    // AS keeps the table's TTLs. chkit-py's test_cutover.py asserts the same.
+    const start = plan().operations[0]?.sql ?? ''
+    expect(start).toContain("(SELECT any(NOT match(replaceRegexpAll(create_table_query, ")
+    // Every identifier is quoted, so a column named TTL is not taken for one.
+    expect(start).toContain(
+      ", '\\\\bTTL\\\\b')) FROM system.tables WHERE database = 'app' AND name = 'events' SETTINGS show_create_query_identifier_quoting_rule = 'always')) AS no_ttl"
+    )
+    expect(start).toContain("throwIf(min(no_ttl) = 0, 'app.events has a TTL")
+    const fromDefinition = plan({ oldDef: { ...OLD, engine: 'ReplicatedMergeTree' }, newDef: { ...NEW, engine: 'ReplicatedMergeTree' }, options: { cluster: 'c2' } }).operations[0]?.sql ?? ''
+    expect(fromDefinition).not.toContain('no_ttl')
+  })
+
+  test('checks on every replica that the table stores the engine of the old definition, before it creates anything', () => {
+    // AS copies the table's engine: a SummingMergeTree snapshot would merge rows away before the copy.
+    // On ObsessionDB, engine is SharedMergeTree for every Shared engine; engine_full names it.
+    // chkit-py's test_cutover.py asserts the same.
+    for (const [engine, name] of [
+      ['MergeTree', 'MergeTree'],
+      ["ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}')", 'ReplicatedMergeTree'],
+    ]) {
+      const start = plan({ oldDef: { ...OLD, engine }, newDef: { ...NEW, engine }, options: name === 'MergeTree' ? {} : { cluster: 'c2' } }).operations[0]?.sql ?? ''
+      expect(start).toContain(
+        `((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR (SELECT any(extract(engine_full, '^\\\\w+') IN ('${name}', 'SharedMergeTree')) FROM system.tables WHERE database = 'app' AND name = 'events')) AS stored_engine`
+      )
+      expect(start).toContain(`throwIf(min(stored_engine) = 0, 'app.events does not use the engine the schema declares (${name}).`)
+    }
+  })
+
+  test('checks a table whose snapshot comes from the old definition declares PRIMARY KEY, before ClickHouse 26.7', () => {
+    // chkit-py's test_cutover.py asserts the same.
+    const engine = 'ReplicatedMergeTree'
+    const start = plan({ oldDef: { ...OLD, engine }, newDef: { ...NEW, engine }, options: { cluster: 'c2' } }).operations[0]?.sql ?? ''
+    expect(start).toContain(
+      "((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR (SELECT any(position(engine_full, ' PRIMARY KEY ') > 0) FROM system.tables WHERE database = 'app' AND name = 'events') OR toUInt32OrZero(splitByChar('.', version())[1]) * 100 + toUInt32OrZero(splitByChar('.', version())[2]) >= 2607) AS declared_key"
+    )
+    expect(start).toContain("throwIf(min(declared_key) = 0, 'app.events was created without PRIMARY KEY.")
+    expect(start).not.toContain('uuid_path')
   })
 
   test('mirrors the copied columns and copies only rows whose key the shadow lacks', () => {
@@ -226,7 +337,6 @@ describe('planCutover', () => {
     expect(ops[0]?.sql).toContain("= tuple(multiIf(lower('4096') = 'true', '1', lower('4096') = 'false', '0', ifNull(toString(toFloat64OrNull('4096')), '4096')))) AS settings")
     expect(ops[0]?.sql).toContain("if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '4096',")
     expect(ops.find((op) => op.type === 'exchange_tables')?.beforeRetry).toContain("= '', '4096',")
-    expect(ops.find((op) => op.key === 'table:app.events__cutover_20261024120000_snapshot')?.sql).toContain('SETTINGS index_granularity = 4096')
   })
 
   test('guards the exchange on every attempt, so a replay never swaps the tables back', () => {

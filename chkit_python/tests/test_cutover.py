@@ -369,6 +369,237 @@ def test_copies_columns_stored_in_old_and_insertable_in_new() -> None:
     assert plan(old_def=old_def, new_def=new_def).columns == ["id", "user_id", "payload", "day"]
 
 
+def test_creates_the_snapshot_as_the_table_as_the_server_stores_it() -> None:
+    # #524; TS cutover.test.ts asserts the same.
+    snapshot = plan().operations[4].sql
+    assert snapshot.startswith(
+        "CREATE TABLE IF NOT EXISTS app.events__cutover_20261024120000_snapshot AS app.events\n"
+        'COMMENT \'chkit cutover {"chkitCutover":1,"database":"app","table":"events"'
+    )
+
+
+def test_creates_a_replicated_snapshot_as_the_table_only_with_uuid_in_the_path() -> None:
+    # ClickHouse expands {table} when it creates a table, so a copy could share its path.
+    def snapshot_of(engine: str) -> str:
+        cutover = plan(
+            old_def=events(["id"], engine=engine),
+            new_def=events(["user_id", "id"], engine=engine),
+            cluster="c2",
+        )
+        ops = apply_on_cluster_to_plan(
+            MigrationPlan.model_validate(
+                {"operations": cutover.operations, "riskSummary": {}, "renameSuggestions": []}
+            ),
+            "c2",
+        ).operations
+        return next(
+            op.sql for op in ops if op.key == "table:app.events__cutover_20261024120000_snapshot"
+        )
+
+    assert snapshot_of(
+        "ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}')"
+    ).startswith(
+        "CREATE TABLE IF NOT EXISTS app.events__cutover_20261024120000_snapshot "
+        "ON CLUSTER 'c2' AS app.events\nCOMMENT "
+    )
+    for engine in (
+        "ReplicatedMergeTree('/clickhouse/tables/{shard}/{database}/{table}', '{replica}')",
+        "ReplicatedMergeTree",
+    ):
+        assert f"ENGINE = {engine}" in snapshot_of(engine)
+        assert "ORDER BY (`id`)" in snapshot_of(engine)
+
+
+def test_checks_the_table_stores_the_old_columns_no_more_and_no_fewer() -> None:
+    # Before it creates anything; TS cutover.test.ts asserts the same.
+    nested: list[Any] = [
+        *COLUMNS,
+        {"name": "meta", "type": "String"},
+        {"name": "n", "type": "Nested(x UInt8)"},
+    ]
+    start = plan(
+        old_def=events(["id"], columns=nested), new_def=events(["user_id", "id"], columns=nested)
+    ).operations[0].sql
+    stored = (
+        "FROM system.columns WHERE database = 'app' AND table = 'events' "
+        "AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')"
+    )
+    # ClickHouse stores `n Nested(x UInt8)` as `n.x Array(UInt8)`, or as one column `n`
+    # when flatten_nested is off.
+    assert (
+        "(SELECT countIf(NOT has(['id', 'user_id', 'payload', 'meta', 'n.x', 'n'], name)) "
+        f"{stored}) AS undeclared_columns"
+    ) in start
+    assert (
+        "((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR "
+        "(SELECT hasAll(groupArray(name), ['id', 'user_id', 'payload', 'meta']) AND "
+        "(hasAll(groupArray(name), ['n.x']) OR has(groupArray(name), 'n')) "
+        f"{stored})) AS declared_columns"
+    ) in start
+    assert (
+        "throwIf(max(undeclared_columns) > 0, 'app.events stores a column that the schema "
+        "does not declare"
+    ) in start
+    assert (
+        "throwIf(min(declared_columns) = 0, 'app.events lacks a column that the schema declares"
+    ) in start
+    assert "declared_key" not in start
+
+
+def test_checks_the_table_stores_the_old_column_types() -> None:
+    # The snapshot takes the types the server stores, and cityHash64 hides UInt32 vs
+    # UInt64. ClickHouse stores Decimal64(2) as Decimal(18, 2), so the server renders
+    # the schema's types too, from a one-row format() table: defaultValueOfTypeName
+    # fails for some types before ClickHouse 26.4. With flatten_nested = 0, `n` is
+    # stored as one Nested column. Before it creates anything; TS cutover.test.ts
+    # asserts the same.
+    typed: list[Any] = [
+        *COLUMNS,
+        {"name": "price", "type": "Decimal64(2)", "nullable": True},
+        {"name": "n", "type": "Nested(x UInt8, `y z` Decimal64(2))"},
+    ]
+    start = plan(
+        old_def=events(["id"], columns=typed), new_def=events(["user_id", "id"], columns=typed)
+    ).operations[0].sql
+
+    def server(type_: str) -> str:
+        return (
+            "replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, "
+            f"'c {type_}', '{{}}') SETTINGS input_format_force_null_for_omitted_fields = 0, "
+            "data_type_default_nullable = 0), "
+            "',\\n *', ', '), '\\n *', '')"
+        )
+
+    assert (
+        "(SELECT countIf(has(['id', 'user_id', 'payload', 'price', 'n.x', 'n.y z', 'n'], name) "
+        f"AND NOT has([('id', {server('UInt64')}), ('user_id', {server('UInt64')}), "
+        f"('payload', {server('String')}), ('price', {server('Nullable(Decimal64(2))')}), "
+        f"('n.x', {server('Array(UInt8)')}), ('n.y z', {server('Array(Decimal64(2))')}), "
+        f"('n', concat('Nested(', substring({server('Tuple(`x` UInt8, `y z` Decimal64(2))')}, "
+        "7)))], "
+        "(name, type))) FROM system.columns WHERE database = 'app' AND table = 'events' "
+        "AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')) AS mistyped_columns"
+    ) in start
+    assert (
+        "throwIf(max(mistyped_columns) > 0, 'app.events stores a column with another type "
+        "than the schema declares"
+    ) in start
+
+
+def test_checks_every_replica_stores_uuid_in_the_path_when_the_snapshot_is_created_as_it() -> (
+    None
+):
+    # AS copies the path the server stores, not the schema's. TS cutover.test.ts
+    # asserts the same.
+    engine = "ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}')"
+    start = plan(
+        old_def=events(["id"], engine=engine),
+        new_def=events(["user_id", "id"], engine=engine),
+        cluster="c2",
+    ).operations[0].sql
+    # Only the engine's first argument is the path: {uuid} in a key or a setting
+    # does not count.
+    path_regex = r"'^Replicated\\w*MergeTree\\(\\s*\'((?:[^\'\\\\]|\\\\.)*)\''"
+    assert (
+        "((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR "
+        "(SELECT any(NOT startsWith(engine, 'Replicated') OR position(extract(engine_full, "
+        f"{path_regex}), '{{uuid}}') > 0) "
+        "FROM system.tables WHERE database = 'app' AND name = 'events')) AS uuid_path"
+    ) in start
+    assert (
+        "throwIf(min(uuid_path) = 0, 'The replication path that app.events stores has no {uuid}"
+    ) in start
+    assert "FROM clusterAllReplicas('c2', view(" in start
+
+
+def test_checks_the_table_stores_the_stored_columns_and_computes_the_alias_ones() -> None:
+    # The mirror, the copy and the verify skip an ALIAS column, so a stored one would
+    # lose its values. TS cutover.test.ts asserts the same.
+    kinds: list[Any] = [
+        *COLUMNS,
+        {"name": "label", "type": "String", "default_kind": "ALIAS", "default": "fn:payload"},
+    ]
+    start = plan(
+        old_def=events(["id"], columns=kinds), new_def=events(["user_id", "id"], columns=kinds)
+    ).operations[0].sql
+    assert (
+        "(SELECT countIf(has(['id', 'user_id', 'payload', 'label'], name) AND NOT has("
+        "[('id', 1), ('user_id', 1), ('payload', 1), ('label', 0)], "
+        "(name, toUInt8(default_kind NOT IN ('ALIAS', 'EPHEMERAL'))))) "
+        "FROM system.columns WHERE database = 'app' AND table = 'events') AS column_kinds"
+    ) in start
+    assert (
+        "throwIf(max(column_kinds) > 0, 'app.events stores a column that the schema declares "
+        "ALIAS or EPHEMERAL"
+    ) in start
+
+
+def test_checks_every_replica_has_no_ttl_when_the_snapshot_is_created_as_it() -> None:
+    # AS keeps the table's TTLs. TS cutover.test.ts asserts the same.
+    start = plan().operations[0].sql
+    assert "(SELECT any(NOT match(replaceRegexpAll(create_table_query, " in start
+    # Every identifier is quoted, so a column named TTL is not taken for one.
+    assert (
+        r", '\\bTTL\\b')) FROM system.tables WHERE database = 'app' AND name = 'events' "
+        "SETTINGS show_create_query_identifier_quoting_rule = 'always')) AS no_ttl"
+    ) in start
+    assert "throwIf(min(no_ttl) = 0, 'app.events has a TTL" in start
+    engine = "ReplicatedMergeTree"
+    from_definition = plan(
+        old_def=events(["id"], engine=engine),
+        new_def=events(["user_id", "id"], engine=engine),
+        cluster="c2",
+    ).operations[0].sql
+    assert "no_ttl" not in from_definition
+
+
+def test_checks_every_replica_stores_the_engine_of_the_old_definition() -> None:
+    # AS copies the table's engine: a SummingMergeTree snapshot would merge rows away
+    # before the copy. On ObsessionDB, engine is SharedMergeTree for every Shared
+    # engine; engine_full names it. TS cutover.test.ts asserts the same.
+    for engine, name, cluster in [
+        ("MergeTree", "MergeTree", None),
+        (
+            "ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}')",
+            "ReplicatedMergeTree",
+            "c2",
+        ),
+    ]:
+        start = plan(
+            old_def=events(["id"], engine=engine),
+            new_def=events(["user_id", "id"], engine=engine),
+            cluster=cluster,
+        ).operations[0].sql
+        assert (
+            "((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 "
+            r"OR (SELECT any(extract(engine_full, '^\\w+') IN "
+            f"('{name}', 'SharedMergeTree')) FROM system.tables WHERE database = 'app' AND "
+            "name = 'events')) AS stored_engine"
+        ) in start
+        assert (
+            "throwIf(min(stored_engine) = 0, 'app.events does not use the engine the schema "
+            f"declares ({name})."
+        ) in start
+
+
+def test_checks_primary_key_before_26_7_when_the_snapshot_comes_from_the_definition() -> None:
+    # TS cutover.test.ts asserts the same.
+    engine = "ReplicatedMergeTree"
+    start = plan(
+        old_def=events(["id"], engine=engine),
+        new_def=events(["user_id", "id"], engine=engine),
+        cluster="c2",
+    ).operations[0].sql
+    assert (
+        "((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR "
+        "(SELECT any(position(engine_full, ' PRIMARY KEY ') > 0) FROM system.tables WHERE "
+        "database = 'app' AND name = 'events') OR toUInt32OrZero(splitByChar('.', version())[1]) "
+        "* 100 + toUInt32OrZero(splitByChar('.', version())[2]) >= 2607) AS declared_key"
+    ) in start
+    assert "throwIf(min(declared_key) = 0, 'app.events was created without PRIMARY KEY." in start
+    assert "uuid_path" not in start
+
+
 def test_cluster_runs_data_steps_on_every_shard() -> None:
     engine = "ReplicatedMergeTree"
     cutover = plan(
@@ -1458,7 +1689,3 @@ def test_takes_a_missing_index_granularity_as_the_configured_server_default() ->
     ) in ops[0].sql
     exchange = next(op for op in ops if op.type == "exchange_tables")
     assert "= '', '4096'," in (exchange.before_retry or "")
-    snapshot = next(
-        op for op in ops if op.key == "table:app.events__cutover_20261024120000_snapshot"
-    )
-    assert "SETTINGS index_granularity = 4096" in snapshot.sql
