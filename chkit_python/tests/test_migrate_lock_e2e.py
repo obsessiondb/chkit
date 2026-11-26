@@ -134,8 +134,9 @@ def test_a_held_lock_stops_another_run_until_it_is_released(live: Live) -> None:
     # Heartbeats keep it held past the lease.
     time.sleep((SHORT.lease_ms + 1_000) / 1000)
     held.assert_held()
-    # The heartbeats renewed the claim more than once.
-    claims = live.db.query(claims_select_sql(live.target, "")).rows
+    # The heartbeats renewed the claim more than once. Read through the other
+    # client: the held lock's heartbeats use live.db.
+    claims = live.other.query(claims_select_sql(live.target, "")).rows
     assert len(claims) == 1, "Expected exactly one unreleased claim"
     holder = json.loads(claims[0]["holder"])
     assert holder["beat"] >= 2

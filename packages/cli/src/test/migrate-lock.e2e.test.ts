@@ -61,8 +61,9 @@ describe('migrate lock on a live server (#716)', () => {
       // Heartbeats keep it held past the lease.
       await Bun.sleep(SHORT.leaseMs + 1_000)
       held.assertHeld()
-      // The heartbeats renewed the claim more than once.
-      const claims = await db.query<{ name: string; holder: string }>(claimsSelectSql(target, ''))
+      // The heartbeats renewed the claim more than once. Read through the other
+      // executor: the held lock's heartbeats use db.
+      const claims = await other.query<{ name: string; holder: string }>(claimsSelectSql(target, ''))
       const [claim] = claims
       assert(claims.length === 1 && claim, 'Expected exactly one unreleased claim')
       const holder: { beat: number } = JSON.parse(claim.holder)
