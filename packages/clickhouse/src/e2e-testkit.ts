@@ -274,7 +274,9 @@ export async function runOnEveryReplica(
 // it on the replica that served the previous one.
 async function sendOnNewConnection(env: LiveEnv, sql: string, settings: Record<string, string> = {}): Promise<void> {
   const credentials = Buffer.from(`${env.clickhouseUser}:${env.clickhousePassword}`).toString('base64')
-  const response = await fetch(`${env.clickhouseUrl.replace(/\/+$/, '')}/?${new URLSearchParams(settings)}`, {
+  let base = env.clickhouseUrl
+  while (base.endsWith('/')) base = base.slice(0, -1)
+  const response = await fetch(`${base}/?${new URLSearchParams(settings)}`, {
     method: 'POST',
     body: sql,
     keepalive: false,
