@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -23,6 +24,8 @@ class RecoveryTargets:
 
     retry_target: str | None
     abandon_target: str | None
+    # ``--mark-applied`` / ``--mark-not-applied <migration>``: (migration, outcome).
+    mark_target: tuple[str, Literal["applied", "not-applied"]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +114,9 @@ def resolve_recovery_targets(
     abandon: str | None,
     table: str | None = None,
     allow_destructive: bool = False,
+    mark_applied: str | None = None,
+    mark_not_applied: str | None = None,
+    cancel_lock_queries: bool = False,
 ) -> RecoveryTargets:
     """Read --retry and --abandon; usage errors surface before any connection."""
     retry_target = (
@@ -132,7 +138,45 @@ def resolve_recovery_targets(
                 "resets the journal state of one migration and applies nothing."
             )
             raise MigrateError("invalid_usage", msg)
-    return RecoveryTargets(retry_target=retry_target, abandon_target=abandon_target)
+    mark_target = _resolve_mark_target(
+        mark_applied,
+        mark_not_applied,
+        {
+            "--retry": retry is not None,
+            "--abandon": abandon is not None,
+            "--table": table is not None,
+            "--allow-destructive": allow_destructive,
+            "--cancel-lock-queries": cancel_lock_queries,
+        },
+    )
+    return RecoveryTargets(
+        retry_target=retry_target, abandon_target=abandon_target, mark_target=mark_target
+    )
+
+
+def _resolve_mark_target(
+    applied: str | None, not_applied: str | None, present: dict[str, bool]
+) -> tuple[str, Literal["applied", "not-applied"]] | None:
+    if applied is not None and not_applied is not None:
+        msg = (
+            "--mark-applied and --mark-not-applied cannot be combined: each records one "
+            "outcome of the stopped statement."
+        )
+        raise MigrateError("invalid_usage", msg)
+    flag = "--mark-applied" if applied is not None else "--mark-not-applied"
+    raw = applied if applied is not None else not_applied
+    if raw is None:
+        return None
+    migration = normalize_migration_name(raw, flag)
+    # Flags that mean nothing next to a mark, which only changes the journal.
+    conflicts = [name for name, given in present.items() if given]
+    if conflicts:
+        msg = (
+            f"{flag} cannot be combined with {', '.join(conflicts)}. It only records the "
+            "outcome of one statement in the journal and applies nothing."
+        )
+        raise MigrateError("invalid_usage", msg)
+    return migration, "applied" if applied is not None else "not-applied"
 
 
 def normalize_migration_name(raw: str, flag: str) -> str:

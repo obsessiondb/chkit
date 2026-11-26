@@ -2077,6 +2077,40 @@ def test_cli_abandon_rejects_conflicting_flags(
     assert f"--abandon cannot be combined with {flag}" in envelope["error"]["message"]
 
 
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (
+            ["--mark-applied", "x", "--mark-not-applied", "x"],
+            "--mark-applied and --mark-not-applied cannot be combined",
+        ),
+        (["--mark-applied", "x", "--abandon", "x"], "--mark-applied cannot be combined with --abandon"),
+        (
+            ["--mark-not-applied", "x", "--retry", "x"],
+            "--mark-not-applied cannot be combined with --retry",
+        ),
+        (
+            ["--mark-applied", "x", "--table", "app.users"],
+            "--mark-applied cannot be combined with --table",
+        ),
+        (
+            ["--mark-not-applied", "x", "--allow-destructive"],
+            "--mark-not-applied cannot be combined with --allow-destructive",
+        ),
+        (["--mark-applied="], "--mark-applied requires a migration file name"),
+    ],
+)
+def test_cli_mark_outcome_rejects_conflicting_flags(
+    usage_project: Path, args: list[str], message: str
+) -> None:
+    _ = usage_project
+    result = CliRunner().invoke(app, ["migrate", "--json", *args])
+    assert result.exit_code == 1
+    envelope = json.loads(result.stdout)
+    assert envelope["error"]["code"] == "invalid_usage"
+    assert message in envelope["error"]["message"]
+
+
 def test_cli_empty_migration_name_is_usage_error(usage_project: Path) -> None:
     _ = usage_project
     retry = CliRunner().invoke(app, ["migrate", "--json", "--retry="])

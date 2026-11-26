@@ -31,7 +31,7 @@ from chkit.cli.journal_store import (
     OperationState,
     operation_as_stored,
 )
-from chkit.clickhouse.client import QueryResult, QueryStatus
+from chkit.clickhouse.client import QueryResult, QueryStatus, SubmitNotSentError
 
 # The server clock differs from the client clock on purpose: the query_log
 # bound must come from the server.
@@ -847,9 +847,17 @@ def test_apply_async_submit_failing_after_the_query_ran_waits_for_query_log() ->
     ]
 
 
-@pytest.mark.parametrize("submit_fails", [True, False], ids=["524", "acknowledged"])
+_REFUSED_TEXT = "Could not connect to ClickHouse at http://127.0.0.1:1 (connection refused)"
+
+
+@pytest.mark.parametrize(
+    "submit_error",
+    ["error code: 524", _REFUSED_TEXT, None],
+    # #800: only the executor's proof counts, never an error's text.
+    ids=["524", "text-names-refused", "acknowledged"],
+)
 def test_apply_async_unknown_polls_past_the_budget_stop_with_async_outcome_unknown(
-    submit_fails: bool,
+    submit_error: str | None,
 ) -> None:
     """#767 (round 2): a lost submit response is no evidence of failure. The
     poller keeps the fenced started record, reads every replica once more
@@ -862,13 +870,13 @@ def test_apply_async_unknown_polls_past_the_budget_stop_with_async_outcome_unkno
             # The final check of every replica, then 5 rechecks while query_log is flushed.
             *[QueryStatus(status="unknown") for _ in range(6)],
         ],
-        submit_raises=RuntimeError("error code: 524") if submit_fails else None,
+        submit_raises=RuntimeError(submit_error) if submit_error else None,
         strict=True,
     )
     journal = _FakeJournalStore()
     with pytest.raises(MigrateError) as info:
         apply_async_statement(_input(client=client, journal=journal))
-    tail = ", and the submit request failed (error code: 524)" if submit_fails else ""
+    tail = f", and the submit request failed ({submit_error})" if submit_error else ""
     assert info.value.code == "async_outcome_unknown"
     assert (
         "chkit cannot tell whether it finished: polling found it neither running nor in "
@@ -879,6 +887,140 @@ def test_apply_async_unknown_polls_past_the_budget_stop_with_async_outcome_unkno
     # The outcome is unknown, so the attempt stays started, fenced.
     assert journal.writes is not None
     assert [w.operations[0].status for w in journal.writes] == ["started", "started"]
+
+
+def test_a_submit_that_never_reached_the_server_goes_back_to_prepared_and_stops_at_once() -> (
+    None
+):
+    """#800: a submit the executor proved was never sent (a refused connect, a
+    failed host lookup) ran nothing. The run puts the attempt back to prepared
+    and stops before its first poll, instead of polling ~2 min."""
+    not_sent = SubmitNotSentError(_REFUSED_TEXT)
+    client = _ScriptedClient(
+        statuses=[QueryStatus(status="unknown")], submit_raises=not_sent, strict=True
+    )
+    journal = _FakeJournalStore()
+    with pytest.raises(RuntimeError) as info:
+        apply_async_statement(_input(client=client, journal=journal))
+    query_id = _submitted_query_id(client.submitted)
+    assert str(info.value) == (
+        f"Async migration step alter_table_modify_column (query_id {query_id}) was not "
+        f"sent: the submit request never reached ClickHouse ({_REFUSED_TEXT}), so it was "
+        "not submitted. Re-run `chkit migrate --apply`: an attempt that was never sent "
+        "runs again."
+    )
+    assert info.value.__cause__ is not_sent
+    # The in-flight check before the submit, and no poll.
+    assert len(client.status_ids) == 1
+    assert client.executed == []
+    assert journal.writes is not None
+    assert [w.operations[0].last_error for w in journal.writes] == [
+        _PREPARED_MARKER,
+        _ATTEMPT_MARKER,
+        _PREPARED_MARKER,
+    ]
+    assert journal.writes[2].operations[0].query_id == query_id
+
+
+class _NotSentAfterRunningClient(_ScriptedClient):
+    """Its submit fails as never sent once a poll found the query running."""
+
+    def __init__(self, statuses: list[QueryStatus | BaseException]) -> None:
+        super().__init__(statuses, strict=True)
+        self._running_seen = threading.Event()
+
+    def submit(self, statement: str, query_id: str | None = None, *args: Any, **kwargs: Any) -> str:
+        self.submitted.append((statement, query_id))
+        self._running_seen.wait(timeout=5)
+        raise SubmitNotSentError(_REFUSED_TEXT)
+
+    def query_status(self, query_id: str, **kwargs: Any) -> QueryStatus:
+        if self._running_seen.is_set():
+            # The polls after it see the submit's error.
+            _wait_for_submit(0)
+        status = super().query_status(query_id, **kwargs)
+        if status.status == "running":
+            self._running_seen.set()
+        return status
+
+
+def test_a_not_sent_submit_error_after_a_poll_found_the_query_running_keeps_the_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#800: a poll that found the query proves it was sent, whatever the
+    submit's error claims: the run keeps the started record."""
+    # The submit fails only after the first polls, so the sleeps do not wait for it.
+    monkeypatch.setattr(
+        "chkit.cli.commands.migrate_async_apply.time.sleep", lambda _seconds: None
+    )
+    client = _NotSentAfterRunningClient(
+        statuses=[
+            QueryStatus(status="unknown"),
+            QueryStatus(status="running", written_rows=9, written_bytes=72),
+            *[QueryStatus(status="unknown") for _ in range(20 + 6)],
+        ]
+    )
+    journal = _FakeJournalStore()
+    with pytest.raises(MigrateError) as info:
+        apply_async_statement(_input(client=client, journal=journal))
+    assert info.value.code == "async_outcome_unknown"
+    assert f"20\u00d7 in a row, and the submit request failed ({_REFUSED_TEXT})" in (
+        info.value.message
+    )
+    assert journal.writes is not None
+    assert [w.operations[0].last_error for w in journal.writes] == [
+        _PREPARED_MARKER,
+        _ATTEMPT_MARKER,
+    ]
+
+
+class _NotSentAtFinalCheckClient(_ScriptedClient):
+    """Its submit fails as never sent while the final check of every replica runs."""
+
+    def __init__(self, statuses: list[QueryStatus | BaseException]) -> None:
+        super().__init__(statuses, strict=True)
+        self._final_check = threading.Event()
+
+    def submit(self, statement: str, query_id: str | None = None, *args: Any, **kwargs: Any) -> str:
+        self.submitted.append((statement, query_id))
+        self._final_check.wait(timeout=5)
+        raise SubmitNotSentError(_REFUSED_TEXT)
+
+    def query_status(self, query_id: str, **kwargs: Any) -> QueryStatus:
+        if self._final_check.is_set():
+            _wait_for_submit(0)
+        status = super().query_status(query_id, **kwargs)
+        # The check before the submit reads every replica too.
+        if kwargs.get("every_replica") and self.submitted:
+            self._final_check.set()
+            _wait_for_submit(0)
+        return status
+
+
+def test_a_not_sent_submit_error_after_the_final_check_found_the_query_keeps_the_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#800: the final check of every replica that finds the query counts too."""
+    monkeypatch.setattr(
+        "chkit.cli.commands.migrate_async_apply.time.sleep", lambda _seconds: None
+    )
+    client = _NotSentAtFinalCheckClient(
+        statuses=[
+            QueryStatus(status="unknown"),
+            *[QueryStatus(status="unknown") for _ in range(20)],
+            QueryStatus(status="running", written_rows=9, written_bytes=72),
+            QueryStatus(status="finished", written_rows=16, written_bytes=128, duration_ms=8000),
+        ]
+    )
+    journal = _FakeJournalStore()
+    result = apply_async_statement(_input(client=client, journal=journal))
+    assert result.kind == "completed"
+    assert journal.writes is not None
+    assert [w.operations[0].last_error for w in journal.writes] == [
+        _PREPARED_MARKER,
+        _ATTEMPT_MARKER,
+        "",
+    ]
 
 
 def test_apply_async_an_attach_that_polls_unknown_past_the_budget_stops() -> None:
@@ -1350,9 +1492,12 @@ def _outcome_unknown(query_id: str, reason: str) -> str:
         f"{query_id}): the journal records an attempt of it and no replica runs it, but "
         f"chkit cannot tell whether it finished: {reason}. Nothing was submitted and no "
         "before-retry SQL ran. Check in ClickHouse whether the statement's rows reached its "
-        "target. Then reconcile every statement of m.sql that already ran, since an abandon "
-        "runs the migration again from statement 1, run chkit migrate --apply --abandon "
-        "m.sql, and apply again."
+        "target. Then record what you found: chkit migrate --apply --mark-applied m.sql if "
+        "it applied all of its writes, or chkit migrate --apply --mark-not-applied m.sql once "
+        "nothing it applied is left (its before-retry SQL runs before it is submitted again), "
+        "and apply again; the statements recorded as completed do not run again. Or reconcile "
+        "every statement of m.sql that already ran and run chkit migrate --apply --abandon "
+        "m.sql, which runs the migration again from statement 1."
     )
 
 
@@ -2331,6 +2476,44 @@ def test_an_attempt_whose_read_back_lags_stays_prepared_and_the_next_run_submits
     assert len(second.submitted) == 1
     assert second.submitted[0][1] != prepared_id
     # #767 (round 4): it ran nothing, so no before-retry SQL runs.
+    assert second.executed == []
+
+
+def test_a_submit_that_never_reached_the_server_is_submitted_again_by_the_next_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#800: a submit that never reached the server leaves the attempt
+    prepared, so the next run submits it once, without an abandon or its
+    before-retry SQL."""
+    first = _ScriptedClient(
+        statuses=[QueryStatus(status="unknown")],
+        submit_raises=SubmitNotSentError(
+            "Could not connect to ClickHouse at http://chkit.invalid:8123 (host not found)"
+        ),
+        strict=True,
+    )
+    _advance_clock(monkeypatch, first)
+    journal = _FakeJournalStore()
+    with pytest.raises(
+        RuntimeError, match="was not sent: the submit request never reached ClickHouse"
+    ):
+        apply_async_statement(_rerun_input(first, journal))
+    not_sent_id = first.submitted[0][1]
+
+    second = _ScriptedClient(
+        statuses=[
+            *_NO_ENTRY_CHECKS,
+            QueryStatus(status="finished", written_rows=16, duration_ms=8000),
+        ],
+        strict=True,
+    )
+    _advance_clock(monkeypatch, second)
+    result = apply_async_statement(_rerun_input(second, journal))
+    assert result.kind == "completed"
+    assert set(second.status_ids[:6]) == {not_sent_id}
+    assert second.every_replica[:6] == [True] * 6
+    assert len(second.submitted) == 1
+    assert second.submitted[0][1] != not_sent_id
     assert second.executed == []
 
 

@@ -62,6 +62,7 @@ from chkit.clickhouse.client import (
     SUBMIT_CONNECT_TIMEOUT_SECONDS,
     ClickHouseClient,
     QueryStatus,
+    SubmitNotSentError,
     clickhouse_error_message,
 )
 from chkit.core.jsnum import js_math_round, js_number_to_string, js_to_fixed
@@ -100,6 +101,38 @@ QUERY_LOG_FLUSH_RECHECKS = 5
 # the run reads every replica once more, then stops without an outcome (#767).
 MAX_UNKNOWN_POLLS = 20
 QUERY_LOG_FLUSH_RECHECK_INTERVAL_SECONDS = 2.0
+# An async statement is journaled complete at its QueryFinish (#812). A
+# mutation (ALTER ... UPDATE/DELETE, a lightweight DELETE) and a replicated
+# ALTER, OPTIMIZE or TRUNCATE finish once queued unless the query waits for
+# them on every replica, and ON CLUSTER DDL once queued when its wait is off
+# (a timeout of 0) or a mode finishes despite a host that timed out or
+# failed. These make the query wait for the work, and fail when it does not
+# complete. They go after --setting values; a SETTINGS clause in the
+# statement still wins. A SELECT or an INSERT queues no such work and is sent
+# without them, so a profile that fixes one of them does not reject a load.
+ASYNC_COMPLETION_SETTINGS: dict[str, str] = {
+    "mutations_sync": "2",
+    "alter_sync": "2",
+    "distributed_ddl_task_timeout": "-1",
+    "distributed_ddl_output_mode": "throw",
+}
+
+
+def async_submit_settings(sql: str, settings: dict[str, str] | None) -> dict[str, str] | None:
+    """The settings an async statement is submitted with (TS ``asyncSubmitSettings``)."""
+    if rejection_runs_nothing(sql):
+        return settings
+    # A server before ClickHouse 24.4 rejects lightweight_deletes_sync as an
+    # unknown setting (its lightweight DELETE always waits), so it is pinned
+    # only over a --setting value, which that server would reject anyway.
+    deletes = (
+        {}
+        if settings is None or "lightweight_deletes_sync" not in settings
+        else {"lightweight_deletes_sync": "2"}
+    )
+    return {**(settings or {}), **ASYNC_COMPLETION_SETTINGS, **deletes}
+
+
 # ClickHouse's ACCESS_DENIED (497) for system.query_log, as the native client
 # and the ObsessionDB console relay it.
 _QUERY_LOG_ACCESS_DENIED = re.compile(
@@ -514,7 +547,7 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:  # noqa:
             lambda before_send: client.submit(
                 input_.sql,
                 query_id=attempt_query_id,
-                settings=input_.settings,
+                settings=async_submit_settings(input_.sql, input_.settings),
                 before_send=before_send,
             )
         )
@@ -562,6 +595,7 @@ def _start_and_poll(
             submission=submission,
             started_at=started_at,
             fingerprint=input_.fingerprint,
+            back_to_prepared=back_to_prepared,
         )
     except BaseException as error:
         if submission.abandon_unsent() and not polling:
@@ -715,6 +749,7 @@ def _poll_until_terminal(
     submission: _Submission | None,
     started_at: str,
     fingerprint: str,
+    back_to_prepared: Callable[[BaseException], None] | None = None,
 ) -> AsyncApplyResult:
     """Poll, then wait for the submit request to close, as TS does.
 
@@ -732,6 +767,7 @@ def _poll_until_terminal(
             submission=submission,
             started_at=started_at,
             fingerprint=fingerprint,
+            back_to_prepared=back_to_prepared,
         )
     except Exception:
         # A run that stopped without an outcome does not wait for a submit
@@ -757,15 +793,38 @@ def _poll(  # noqa: PLR0912, PLR0915 - one branch per poll outcome, as in TS
     submission: _Submission | None,
     started_at: str,
     fingerprint: str,
+    back_to_prepared: Callable[[BaseException], None] | None,
 ) -> AsyncApplyResult:
     poll_started_at = time.monotonic()
     transient_errors = 0
     # Polls in a row that found the query neither running nor in query_log,
     # however polling started (#767).
     unknown_polls = 0
+    # Whether a poll found the query on the server: then its submit was sent,
+    # whatever its error says (#800).
+    seen_on_server = False
 
     while True:
         time.sleep(input_.poll_interval_seconds)
+        # A submit the executor proved was never sent (a refused connect, a
+        # failed host lookup) ran nothing: the attempt goes back to prepared and
+        # the run stops, so a re-run submits it again without an abandon (#800).
+        not_sent = submission.error if submission is not None else None
+        if (
+            submission is not None
+            and isinstance(not_sent, SubmitNotSentError)
+            and not seen_on_server
+            and back_to_prepared is not None
+        ):
+            submission.abandon()
+            back_to_prepared(not_sent)
+            msg = (
+                f"Async migration step {input_.operation_type} (query_id {query_id}) was "
+                "not sent: the submit request never reached ClickHouse "
+                f"({_describe_error(not_sent)}), so it was not submitted. Re-run "
+                "`chkit migrate --apply`: an attempt that was never sent runs again."
+            )
+            raise RuntimeError(msg) from not_sent
         try:
             status = input_.client.query_status(
                 query_id, after_time=poll_after_time, include_before_start=True
@@ -824,6 +883,9 @@ def _poll(  # noqa: PLR0912, PLR0915 - one branch per poll outcome, as in TS
                     f"{unknown_polls}\u00d7 in a row",
                 )
             unknown_polls = 0
+        # After the final check too: it can find the query (#800).
+        if status.status != "unknown":
+            seen_on_server = True
 
         if status.status == "finished":
             finished_op = OperationState(
@@ -1164,7 +1226,7 @@ _WHILE_PROCESSING_REASON = (
     "that fails while it runs can leave some of its writes applied (parts of an INSERT ... "
     "SELECT, a DDL that ran on some hosts)"
 )
-_BEFORE_START_EFFECTS_REASON = (
+BEFORE_START_EFFECTS_REASON = (
     "the server reports it was rejected before it started (ExceptionBeforeStart), but a "
     "statement other than a SELECT or an INSERT can apply effects before that (an ALTER's "
     "mutation keeps running in system.mutations, or applied to some partitions before one "
@@ -1266,7 +1328,7 @@ def resolve_recorded_attempt(  # noqa: PLR0911, PLR0912 - one return per outcome
                 return RecordedAttempt(kind="unknown", reason=_WHILE_PROCESSING_REASON)
             if sql is not None and rejection_runs_nothing(sql):
                 return RecordedAttempt(kind="failed", error=status.error or "<unknown>")
-            return RecordedAttempt(kind="unknown", reason=_BEFORE_START_EFFECTS_REASON)
+            return RecordedAttempt(kind="unknown", reason=BEFORE_START_EFFECTS_REASON)
         if not prepared:
             return RecordedAttempt(kind="unknown", reason=_NO_ENTRY_REASON)
         # A prepared attempt with nothing of its id on the server was never
@@ -1420,10 +1482,7 @@ def _failed_while_running_error(
         f"Async migration step {input_.operation_type} (statement "
         f"{input_.statement_index + 1} of {input_.migration_name}, query_id {query_id}) "
         f"{what}, so chkit does not run it, or its before-retry SQL, again. Check in "
-        "ClickHouse what the statement applied. Then reconcile every statement of "
-        f"{input_.migration_name} "
-        "that already ran, since an abandon runs the migration again from statement 1, run "
-        f"chkit migrate --apply --abandon {input_.migration_name}, and apply again."
+        f"ClickHouse what the statement applied. {_record_outcome_advice(input_.migration_name)}"
     )
     return MigrateError("async_outcome_unknown", msg)
 
@@ -1440,12 +1499,23 @@ def outcome_unknown_error(
         f"{statement_index + 1} of {migration_name}, query_id {query_id}): "
         "the journal records an attempt of it and no replica runs it, but chkit cannot "
         f"tell whether it finished: {reason}. Nothing was submitted and no before-retry SQL "
-        "ran. Check in ClickHouse whether the statement's rows reached its target. Then "
-        f"reconcile every statement of {migration_name} that already ran, since an abandon "
-        "runs the migration again from statement 1, run chkit migrate --apply --abandon "
-        f"{migration_name}, and apply again."
+        "ran. Check in ClickHouse whether the statement's rows reached its target. "
+        f"{_record_outcome_advice(migration_name)}"
     )
     return MigrateError("async_outcome_unknown", msg)
+
+
+def _record_outcome_advice(migration_name: str) -> str:
+    """How the operator records an attempt's outcome once they checked it."""
+    return (
+        f"Then record what you found: chkit migrate --apply --mark-applied {migration_name} "
+        "if it applied all of its writes, or chkit migrate --apply --mark-not-applied "
+        f"{migration_name} once nothing it applied is left (its before-retry SQL runs before "
+        "it is submitted again), and apply again; the statements recorded as completed do "
+        f"not run again. Or reconcile every statement of {migration_name} that already ran "
+        f"and run chkit migrate --apply --abandon {migration_name}, which runs the migration "
+        "again from statement 1."
+    )
 
 
 def _journal_time(value: str) -> datetime:
