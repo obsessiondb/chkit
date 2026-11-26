@@ -14,6 +14,11 @@ Flags mirror the TypeScript ``migrateCommand``:
 - ``--abandon <migration>``    Reset a failed migration so the next apply
                                runs it from statement 1 (journal only;
                                previews without ``--apply``).
+- ``--mark-applied <migration>`` / ``--mark-not-applied <migration>``
+                               Record whether the statement that stopped with
+                               ``async_outcome_unknown`` ran, so the next apply
+                               continues from it (journal only; previews
+                               without ``--apply``).
 - ``--setting <name=value>``   ClickHouse query setting sent with each
                                migration statement (repeatable).
 - ``--json``                   Emit JSON instead of human text.
@@ -80,6 +85,13 @@ from chkit.cli.commands.migrate_lock import (
     acquire_migrate_lock,
     migrate_lock_disabled,
 )
+from chkit.cli.commands.migrate_mark_outcome import (
+    MarkTarget,
+    mark_report,
+    mark_under_lock,
+    read_stopped_statement,
+    render_mark_text,
+)
 from chkit.cli.commands.migrate_output import (
     render_abandon_plan_only_notice,
     render_abandon_text,
@@ -140,6 +152,7 @@ from chkit.cli.table_scope import (
 from chkit.clickhouse.client import ClickHouseClient, clickhouse_error_message
 from chkit.clickhouse.replicas import ReplicaFanout
 from chkit.core.model import ChxConfigEnv, ChxResolvedConfig, configured_index_granularity
+from chkit.core.sql_fingerprint import statement_fingerprint
 from chkit.plugins import ChxOnConfigLoadedContext, ChxPlugin
 
 
@@ -260,6 +273,30 @@ def run(  # noqa: PLR0917
             ),
         ),
     ] = None,
+    mark_applied: Annotated[
+        str | None,
+        typer.Option(
+            "--mark-applied",
+            metavar="<migration>",
+            help=(
+                "Record that the statement which stopped with async_outcome_unknown ran, "
+                "so the next apply continues after it (journal only; previews without "
+                "--apply)"
+            ),
+        ),
+    ] = None,
+    mark_not_applied: Annotated[
+        str | None,
+        typer.Option(
+            "--mark-not-applied",
+            metavar="<migration>",
+            help=(
+                "Record that the statement which stopped with async_outcome_unknown did "
+                "not run, so the next apply runs it again (journal only; previews without "
+                "--apply)"
+            ),
+        ),
+    ] = None,
     break_lock: Annotated[
         str | None,
         typer.Option(
@@ -312,6 +349,8 @@ def run(  # noqa: PLR0917
             "--table": table_selector,
             "--retry": retry,
             "--abandon": abandon,
+            "--mark-applied": mark_applied,
+            "--mark-not-applied": mark_not_applied,
             "--break-lock": break_lock,
             "--cancel-lock-queries": cancel_lock_queries,
             "--setting": setting,
@@ -329,6 +368,8 @@ def run(  # noqa: PLR0917
             table_selector=table_selector,
             retry=retry,
             abandon=abandon,
+            mark_applied=mark_applied,
+            mark_not_applied=mark_not_applied,
             break_lock=break_lock,
             cancel_lock_queries=cancel_lock_queries,
             setting=setting,
@@ -357,6 +398,8 @@ def _run(
     table_selector: str | None,
     retry: str | None,
     abandon: str | None,
+    mark_applied: str | None,
+    mark_not_applied: str | None,
     break_lock: str | None,
     cancel_lock_queries: bool,
     setting: list[str] | None,
@@ -370,6 +413,9 @@ def _run(
         abandon=abandon,
         table=table_selector,
         allow_destructive=allow_destructive,
+        mark_applied=mark_applied,
+        mark_not_applied=mark_not_applied,
+        cancel_lock_queries=cancel_lock_queries,
     )
     if cancel_lock_queries and (
         hook_flags.get("--apply") is not True or not break_lock
@@ -402,11 +448,11 @@ def _run(
     migrations_dir = Path(os.path.abspath(config.migrations_dir))
     meta_dir = Path(os.path.abspath(config.meta_dir))
 
-    # --abandon only changes the journal and rejects --table, so it does not
-    # read snapshot.json: a conflicted snapshot cannot block it.
+    # --abandon and --mark-(not-)applied only change the journal and reject
+    # --table, so they do not read snapshot.json: a conflicted snapshot cannot block them.
     snapshot = (
         read_snapshot(meta_dir, index_granularity=configured_index_granularity(config))
-        if targets.abandon_target is None
+        if targets.abandon_target is None and targets.mark_target is None
         else None
     )
     snapshot_defs = list(snapshot.definitions) if snapshot is not None else []
@@ -521,6 +567,9 @@ def _run(
                 ),
             )
             return
+        if targets.mark_target is not None:
+            run_mark_outcome(MarkTarget(*targets.mark_target), ctx)
+            return
         # A migration generated for another index_granularity default would
         # create tables unlike the ones chkit planned for (#466).
         assert_index_granularity_matches_server("migrate", client, config, json_mode=output_json)
@@ -594,6 +643,64 @@ def run_abandon(
     render_abandon_text(
         report, performed=True, file_exists=file_exists, snapshot_file=snapshot_file
     )
+
+
+def run_mark_outcome(target: MarkTarget, ctx: _MigrateContext) -> None:
+    """--mark-applied / --mark-not-applied <migration>: record the stopped statement's outcome.
+
+    The operator's outcome for the one statement that stopped with
+    async_outcome_unknown, so the next apply continues from it without running
+    the statements the journal records as completed again. Refuses while that
+    attempt runs on any replica. Without --apply it only previews. Runs before
+    every other gate and applies nothing.
+    """
+    flag = "mark-applied" if target.outcome == "applied" else "mark-not-applied"
+
+    def log(line: str) -> None:
+        typer.echo(line, err=ctx.json_mode)
+
+    statements = (
+        extract_executable_statements(
+            (ctx.migrations_dir / target.migration).read_text(encoding="utf-8")
+        )
+        if target.migration in ctx.files
+        else []
+    )
+    sql_by_fingerprint = {statement_fingerprint(statement): statement for statement in statements}
+    shown = read_stopped_statement(
+        ctx.client,
+        migration=target.migration,
+        applied_names=ctx.applied_names,
+        flag=flag,
+        sql_by_fingerprint=sql_by_fingerprint,
+        journal_store=ctx.journal_store,
+        log=log,
+    )
+    report = mark_report(target, shown[1])
+    if ctx.execute_requested:
+        ctx.with_lock(
+            lambda: mark_under_lock(
+                ctx.client,
+                target,
+                shown,
+                applied_names=ctx.applied_names,
+                flag=flag,
+                sql_by_fingerprint=sql_by_fingerprint,
+                journal_store=ctx.journal_store,
+                log=log,
+            )
+        )
+    if ctx.json_mode:
+        emit_json(
+            "migrate",
+            {
+                "mode": "execute" if ctx.execute_requested else "plan",
+                "scope": scope_to_payload(ctx.table_scope),
+                "mark": report,
+            },
+        )
+        return
+    render_mark_text(report, performed=ctx.execute_requested)
 
 
 def _abandon_under_lock(ctx: AbandonContext, migration: str, state: MigrationRowState) -> None:

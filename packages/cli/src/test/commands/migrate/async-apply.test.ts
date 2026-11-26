@@ -1431,7 +1431,7 @@ describe('applyAsyncStatement re-run of a started step', () => {
       },
     }) as unknown as ClickHouseExecutor
   const outcomeUnknown = (queryId: string, reason: string) =>
-    `Async migration step load_table_data (statement 1 of m.sql, query_id ${queryId}): the journal records an attempt of it and no replica runs it, but chkit cannot tell whether it finished: ${reason}. Nothing was submitted and no before-retry SQL ran. Check in ClickHouse whether the statement's rows reached its target. Then reconcile every statement of m.sql that already ran, since an abandon runs the migration again from statement 1, run chkit migrate --apply --abandon m.sql, and apply again.`
+    `Async migration step load_table_data (statement 1 of m.sql, query_id ${queryId}): the journal records an attempt of it and no replica runs it, but chkit cannot tell whether it finished: ${reason}. Nothing was submitted and no before-retry SQL ran. Check in ClickHouse whether the statement's rows reached its target. Then record what you found: chkit migrate --apply --mark-applied m.sql if it applied all of its writes, or chkit migrate --apply --mark-not-applied m.sql once nothing it applied is left (its before-retry SQL runs before it is submitted again), and apply again; the statements recorded as completed do not run again. Or reconcile every statement of m.sql that already ran and run chkit migrate --apply --abandon m.sql, which runs the migration again from statement 1.`
   const NO_ENTRY_REASON =
     'system.query_log has no entry for its query id (query logging is off for the user, query_log is flushed later than chkit waits, or the run stopped before it submitted the statement)'
   const UNVERIFIED_REASON =

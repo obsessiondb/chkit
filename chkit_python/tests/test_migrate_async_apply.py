@@ -1492,9 +1492,12 @@ def _outcome_unknown(query_id: str, reason: str) -> str:
         f"{query_id}): the journal records an attempt of it and no replica runs it, but "
         f"chkit cannot tell whether it finished: {reason}. Nothing was submitted and no "
         "before-retry SQL ran. Check in ClickHouse whether the statement's rows reached its "
-        "target. Then reconcile every statement of m.sql that already ran, since an abandon "
-        "runs the migration again from statement 1, run chkit migrate --apply --abandon "
-        "m.sql, and apply again."
+        "target. Then record what you found: chkit migrate --apply --mark-applied m.sql if "
+        "it applied all of its writes, or chkit migrate --apply --mark-not-applied m.sql once "
+        "nothing it applied is left (its before-retry SQL runs before it is submitted again), "
+        "and apply again; the statements recorded as completed do not run again. Or reconcile "
+        "every statement of m.sql that already ran and run chkit migrate --apply --abandon "
+        "m.sql, which runs the migration again from statement 1."
     )
 
 

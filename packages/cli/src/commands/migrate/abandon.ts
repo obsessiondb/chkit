@@ -25,21 +25,25 @@ export type ReportedOperation = Omit<OperationState, 'fingerprint' | 'attemptFen
 
 const OPERATION_STATUSES: readonly OperationStatus[] = ['completed', 'failed', 'started']
 
-/** Read the in-progress state --abandon <migration> resets; throws when there is none. */
+/**
+ * Read the in-progress state --abandon <migration> resets (or --mark-applied
+ * and --mark-not-applied, named by `action`); throws when there is none.
+ */
 export async function readAbandonableState(
   input: { migration: string; appliedNames: ReadonlySet<string> },
   deps: { journalStore: JournalStore },
+  action = 'abandon',
 ): Promise<MigrationRowState> {
   const { migration } = input
-  if (input.appliedNames.has(migration)) throw alreadyAppliedError(migration)
+  if (input.appliedNames.has(migration)) throw alreadyAppliedError(migration, action)
   const state = await deps.journalStore.readMigrationState(migration)
   if (state === null) {
     throw new MigrateError(
       'migration_not_in_progress',
-      `Cannot abandon ${migration}: the journal has no in-progress state for it.`,
+      `Cannot ${action} ${migration}: the journal has no in-progress state for it.`,
     )
   }
-  if (state.migrationCompleted) throw alreadyAppliedError(migration)
+  if (state.migrationCompleted) throw alreadyAppliedError(migration, action)
   return state
 }
 
@@ -107,13 +111,13 @@ function abandonedFrom(op: ReportedOperation): OperationStatus | undefined {
   return OPERATION_STATUSES.find((status) => op.lastError === abandonedError(status))
 }
 
-function abandonedError(previous: OperationStatus): string {
+export function abandonedError(previous: OperationStatus): string {
   return `abandoned via chkit migrate --abandon (was ${previous})`
 }
 
-function alreadyAppliedError(migration: string): MigrateError {
+function alreadyAppliedError(migration: string, action: string): MigrateError {
   return new MigrateError(
     'migration_already_applied',
-    `Cannot abandon ${migration}: it is already applied. --abandon only resets a migration that failed part-way; to undo an applied migration, write a new migration.`,
+    `Cannot ${action} ${migration}: it is already applied. --${action} only resets a migration that failed part-way; to undo an applied migration, write a new migration.`,
   )
 }
