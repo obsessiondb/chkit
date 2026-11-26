@@ -223,12 +223,14 @@ export async function runOnceVisible<T>(run: () => Promise<T>, options: PollUnti
  * shows it finished there.
  *
  * On a multi-replica service (ObsessionDB) a SYSTEM statement acts only on the
- * replica that serves it, and ON CLUSTER is refused. The load balancer picks
- * the replica per connection, and a client's keep-alive connection stays on
- * one, so the statement is sent on a new connection each time, tagged with a
- * `log_comment`, until every replica `clusterAllReplicas` reaches has logged
- * it. The statement must be safe to repeat. On a single node it runs once,
- * through `executor`. chkit-py's twin is `run_on_every_replica`.
+ * replica that serves it, and ON CLUSTER is refused. The load balancer spreads
+ * requests over the replicas (round-robin on the test service), so each round
+ * sends the statement, tagged with a `log_comment`, once per replica in a row,
+ * then flushes the query log once per replica, until every replica
+ * `clusterAllReplicas` reaches has logged it. A round with any other request
+ * between two of its own could keep reaching the same replica. The statement
+ * must be safe to repeat. On a single node it runs once, through `executor`.
+ * chkit-py's twin is `run_on_every_replica`.
  */
 export async function runOnEveryReplica(
   executor: ClickHouseExecutor,
@@ -251,9 +253,9 @@ export async function runOnEveryReplica(
   const intervalMs = options.intervalMs ?? 500
   const deadline = Date.now() + timeoutMs
   for (;;) {
-    await sendOnNewConnection(env, statement, { log_comment: tag })
+    for (let i = 0; i < fanout.replicas; i++) await sendOnNewConnection(env, statement, { log_comment: tag })
     // A replica writes its query_log every few seconds; a flush writes it now.
-    await sendOnNewConnection(env, 'SYSTEM FLUSH LOGS')
+    for (let i = 0; i < fanout.replicas; i++) await sendOnNewConnection(env, 'SYSTEM FLUSH LOGS')
     const [row] = await executor.query<{ replicas: number | string; ran: number | string }>(coverage)
     const replicas = Number(row?.replicas ?? 0)
     const ran = Number(row?.ran ?? 0)
@@ -265,8 +267,8 @@ export async function runOnEveryReplica(
   }
 }
 
-// One HTTP request on a connection of its own, which the load balancer may
-// send to any replica.
+// One HTTP request on a connection of its own, so no connection affinity keeps
+// it on the replica that served the previous one.
 async function sendOnNewConnection(env: LiveEnv, sql: string, settings: Record<string, string> = {}): Promise<void> {
   const credentials = Buffer.from(`${env.clickhouseUser}:${env.clickhousePassword}`).toString('base64')
   const response = await fetch(`${env.clickhouseUrl.replace(/\/+$/, '')}/?${new URLSearchParams(settings)}`, {

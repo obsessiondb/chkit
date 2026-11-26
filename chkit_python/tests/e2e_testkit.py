@@ -330,11 +330,13 @@ def run_on_every_replica(
 
     On a multi-replica service (ObsessionDB) a SYSTEM statement acts only on
     the replica that serves it, and ON CLUSTER is refused. The load balancer
-    picks the replica per connection, and a client's keep-alive connection
-    stays on one, so the statement is sent on a new connection each time,
-    tagged with a ``log_comment``, until every replica ``clusterAllReplicas``
-    reaches has logged it. The statement must be safe to repeat. On a single
-    node it runs once, through ``client``. TS twin: ``runOnEveryReplica``.
+    spreads requests over the replicas (round-robin on the test service), so
+    each round sends the statement, tagged with a ``log_comment``, once per
+    replica in a row, then flushes the query log once per replica, until every
+    replica ``clusterAllReplicas`` reaches has logged it. A round with any
+    other request between two of its own could keep reaching the same
+    replica. The statement must be safe to repeat. On a single node it runs
+    once, through ``client``. TS twin: ``runOnEveryReplica``.
     """
     fanout = resolve_replica_fanout_or_raise(client)
     if fanout is None:
@@ -350,9 +352,11 @@ def run_on_every_replica(
     )
     deadline = time.monotonic() + timeout
     while True:
-        _send_on_new_connection(env, statement, {"log_comment": tag})
+        for _ in range(fanout.replicas):
+            _send_on_new_connection(env, statement, {"log_comment": tag})
         # A replica writes its query_log every few seconds; a flush writes it now.
-        _send_on_new_connection(env, "SYSTEM FLUSH LOGS")
+        for _ in range(fanout.replicas):
+            _send_on_new_connection(env, "SYSTEM FLUSH LOGS")
         row = client.query(coverage).rows[0]
         replicas = int(row["replicas"])
         ran = int(row["ran"])
@@ -368,8 +372,8 @@ def run_on_every_replica(
 
 
 def _send_on_new_connection(env: LiveEnv, sql: str, settings: dict[str, str] | None = None) -> None:
-    """One HTTP request on a connection of its own, which the load balancer
-    may send to any replica."""
+    """One HTTP request on a connection of its own, so no connection affinity
+    keeps it on the replica that served the previous one."""
     credentials = base64.b64encode(
         f"{env.clickhouse_user}:{env.clickhouse_password}".encode()
     ).decode()
