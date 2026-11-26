@@ -2013,11 +2013,12 @@ def test_a_deeply_nested_cast_in_an_unchanged_table_plans_nothing() -> None:
     assert plan_diff([_t([_u("a"), deep])], [_t([_u("a"), deep])]).operations == []
 
 
-def test_a_prerequisite_between_two_tables_keeps_both_in_their_sorted_order() -> None:
-    # Column `x:column:a` of `t` and column `a` of `t:column:x` share a key, so
-    # a prerequisite links the two tables' statements. `t:column:x` keeps its
-    # sorted order because of its INTERVAL, so `t` keeps its order too: the
-    # plan is main's.
+def test_a_shared_key_does_not_link_two_tables_so_the_other_table_is_still_repaired() -> None:
+    # Column `x:column:a` of `t` and column `a` of `t:column:x` share a key,
+    # but their statements are keyed by column (#801), so no prerequisite links
+    # the two tables. `t:column:x` keeps its sorted order because of its
+    # INTERVAL; `t` is still repaired: `MODIFY y` runs before the MODIFY of
+    # `x:column:a` that would close the cycle through `y` and `z`.
     interval = _u("k", "toUInt64(toDateTime(id) + INTERVAL 1 day)")
     previous = [
         _t([_u("x:column:a"), _u("y", "z"), _u("z", "`x:column:a`")], "t"),
@@ -2028,10 +2029,10 @@ def test_a_prerequisite_between_two_tables_keeps_both_in_their_sorted_order() ->
         _t([_u("a"), _u("b", "id"), interval], "t:column:x"),
     ]
     assert [op.sql for op in plan_diff(previous, next_).operations] == [
-        "ALTER TABLE app.t MODIFY COLUMN `x:column:a` UInt64 DEFAULT y;",
         "ALTER TABLE app.`t:column:x` ADD COLUMN IF NOT EXISTS `a` UInt64;",
         "ALTER TABLE app.`t:column:x` MODIFY COLUMN `b` UInt64 DEFAULT id;",
         "ALTER TABLE app.t MODIFY COLUMN `y` UInt64 DEFAULT id;",
+        "ALTER TABLE app.t MODIFY COLUMN `x:column:a` UInt64 DEFAULT y;",
         "ALTER TABLE app.t MODIFY COLUMN `z` UInt64 DEFAULT id;",
     ]
 

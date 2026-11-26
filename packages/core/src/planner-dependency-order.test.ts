@@ -1984,19 +1984,20 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
     expect(planDiff([t([u('a'), deep])], [t([u('a'), deep])]).operations).toEqual([])
   })
 
-  // Column `x:column:a` of `t` and column `a` of `t:column:x` share a key, so
-  // a prerequisite links the two tables' statements. `t:column:x` keeps its
-  // sorted order because of its INTERVAL, so `t` keeps its order too: the
-  // plan is main's.
-  test('a prerequisite between two tables keeps both in their sorted order', () => {
+  // Column `x:column:a` of `t` and column `a` of `t:column:x` share a key,
+  // but their statements are keyed by column (#801), so no prerequisite links
+  // the two tables. `t:column:x` keeps its sorted order because of its
+  // INTERVAL; `t` is still repaired: `MODIFY y` runs before the MODIFY of
+  // `x:column:a` that would close the cycle through `y` and `z`.
+  test('a shared key does not link two tables, so the other table is still repaired', () => {
     const interval = u('k', 'toUInt64(toDateTime(id) + INTERVAL 1 day)')
     const previous = [named('t', [u('x:column:a'), u('y', 'z'), u('z', '`x:column:a`')]), named('t:column:x', [u('b', '1'), interval])]
     const next = [named('t', [u('x:column:a', 'y'), u('y', 'id'), u('z', 'id')]), named('t:column:x', [u('a'), u('b', 'id'), interval])]
     expect(planDiff(previous, next).operations.map((op) => op.sql)).toEqual([
-      'ALTER TABLE app.t MODIFY COLUMN `x:column:a` UInt64 DEFAULT y;',
       'ALTER TABLE app.`t:column:x` ADD COLUMN IF NOT EXISTS `a` UInt64;',
       'ALTER TABLE app.`t:column:x` MODIFY COLUMN `b` UInt64 DEFAULT id;',
       'ALTER TABLE app.t MODIFY COLUMN `y` UInt64 DEFAULT id;',
+      'ALTER TABLE app.t MODIFY COLUMN `x:column:a` UInt64 DEFAULT y;',
       'ALTER TABLE app.t MODIFY COLUMN `z` UInt64 DEFAULT id;',
     ])
   })

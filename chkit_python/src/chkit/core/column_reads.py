@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import json
+from collections.abc import Callable, Sequence
 
 from chkit.core.column_default import parse_column_default
 from chkit.core.model import ColumnRenameSuggestion, SchemaDefinition, TableDefinition
@@ -85,19 +86,23 @@ _EXTRACT_UNITS = frozenset(
 
 
 def _column_default_reads(
-    definitions: Sequence[SchemaDefinition], lambdas: bool = False
+    definitions: Sequence[SchemaDefinition],
+    lambdas: bool = False,
+    column_key_of: Callable[[str, str, str], str] | None = None,
 ) -> dict[str, set[str]]:
     """Column operation key to the keys of the same table's columns its default expression names.
 
-    A name followed by ``(`` is a function call, not a column, and neither are
-    the names ``_not_column_names`` finds. With ``lambdas``, the lambdas' own
-    names read columns as well (``_lambda_reads``).
+    Or the same with the keys ``column_key_of`` gives. A name followed by
+    ``(`` is a function call, not a column, and neither are the names
+    ``_not_column_names`` finds. With ``lambdas``, the lambdas' own names read
+    columns as well (``_lambda_reads``).
     """
+    key_of = _column_key if column_key_of is None else column_key_of
     graph: dict[str, set[str]] = {}
     for definition in definitions:
         if not isinstance(definition, TableDefinition):
             continue
-        prefix = f"table:{definition.database}.{definition.name}:column:"
+        database, table_name = definition.database, definition.name
         names = {column.name for column in definition.columns}
         for column in definition.columns:
             if column.default is None:
@@ -109,8 +114,8 @@ def _column_default_reads(
             found = _dotted_names(parsed.sql, names)
             for name in [*found, *_lambda_reads(parsed.sql, names)] if lambdas else found:
                 if name != column.name:
-                    read.add(prefix + name)
-            graph[prefix + column.name] = read
+                    read.add(key_of(database, table_name, name))
+            graph[key_of(database, table_name, column.name)] = read
     return graph
 
 
@@ -152,7 +157,7 @@ def _plain_facts(
 
 
 def _table_ttl_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, set[str]]:
-    """Table TTL operation key to the keys of the table's columns the TTL names.
+    """Table TTL id to the ids of the table's columns the TTL names.
 
     The TTL is read with the same rules as a column's default expression
     (``_dotted_names``).
@@ -162,8 +167,8 @@ def _table_ttl_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, set[s
         if not isinstance(definition, TableDefinition) or definition.ttl is None:
             continue
         names = {column.name for column in definition.columns}
-        graph[f"table:{definition.database}.{definition.name}:ttl"] = {
-            _column_key(definition.database, definition.name, name)
+        graph[_ttl_object_id(definition.database, definition.name)] = {
+            _column_object_id(definition.database, definition.name, name)
             for name in _dotted_names(definition.ttl, names)
         }
     return graph
@@ -683,6 +688,21 @@ def _keyword_names(  # noqa: PLR0915 — mirrors TS keywordNames
 
 def _column_key(database: str, table: str, column: str) -> str:
     return f"table:{database}.{table}:column:{column}"
+
+
+# Ids of the objects the column statements change. Unlike operation keys,
+# two objects never share one: table ``t:column:x`` and column ``x:column:a``
+# of ``t`` give the same key (#801).
+def _column_object_id(database: str, table: str, column: str) -> str:
+    return json.dumps(["column", database, table, column])
+
+
+def _ttl_object_id(database: str, table: str) -> str:
+    return json.dumps(["ttl", database, table])
+
+
+def _rename_object_id(rename: ColumnRenameSuggestion) -> str:
+    return json.dumps(["rename", rename.database, rename.table, rename.from_, rename.to])
 
 
 def _table_id(database: str, table: str) -> str:

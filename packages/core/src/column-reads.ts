@@ -70,15 +70,21 @@ const EXTRACT_UNITS: ReadonlySet<string> = new Set([
 
 /**
  * Column operation key → keys of the other columns of the same table that the
- * column's default expression names. A name followed by `(` is a function
- * call, not a column, and neither are the names `notColumnNames` finds. With
- * `lambdas`, the lambdas' own names read columns as well (`lambdaReads`).
+ * column's default expression names, or the same with the keys `columnKeyOf`
+ * gives. A name followed by `(` is a function call, not a column, and neither
+ * are the names `notColumnNames` finds. With `lambdas`, the lambdas' own
+ * names read columns as well (`lambdaReads`).
  */
-export function columnDefaultReads(definitions: SchemaDefinition[], lambdas = false): DependencyGraph {
+export function columnDefaultReads(
+  definitions: SchemaDefinition[],
+  lambdas = false,
+  columnKeyOf: (database: string, table: string, column: string) => string = (database, table, column) =>
+    columnKey({ database, table }, column)
+): DependencyGraph {
   const graph = new Map<string, Set<string>>()
   for (const def of definitions) {
     if (def.kind !== 'table') continue
-    const keyOf = (name: string) => columnKey({ database: def.database, table: def.name }, name)
+    const keyOf = (name: string) => columnKeyOf(def.database, def.name, name)
     const names = new Set(def.columns.map((column) => column.name))
     for (const column of def.columns) {
       if (column.default === undefined) continue
@@ -135,16 +141,16 @@ export function plainFacts(
 }
 
 /**
- * Table TTL operation key → keys of the table's columns the TTL names, read
- * with the same rules as a column's default expression (`dottedNames`).
+ * Table TTL id → ids of the table's columns the TTL names, read with the
+ * same rules as a column's default expression (`dottedNames`).
  */
 export function tableTtlReads(definitions: SchemaDefinition[]): DependencyGraph {
   const graph = new Map<string, Set<string>>()
   for (const def of definitions) {
     if (def.kind !== 'table' || def.ttl === undefined) continue
     const names = new Set(def.columns.map((column) => column.name))
-    const read = new Set(dottedNames(def.ttl, names).map((name) => columnKey({ database: def.database, table: def.name }, name)))
-    graph.set(`table:${def.database}.${def.name}:ttl`, read)
+    const read = new Set(dottedNames(def.ttl, names).map((name) => columnObjectId(def.database, def.name, name)))
+    graph.set(ttlObjectId(def.database, def.name), read)
   }
   return graph
 }
@@ -548,6 +554,21 @@ function keywordNames(tokens: SQLToken[], columns: ReadonlySet<string>, skipped:
 
 export function columnKey(table: { database: string; table: string }, column: string): string {
   return `table:${table.database}.${table.table}:column:${column}`
+}
+
+// Ids of the objects the column statements change. Unlike operation keys,
+// two objects never share one: table `t:column:x` and column `x:column:a` of
+// `t` give the same key (#801).
+export function columnObjectId(database: string, table: string, column: string): string {
+  return JSON.stringify(['column', database, table, column])
+}
+
+export function ttlObjectId(database: string, table: string): string {
+  return JSON.stringify(['ttl', database, table])
+}
+
+export function renameObjectId(rename: ColumnRename): string {
+  return JSON.stringify(['rename', rename.database, rename.table, rename.from, rename.to])
 }
 
 /** The identity of a table: its database and name, which a column key does not carry unambiguously. */
