@@ -1208,6 +1208,9 @@ function createStatusCapturingClient(
         async text() {
           return text
         },
+        async json() {
+          return { data: text.split('\n').filter((line) => line.trim()).map((line) => JSON.parse(line)) }
+        },
       }
     },
     async insert() {

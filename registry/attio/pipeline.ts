@@ -1,4 +1,4 @@
-import { definePipeline, defineStream } from '@chkit/plugin-ingest'
+import { definePipeline, defineStream } from '@chkit/plugin-sync'
 
 import { attioConfig, type AttioReaderConfig } from './config.js'
 import { attioObjectsRaw, readObjects } from './sources/objects.js'

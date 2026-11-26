@@ -607,4 +607,6 @@ def test_missing_database_retry_checks_lock_ownership_again(lose_lock: bool) -> 
         client.execute("INSERT INTO app.events SELECT 1", settings)
     assert driver.command.call_count == (1 if lose_lock else 2)
     if not lose_lock:
-        assert driver.command.call_args.kwargs == {"settings": settings, "use_database": False}
+        assert driver.command.call_args.kwargs == {
+            "settings": settings, "use_database": False, "transport_settings": {"X-DDL": "1"}
+        }

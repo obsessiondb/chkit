@@ -1,5 +1,29 @@
 # @chkit/plugin-obsessiondb
 
+## 0.2.0-beta.19
+
+### Minor Changes
+
+- 8d0290a: A backfill chunk into a `Distributed` table is no longer marked done while its rows are still queued: chunk INSERTs default to `distributed_foreground_insert = 1` and `materialized_views_ignore_errors = 0`, and always run with `log_queries_probability = 1`. The new `insertSettings` plugin option adds settings to every chunk INSERT (`run`, `resume` and managed `submit`) and can override those two defaults with a warning; settings chkit sets itself, such as `async_insert` or the dedup token, cannot be named in it.
+
+### Patch Changes
+
+- 7afdd5a: Writes through the ObsessionDB console API send `async_insert = 0` and `wait_for_async_insert = 1`, as a direct connection does, so a migration's `INSERT … VALUES` is stored when chkit records it; a write stops with an error when the service profile fixes either setting at another value.
+- Updated dependencies: `@chkit/plugin-backfill@0.2.0-beta.19`, `@chkit/core@0.2.0-beta.19`, `@chkit/clickhouse@0.2.0-beta.19`
+
+## 0.2.0-beta.18
+
+### Patch Changes
+
+- Updated dependencies: `@chkit/core@0.2.0-beta.18`, `@chkit/clickhouse@0.2.0-beta.18`, `@chkit/plugin-backfill@0.2.0-beta.18`
+
+## 0.2.0-beta.17
+
+### Patch Changes
+
+- c3c7c11: ObsessionDB CLI service pickers keep prompts on stderr and avoid waiting for choices without a terminal, while service usage and errors preserve valid `--json` output. Aliases beginning with `-` are rejected, and a missing ObsessionDB plugin reports `plugin_not_configured` while help remains available.
+- Updated dependencies: `@chkit/plugin-backfill@0.2.0-beta.17`, `@chkit/core@0.2.0-beta.17`, `@chkit/clickhouse@0.2.0-beta.17`
+
 ## 0.2.0-beta.16
 
 ### Patch Changes

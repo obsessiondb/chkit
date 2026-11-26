@@ -1871,7 +1871,9 @@ describe('an interrupt while a checkpoint write is under way', () => {
         writing = true
         // The write that records the chunk submitted is slow, or hangs.
         return new Promise<void>((resolve) => {
-          if (writeMs !== undefined) setTimeout(resolve, writeMs)
+          if (writeMs !== undefined) {
+            controller.signal.addEventListener('abort', () => setTimeout(resolve, writeMs), { once: true })
+          }
         })
       },
     })
@@ -2094,7 +2096,9 @@ describe('an interrupt during the first checkpoint write', () => {
         if (writes.length > 1) return
         writing = true
         return new Promise<void>((resolve) => {
-          if (writeMs !== undefined) setTimeout(resolve, writeMs)
+          if (writeMs !== undefined) {
+            controller.signal.addEventListener('abort', () => setTimeout(resolve, writeMs), { once: true })
+          }
         })
       },
     })

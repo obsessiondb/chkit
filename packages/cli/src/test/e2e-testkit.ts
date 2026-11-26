@@ -57,14 +57,15 @@ export function runCli(
 
 /**
  * Starts the CLI without waiting for it, for tests that run several at once.
- * Like runCli, the child is killed after `timeoutMs`; `kill` ends it earlier.
+ * Like runCli, the child is killed after `timeoutMs`; `kill` ends it earlier
+ * (SIGKILL unless given another signal).
  */
 export function startCli(
   cwd: string,
   args: string[],
   extraEnv: Record<string, string> = {},
   { timeoutMs = 120_000 }: { timeoutMs?: number } = {}
-): { result: Promise<CliResult>; kill: () => void } {
+): { result: Promise<CliResult>; kill: (signal?: NodeJS.Signals) => void } {
   const isolated = createIsolatedCliEnv(extraEnv)
   const proc = Bun.spawn(['bun', CLI_ENTRY, ...args], {
     cwd,
@@ -81,7 +82,7 @@ export function startCli(
   ])
     .then(([stdout, stderr, exitCode]) => ({ exitCode, stdout, stderr }))
     .finally(isolated.cleanup)
-  return { result, kill: () => proc.kill('SIGKILL') }
+  return { result, kill: (signal = 'SIGKILL') => proc.kill(signal) }
 }
 
 function isValidJson(str: string): boolean {

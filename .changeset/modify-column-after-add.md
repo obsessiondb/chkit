@@ -1,5 +1,0 @@
----
-"chkit": patch
----
-
-`generate` now runs a `MODIFY COLUMN` after the `ADD COLUMN` its new `DEFAULT`, `MATERIALIZED` or `ALIAS` expression reads, and drops a column only after the columns that read it stop reading it, so `migrate` no longer fails on that order.

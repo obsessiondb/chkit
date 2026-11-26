@@ -2577,6 +2577,7 @@ def _interrupt_during_write(write_s: float | None) -> tuple[BaseException, float
         if write_s is None:
             threading.Event().wait(30)
         else:
+            assert stop.wait(5)
             time.sleep(write_s)
 
     def run() -> None:
@@ -2921,6 +2922,7 @@ def _interrupt_first_write(write_s: float | None) -> tuple[BaseException, float,
         if write_s is None:
             threading.Event().wait(30)
         else:
+            assert stop.wait(5)
             time.sleep(write_s)
 
     def run() -> None:

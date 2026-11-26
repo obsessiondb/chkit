@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import signal
 import uuid
 from dataclasses import replace
 from typing import Any
@@ -11,6 +13,7 @@ from typing import Any
 import pytest
 
 from chkit.cli.commands.migrate_errors import MigrateError
+from chkit.cli.commands.migrate_interrupt import InterruptLock, deferred_interrupt, with_interrupt
 from chkit.cli.commands.migrate_lock import LockTarget
 from chkit.cli.commands.migrate_query_intents import (
     QueryContext,
@@ -348,3 +351,25 @@ def test_explicit_recovery_admission_and_settlement_precede_forward_sql(fault: s
         if fault in {"unsupported SQL", "changed UUID", "metadata denied"}:
             assert "intent" not in client.events
             assert "compensation" not in client.events
+
+
+def test_an_intent_failure_after_a_sigint_writes_no_untracked_marker() -> None:
+    """#816: the run stops; the claim stays cancellable."""
+
+    class InterruptedIntentClient(IntentClient):
+        def execute(self, sql: str) -> None:
+            self.events.append("intent")
+            os.kill(os.getpid(), signal.SIGINT)
+            raise RuntimeError("intent failed")
+
+    lock = FakeLock()
+    client = InterruptedIntentClient(lock, "")
+    tracker = QueryTracker(client, TARGET, IDENTITY, lock)  # type: ignore[arg-type]
+
+    def body() -> None:
+        with deferred_interrupt():
+            tracker.command(CONTEXT, "forward", CONTEXT.forward_sql)
+
+    with pytest.raises(KeyboardInterrupt):
+        with_interrupt(InterruptLock(), body)
+    assert client.events == ["intent"]

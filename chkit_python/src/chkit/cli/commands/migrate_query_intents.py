@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from chkit import __version__
 from chkit.cli.commands.migrate_errors import MigrateError
+from chkit.cli.commands.migrate_interrupt import interrupted, raise_if_interrupted
 from chkit.core.identifier import quote_identifier
 from chkit.core.sql_fingerprint import statement_fingerprint
 from chkit.core.sql_lexer import SQLToken, identifier_name, is_trivia, tokenize_sql
@@ -136,7 +137,12 @@ class QueryTracker:
 
         # Recovery reloads synchronously on both transports; ordinary runs keep their settings.
         sent = {**(settings or {}), "async_insert": 0} if self._recovery else settings
-        self._client.execute_tracked(sql, self._lock.assert_held, before, sent)
+        def check() -> None:
+            # Before the send only: once it ran, its outcome is recorded (#816).
+            self._lock.assert_held()
+            raise_if_interrupted()
+
+        self._client.execute_tracked(sql, check, before, sent)
         self._lock.assert_held()
         if phase == "compensation" and self._recovery:
             if physical_target is None:
@@ -157,7 +163,7 @@ class QueryTracker:
             self._mark_untracked(error)
 
     def _mark_untracked(self, error: Exception) -> None:
-        if self._recovery is not None or (
+        if self._recovery is not None or interrupted() or (
             isinstance(error, MigrateError) and error.code == "migrate_lock_lost"
         ):
             raise error
@@ -188,6 +194,7 @@ class QueryTracker:
         *, kind: QueryKind | None = None, settings: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._lock.assert_held()
+        raise_if_interrupted()
         classification = classify_query_intent(
             sql, phase, context.before_retry, self._target.database,
         )
@@ -261,6 +268,7 @@ class QueryTracker:
         name = f"{QUERY_INTENT_PREFIX}{self._lock.claim_id}/{query_id}"
         checksum = json.dumps(intent, separators=(",", ":"), ensure_ascii=False)
         table = f"{quote_identifier(self._target.database)}.{self._target.journal_table}"
+        raise_if_interrupted()
         self._client.execute(
             f"INSERT INTO {table} "
             "(name, applied_at, checksum, chkit_version, migration_completed, operations) "

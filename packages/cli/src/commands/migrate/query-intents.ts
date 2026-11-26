@@ -76,6 +76,8 @@ export function createQueryTracker(input: {
   lock: MigrateLock
   recovery?: QueryRecovery
   log?: (line: string) => void
+  /** Aborted by Ctrl-C: no intent or statement is sent after it (#816). */
+  signal?: AbortSignal
 }): QueryTracker {
   const { db, target, identity, lock, recovery } = input
   const command = db.commandTracked?.bind(db)
@@ -89,6 +91,7 @@ export function createQueryTracker(input: {
 
   const record = async (context: QueryContext, phase: QueryPhase, sql: string, queryId: string, kind?: QueryKind, settings?: ClickHouseSettings): Promise<QueryIntent> => {
     lock.assertHeld()
+    input.signal?.throwIfAborted()
     const classification = classifyQueryIntent(sql, phase, context.beforeRetry, target.database)
     const forward = classifyQueryIntent(context.forwardSQL, 'forward', context.beforeRetry, target.database)
     const matched = phase !== 'compensation' || (forward.kind === 'insert' && sameTarget(classification.target, forward.target))
@@ -127,6 +130,7 @@ export function createQueryTracker(input: {
     }
     const name = `${QUERY_INTENT_PREFIX}${claim}/${queryId}`
     const checksum = JSON.stringify(intent)
+    input.signal?.throwIfAborted()
     // Explicit raw dependency: storing an intent must never record another intent.
     await db.command(
       `INSERT INTO ${quoteIdentifier(target.database)}.${target.journalTable} ` +
@@ -143,7 +147,7 @@ export function createQueryTracker(input: {
   }
 
   const markUntracked = async (error: unknown): Promise<void> => {
-    if (recovery || (error instanceof MigrateError && error.code === 'migrate_lock_lost')) throw error
+    if (recovery || input.signal?.aborted || (error instanceof MigrateError && error.code === 'migrate_lock_lost')) throw error
     try {
       await db.command(
         `INSERT INTO ${quoteIdentifier(target.database)}.${target.journalTable} ` +
@@ -162,7 +166,8 @@ export function createQueryTracker(input: {
       let physicalTarget: QueryTarget | undefined
       // Recovery reloads synchronously, on both transports; ordinary runs keep the user's settings.
       const sent: ClickHouseSettings | undefined = recovery ? { ...settings, async_insert: 0 } : settings
-      await command(sql, () => lock.assertHeld(), async () => {
+      // Checked before the statement is sent only: once it ran, its outcome is recorded.
+      await command(sql, () => { lock.assertHeld(); input.signal?.throwIfAborted() }, async () => {
         if (!untracked) {
           try {
             const intent = await record(context, phase, sql, randomUUID(), undefined, settings)

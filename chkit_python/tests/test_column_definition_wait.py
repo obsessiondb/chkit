@@ -48,7 +48,7 @@ class _Target:
     queries: list[str] = field(default_factory=list[str])
     _poll: int = 0
 
-    def query(self, sql: str) -> _Result:
+    def query(self, sql: str, settings: object = None) -> _Result:
         self.queries.append(sql)
         if "system.one" in sql:
             return _Result([{"replicas": self.replicas}])
@@ -351,7 +351,7 @@ class _HangingTarget:
 
     release: threading.Event = field(default_factory=threading.Event)
 
-    def query(self, sql: str) -> _Result:
+    def query(self, sql: str, settings: object = None) -> _Result:
         if "system.one" in sql:
             return _Result([{"replicas": 2}])
         self.release.wait(10)
@@ -392,7 +392,7 @@ class _HangsAfterTarget:
     release: threading.Event = field(default_factory=threading.Event)
     _poll: int = 0
 
-    def query(self, sql: str) -> _Result:
+    def query(self, sql: str, settings: object = None) -> _Result:
         if "system.one" in sql:
             return _Result([{"replicas": 2}])
         self._poll += 1
@@ -435,7 +435,7 @@ class _Concurrent:
     release: threading.Event
     closed: bool = False
 
-    def query(self, sql: str) -> _Result:
+    def query(self, sql: str, settings: object = None) -> _Result:
         self.release.wait(10)
         return _Result([])
 
@@ -451,7 +451,7 @@ class _SessionTarget:
     concurrent: list[_Concurrent] = field(default_factory=list[_Concurrent])
     _held: bool = False
 
-    def query(self, sql: str) -> _Result:
+    def query(self, sql: str, settings: object = None) -> _Result:
         self._refuse_while_held()
         if "system.one" in sql:
             return _Result([{"replicas": 2}])

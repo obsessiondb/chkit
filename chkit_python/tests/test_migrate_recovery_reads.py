@@ -116,7 +116,7 @@ def test_fresh_recovery_wraps_heartbeat_clones_and_preserves_bound_methods() -> 
         def __init__(self, name: str) -> None:
             self.name = name
 
-        def query(self, _sql: str) -> None:
+        def query(self, _sql: str, settings: object = None) -> None:
             raise AssertionError("ordinary query must not run")
 
         def query_control(self, sql: str, timeout_ms: float, **kwargs: Any) -> str:
@@ -154,7 +154,7 @@ def test_explicit_recovery_refuses_missing_control_capability() -> None:
 
 
 def test_failed_strict_read_never_falls_back_to_ordinary_query() -> None:
-    def ordinary(_sql: str) -> None:
+    def ordinary(_sql: str, settings: object = None) -> None:
         raise AssertionError("ordinary path used")
 
     def control(*args: Any, **kwargs: Any) -> None:
@@ -204,7 +204,7 @@ def test_command_preflight_rejects_historical_async_before_kill_or_handoff(
 def test_explicit_legacy_fanout_refuses_profile_hidden_unavailable_member() -> None:
     queries: list[str] = []
 
-    def ordinary(_sql: str) -> QueryResult:
+    def ordinary(_sql: str, settings: object = None) -> QueryResult:
         return QueryResult(column_names=["replicas"], rows=[{"replicas": 1}])
 
     def control(sql: str, _timeout: float, **kwargs: Any) -> QueryResult:

@@ -1,0 +1,35 @@
+name: ObsessionDB suite
+
+on:
+  workflow_call:
+
+jobs:
+  test:
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    # Fixture tables are shared on the managed test database. Let an active
+    # run finish before another run reseeds them.
+    concurrency:
+      group: obsessiondb-tests
+      cancel-in-progress: false
+    env:
+      CLICKHOUSE_HOST: ${{ secrets.CLICKHOUSE_HOST }}
+      CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
+      CLICKHOUSE_DB: ${{ secrets.CLICKHOUSE_DB }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check ObsessionDB test configuration
+        run: |
+          : "${CLICKHOUSE_HOST:?Set the CLICKHOUSE_HOST repository secret}"
+          : "${CLICKHOUSE_PASSWORD:?Set the CLICKHOUSE_PASSWORD repository secret}"
+
+      - name: Setup Bun
+        uses: ./.github/actions/setup
+
+      - name: Test against ObsessionDB
+        env:
+          TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
+          TURBO_TEAM: ${{ secrets.TURBO_TEAM }}
+        run: bun run test:obsessiondb
+
