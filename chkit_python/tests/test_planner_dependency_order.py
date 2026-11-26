@@ -1835,9 +1835,43 @@ _REPAIRED = ["t.b", "t.a", "t.c"]
 @pytest.mark.parametrize(
     ("extra", "order"),
     [
-        pytest.param([_u("APPLY"), _u("extra", "toUInt64(APPLY)")], _FALLBACK, id="a bare APPLY"),
-        pytest.param([_u("join"), _u("extra", "toUInt64(join)")], _FALLBACK, id="a bare JOIN"),
-        pytest.param([_u("placing"), _u("extra", "toUInt64(placing)")], _FALLBACK, id="a bare PLACING"),
+        pytest.param([_u("APPLY"), _u("extra", "toUInt64(APPLY)")], _REPAIRED, id="a bare APPLY"),
+        pytest.param([_u("join"), _u("extra", "toUInt64(join)")], _REPAIRED, id="a bare JOIN"),
+        pytest.param([_u("placing"), _u("extra", "toUInt64(placing)")], _REPAIRED, id="a bare PLACING"),
+        pytest.param(
+            [_u("left"), _u("RIGHT"), _u("extra", "left + RIGHT")], _REPAIRED, id="bare left and RIGHT"
+        ),
+        pytest.param(
+            [_u("format"), _u("union"), _u("extra", "plus(format, -union)")],
+            _REPAIRED,
+            id="bare format and union",
+        ),
+        pytest.param(
+            [_u("offset"), _u("step"), _u("Final"), _u("extra", "offset * step = Final")],
+            _REPAIRED,
+            id="bare offset, step and Final",
+        ),
+        pytest.param(
+            [_u("settings"), _u("sample"), _u("extra", "CAST(settings AS UInt64) + sample::UInt64")],
+            _REPAIRED,
+            id="bare settings and sample",
+        ),
+        pytest.param(
+            [_u("extra", "toUInt64(left(toString(id), 1)) + toUInt64(RIGHT(toString(id), 1))")],
+            _REPAIRED,
+            id="calls to left and RIGHT",
+        ),
+        pytest.param(
+            [_u("extra", "length(format('{}-{}', toString(id), 'x'))")], _REPAIRED, id="a call to format"
+        ),
+        pytest.param(
+            [_u("left"), _u("extra", "toUInt64(left(toString(left), 1))")],
+            _REPAIRED,
+            id="a call to left with a left column",
+        ),
+        pytest.param([_u("offset"), _u("extra", "id offset")], _FALLBACK, id="a query word after an operand"),
+        pytest.param([_u("values"), _u("extra", "(values - (1))")], _FALLBACK, id="a bare values"),
+        pytest.param([_u("extra", "toUInt64((values(id)))")], _FALLBACK, id="a call to values"),
         pytest.param([_u("APPLY"), _u("extra", "toUInt64(`APPLY`)")], _REPAIRED, id="a quoted APPLY"),
         pytest.param(
             [_u("extra", "length(eXTrAcT('abc', 'a'))")], _FALLBACK, id="eXTrAcT with string arguments"
@@ -1867,10 +1901,12 @@ _REPAIRED = ["t.b", "t.a", "t.c"]
 def test_query_words_and_unit_calls_keep_the_sorted_order(
     extra: list[dict[str, Any]], order: list[str]
 ) -> None:
-    # A bare query or join word, and a call to a function whose arguments can
-    # be units or keywords (in any case, with any arguments), keep the sorted
-    # order. A quoted name is a column read, and other calls, in any case,
-    # keep the repair.
+    # A call to a function whose arguments can be units or keywords (in any
+    # case, with any arguments) keeps the sorted order. A bare query or join
+    # word reads its column and a call to one is a function, as ClickHouse 26.3
+    # parses them, so both keep the repair; such a word after an operand does
+    # not, nor does `values` (a VALUES subquery from 26.4). A quoted name is a column read, and other calls, in any case, keep
+    # the repair.
     assert _order_of(
         [_t([*_CYCLE_BEFORE, *extra])], [_t([*_CYCLE_AFTER, *extra])]
     ) == order
@@ -1922,6 +1958,17 @@ def test_a_quoted_all_is_a_read_of_the_column_with_that_name() -> None:
         [_t([_u("a"), _u("aa"), _u("ab", "a"), _u("all", "ab")])],
         [_t([_u("a", "`all` + 1"), _u("aa", "a + 1"), _u("ab", "5"), _u("all", "5")])],
     ) == ["t.aa", "t.ab", "t.a", "t.all"]
+
+
+def test_a_bare_left_on_the_cycle_is_a_read_of_its_column() -> None:
+    # ClickHouse 26.3 reads a bare `left` as the column: main's order fails
+    # with code 174 when `a DEFAULT left + 1` closes a -> left -> c -> a.
+    # Either `c` or `left` breaks it, so the first in key order, `c`, runs
+    # first.
+    assert _order_of(
+        [_t([_u("a"), _u("c", "a"), _u("left", "c")])],
+        [_t([_u("a", "left + 1"), _u("c", "id"), _u("left", "id")])],
+    ) == ["t.c", "t.a", "t.left"]
 
 
 def test_a_quoted_not_is_no_read_of_a_column_with_that_name() -> None:
