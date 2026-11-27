@@ -7,8 +7,9 @@ Submits the statement via ``ClickHouseClient.submit`` with a random
 and, without waiting for its response, polls
 ``query_status`` until terminal. The per-statement journal state
 is written before submit (prepared, then submitted) and on a terminal
-outcome (completed, or failed for a rejection before start) so a CLI crash
-or kill mid-migration can resume on the next run.
+outcome (completed, or failed for a SELECT or INSERT the server rejected
+before it started) so a CLI crash or kill mid-migration can resume on the
+next run.
 
 Key invariants:
 
@@ -25,13 +26,15 @@ Key invariants:
   ``async_outcome_unknown`` (#767).
 - Status ``unknown`` is a transient state (just-submitted or
   just-finished gap); loop until ``running`` / ``finished`` / ``failed``.
-  A submit the client proved was never sent, before any poll found the
-  query, puts the record back to prepared and stops the run, so a re-run
-  submits it again (#800). Any other failed submit request records
-  nothing: only the server's record for the id decides the outcome (#767).
-  After ``MAX_UNKNOWN_POLLS`` unknown polls in a row, every replica is read
-  once more through a query_log flush; still unknown, the run stops with
-  ``async_outcome_unknown`` and the attempt stays recorded as started.
+  A submit the client proved was never sent, found before a poll and
+  before any poll found the query, puts the record back to prepared and
+  stops the run; a re-run that confirms it prepared submits it again
+  (#800). Any other failed submit request records nothing: only the
+  server's record for the id decides the outcome (#767). After
+  ``MAX_UNKNOWN_POLLS`` unknown polls in a row, every replica is read
+  again, and rechecked while query_log is flushed; still unknown, the run
+  stops with ``async_outcome_unknown`` and the attempt stays recorded as
+  started.
 - Every entry of an attempt's id is that attempt's.
 """
 
