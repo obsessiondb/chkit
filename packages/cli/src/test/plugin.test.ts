@@ -914,12 +914,12 @@ describe('plugin runtime', () => {
         ])
         expect(lockedResume.exitCode).toBe(2)
         expect(lockedResume.stdout).toContain(
-          `Backfill plan ${planPayload.planId} is locked by another run, resume or cancel (pid ${process.pid} on ${hostname()}, since 2026-11-18T10:00:00.000Z).`,
+          `Backfill plan ${planPayload.planId} is locked by another run, resume, cancel or submit (pid ${process.pid} on ${hostname()}, since 2026-11-18T10:00:00.000Z).`,
         )
         // Cancel takes the same lock, so it never replaces a checkpoint a run writes.
         const lockedCancel = runCli(['plugin', 'backfill', 'cancel', '--plan-id', planPayload.planId, '--config', fixture.configPath, '--json'])
         expect(lockedCancel.exitCode).toBe(2)
-        expect(lockedCancel.stdout).toContain(`Backfill plan ${planPayload.planId} is locked by another run, resume or cancel`)
+        expect(lockedCancel.stdout).toContain(`Backfill plan ${planPayload.planId} is locked by another run, resume, cancel or submit`)
         await rm(lockPath)
 
         const blockedResume = runCli([

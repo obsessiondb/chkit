@@ -1,0 +1,6 @@
+---
+"@chkit/plugin-obsessiondb": patch
+"@chkit/plugin-backfill": patch
+---
+
+`backfill submit` no longer sends the same chunks in two jobs when two submits of a plan run at once or a submit stops after sending: it now locks the plan, and `submit --plan-id` follows the job an interrupted submit created instead of sending its chunks again.

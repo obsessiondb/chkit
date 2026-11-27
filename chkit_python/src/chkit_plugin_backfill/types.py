@@ -150,6 +150,7 @@ class BackfillSubmissionState(BaseModel):
     target: str
     job_id: str = Field(..., alias="jobId")
     submitted_at: str = Field(..., alias="submittedAt")
+    submission_id: str | None = Field(default=None, alias="submissionId")
     # Set once the job backend reported the job completed; check stops asking then.
     status: Literal["completed"] | None = None
     confirmed_at: str | None = Field(default=None, alias="confirmedAt")

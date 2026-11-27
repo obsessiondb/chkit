@@ -163,6 +163,10 @@ Track progress: https://console.obsessiondb.com/<service>/jobs/7c1e…
 
 The plan ID is in the `obsessiondb_backfill_job_failed` finding. Only a job that failed or was cancelled is replaced; for any other status, an unknown plan, or a plan that was never submitted, `submit --plan-id` starts no job and exits 1. Only the chunks the replaced job carried and did not finish are sent, so a chunk that finished in that job or an earlier one is not written again. `--title` and `--concurrency` apply to the new job; the planning flags (`--target`, `--cutover`, `--from`, `--to`, `--max-chunk-bytes`) are rejected with `--plan-id`, because the saved plan already fixes its chunks. With `--json`, the `submit` envelope adds `planId`, `replacedJobId` and `skippedChunks`.
 
+A managed submit holds the plan's lock and blocks another submit, run, resume or cancel of that plan until it exits. After a crash, confirm the process has exited and delete the lock file named in the error.
+
+After a crash or failed send, `submit --plan-id` follows the job the interrupted submit created. If the service's job list shows no job from that submit, the command refuses and sends nothing: a request that timed out can still create its job later, and a re-run then follows it. The error names the file to delete once you are sure that submit ended without creating a job.
+
 ## Related
 
 - [Backfill Plugin (beta)](/plugins/backfill/) — full command reference, planning options, and local execution.

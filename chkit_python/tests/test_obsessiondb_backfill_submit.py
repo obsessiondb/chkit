@@ -8,9 +8,15 @@ flow tests with the jobs client / remote executor / planner monkeypatched.
 from __future__ import annotations
 
 import json
+import re
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import ANY, Mock
 
 import pytest
 
@@ -20,10 +26,12 @@ from chkit_plugin_backfill.chunking.boundary_codec import (
 from chkit_plugin_backfill.options import PluginConfig
 from chkit_plugin_backfill.planner import BuildBackfillPlanOutput
 from chkit_plugin_backfill.plugin import backfill
+from chkit_plugin_backfill.run_lock import RunLock
 from chkit_plugin_backfill.state import record_backfill_submission, write_json
 from chkit_plugin_backfill.types import BackfillPlanState
 from chkit_plugin_obsessiondb import backfill_resubmit as backfill_resubmit_module
 from chkit_plugin_obsessiondb import backfill_submit as backfill_submit_module
+from chkit_plugin_obsessiondb import jobs_api
 from chkit_plugin_obsessiondb.api_client import SessionExpiredError
 from chkit_plugin_obsessiondb.backfill_submit import (
     ParsedResubmitInput,
@@ -348,6 +356,7 @@ def test_handle_submit_success_submits_tasks_and_prints_console_url(
         "planId": "abcdef0123456789",
         "mode": "copy",
         "source": "chkit",
+        "submissionId": ANY,
     }
     [message] = msgs
     assert "Submitted backfill job job-9 for app.events (2 tasks)." in message
@@ -665,6 +674,7 @@ def test_handle_submit_plan_id_resubmits_a_failed_job_and_replaces_its_marker(
         "planId": PLAN_ID,
         "mode": "copy",
         "source": "chkit",
+        "submissionId": ANY,
     }
     assert msgs == [
         {
@@ -954,3 +964,463 @@ def test_handle_submit_plan_id_refuses_planning_flags_before_the_api(
     assert code == 1
     assert "cannot be combined with --target" in msgs[0]["error"]
     assert calls == []
+
+
+@dataclass
+class _FakeJob:
+    task_ids: list[str]
+    metadata: dict[str, Any]
+    status: str = "running"
+    done_task_ids: list[str] = field(default_factory=list)
+
+    def detail(self, job_id: str) -> dict[str, Any]:
+        return {
+            "id": job_id,
+            "serviceId": "svc-1",
+            "type": "backfill",
+            "target": "app.events",
+            "status": self.status,
+            "concurrency": 4,
+            "totalTasks": len(self.task_ids),
+            "completedTasks": len(self.done_task_ids),
+            "failedTasks": 0,
+            "createdAt": "2026-03-29T00:00:00Z",
+            "updatedAt": "2026-03-29T01:00:00Z",
+            "maxRetries": 3,
+            "metadata": self.metadata,
+            "tasks": [
+                {
+                    "id": task_id,
+                    "runs": [
+                        {
+                            "type": "insert",
+                            "status": "done" if task_id in self.done_task_ids else "failed",
+                        }
+                    ],
+                }
+                for task_id in self.task_ids
+            ],
+        }
+
+
+class _FakeJobsBackend:
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, has_marker: bool = True) -> None:
+        self.jobs = (
+            {"job-1": _FakeJob(["c1", "c2"], {"planId": PLAN_ID}, "failed")}
+            if has_marker
+            else {}
+        )
+        self.calls: list[str] = []
+        self.listed_services: list[str] = []
+        self.submitted: list[_FakeJob] = []
+        self.before_send: Callable[[_FakeJob], None] | None = None
+        self.after_send: Callable[[], None] | None = None
+        monkeypatch.setattr(jobs_api, "_rpc_post", self.rpc_post)
+        monkeypatch.setattr(backfill_submit_module, "jobs_submit", self.jobs_submit)
+        monkeypatch.setattr(
+            backfill_submit_module,
+            "create_remote_executor",
+            lambda _creds, *, service_slug: _UnusedExecutor(),
+        )
+        monkeypatch.setattr(
+            backfill_submit_module,
+            "build_backfill_plan",
+            lambda **_kwargs: BuildBackfillPlanOutput(plan=make_plan(), plan_path=""),
+        )
+
+    def rpc_post(
+        self, _creds: Credentials, procedure: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        self.calls.append(procedure)
+        if procedure == "jobs/get":
+            job_id = payload["jobId"]
+            return self.jobs[job_id].detail(job_id)
+        assert procedure == "jobs/list", procedure
+        self.listed_services.append(payload["serviceSlug"])
+        listed = [job.detail(job_id) for job_id, job in self.jobs.items()]
+        return {"jobs": listed, "total": len(listed)}
+
+    def jobs_submit(self, _creds: Credentials, **kwargs: Any) -> str:
+        self.calls.append("jobs/submit")
+        job = _FakeJob([task.id for task in kwargs["tasks"]], kwargs["metadata"])
+        if self.before_send is not None:
+            self.before_send(job)
+        job_id = self.commit(job)
+        if self.after_send is not None:
+            self.after_send()
+        return job_id
+
+    def commit(self, job: _FakeJob) -> str:
+        job_id = f"job-{len(self.jobs) + 1}"
+        self.jobs[job_id] = job
+        self.submitted.append(job)
+        return job_id
+
+
+def _submit(tmp_path: Path, **flags: str) -> tuple[int, Any]:
+    msgs: list[Any] = []
+    code = handle_submit(
+        _submit_context(
+            flags=flags or {"--plan-id": PLAN_ID}, msgs=msgs, json_mode=True, config_dir=tmp_path
+        )
+    )
+    [message] = msgs
+    return code, message
+
+
+def _fail_marker_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        backfill_submit_module,
+        "record_backfill_submission",
+        Mock(side_effect=RuntimeError("marker write failed")),
+    )
+
+
+@pytest.mark.parametrize("flag", ["--plan-id", "--target"])
+def test_locks_a_plan_during_submit_with(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, flag: str
+) -> None:
+    has_marker = flag == "--plan-id"
+    marker = _setup_saved_plan(tmp_path, job_id="job-1" if has_marker else None)
+    backend = _FakeJobsBackend(monkeypatch, has_marker)
+    entered, finish = Event(), Event()
+
+    def pause_send(_job: _FakeJob) -> None:
+        backend.before_send = None
+        entered.set()
+        assert finish.wait(timeout=5)
+
+    backend.before_send = pause_send
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        first = pool.submit(_submit, tmp_path, **{flag: PLAN_ID if has_marker else "app.events"})
+        try:
+            assert entered.wait(timeout=5)
+            code, second = _submit(tmp_path)
+            pending = marker.with_suffix(".pending.json").exists()
+        finally:
+            finish.set()
+
+    assert code == 1
+    assert "is locked by another run, resume, cancel or submit" in second["error"]
+    assert pending
+    assert first.result()[0] == 0
+    assert len(backend.submitted) == 1
+
+
+def test_adopts_a_job_after_the_marker_write_fails_and_retries_only_its_unfinished_chunks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    plan = make_plan()
+    plan.chunk_plan.chunks.append(plan.chunk_plan.chunks[1].model_copy(update={"id": "c3"}))
+    marker = _setup_saved_plan(tmp_path, job_id="job-1", plan=plan)
+    backend = _FakeJobsBackend(monkeypatch)
+    old = backend.jobs["job-1"]
+    old.task_ids.append("c3")
+    old.done_task_ids = ["c1"]
+
+    with monkeypatch.context() as crash:
+        _fail_marker_once(crash)
+        code, message = _submit(tmp_path)
+    assert code == 1
+    assert message["error"] == "marker write failed"
+    assert json.loads(marker.read_text())["jobId"] == "job-1"
+
+    code, message = _submit(tmp_path)
+    assert code == 1
+    assert f"Job job-2 for plan {PLAN_ID} is running" in message["error"]
+    assert json.loads(marker.read_text())["jobId"] == "job-2"
+    assert len(backend.submitted) == 1
+
+    adopted = backend.jobs["job-2"]
+    adopted.status = "failed"
+    adopted.done_task_ids = ["c2"]
+    code, message = _submit(tmp_path)
+    assert code == 0
+    assert message["replacedJobId"] == "job-2"
+    assert message["skippedChunks"] == 2
+    assert [job.task_ids for job in backend.submitted] == [["c2", "c3"], ["c3"]]
+
+
+def test_recovers_a_job_that_landed_even_though_the_send_failed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    marker = _setup_saved_plan(tmp_path, job_id="job-1")
+    backend = _FakeJobsBackend(monkeypatch)
+    backend.after_send = Mock(side_effect=RuntimeError("connection lost"))
+
+    code, message = _submit(tmp_path)
+    assert code == 1
+    assert (
+        f"The job may have been created; `chkit plugin backfill submit --plan-id {PLAN_ID}` "
+        "finds it instead of sending the chunks again."
+    ) in message["error"]
+    path = marker.with_suffix(".pending.json")
+    intent = json.loads(path.read_text())
+    assert re.fullmatch(r"\d{4}-.*Z", intent["startedAt"])
+    assert intent == {
+        "planId": PLAN_ID,
+        "submissionId": backend.submitted[0].metadata["submissionId"],
+        "replacesJobId": "job-1",
+        "startedAt": ANY,
+        "serviceSlug": "svc-1",
+    }
+
+    code, message = _submit(tmp_path)
+    assert code == 1
+    assert f"Job job-2 for plan {PLAN_ID} is running" in message["error"]
+    saved = json.loads(marker.read_text())
+    assert saved["jobId"] == "job-2"
+    assert saved["submissionId"] == backend.submitted[0].metadata["submissionId"]
+    assert len(backend.submitted) == 1
+    assert not path.exists()
+
+
+def test_retries_once_from_the_marker_when_the_failed_send_created_no_job(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    marker = _setup_saved_plan(tmp_path, job_id="job-1")
+    backend = _FakeJobsBackend(monkeypatch)
+    backend.before_send = Mock(side_effect=RuntimeError("send failed"))
+    path = marker.with_suffix(".pending.json")
+
+    assert _submit(tmp_path)[0] == 1
+    assert backend.submitted == []
+    backend.before_send = None
+    assert _submit(tmp_path)[0] == 1
+    assert backend.submitted == []
+    path.unlink()
+    code, message = _submit(tmp_path)
+    assert code == 0
+    assert message["replacedJobId"] == "job-1"
+    assert backend.calls == ["jobs/get", "jobs/submit", "jobs/list", "jobs/get", "jobs/submit"]
+    assert len(backend.submitted) == 1
+    assert not path.exists()
+
+
+def test_adopts_the_job_from_a_first_submit_whose_marker_write_failed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    marker = _setup_saved_plan(tmp_path)
+    backend = _FakeJobsBackend(monkeypatch, has_marker=False)
+
+    with monkeypatch.context() as crash:
+        _fail_marker_once(crash)
+        assert _submit(tmp_path, **{"--target": "app.events"})[0] == 1
+    assert not marker.exists()
+
+    code, message = _submit(tmp_path)
+    assert code == 1
+    assert f"Job job-1 for plan {PLAN_ID} is running" in message["error"]
+    assert json.loads(marker.read_text())["jobId"] == "job-1"
+    assert len(backend.submitted) == 1
+
+
+def test_refuses_an_unmatched_intent_even_when_the_complete_list_shows_the_marker_job(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    marker = _setup_saved_plan(tmp_path, job_id="job-1")
+    backend = _FakeJobsBackend(monkeypatch)
+    timed_out = Mock(side_effect=RuntimeError("send timed out"))
+    backend.before_send = timed_out
+    marker_before = marker.read_text()
+    path = marker.with_suffix(".pending.json")
+
+    assert _submit(tmp_path)[0] == 1
+    assert backend.submitted == []
+    intent = path.read_text()
+    started_at = json.loads(intent)["startedAt"]
+    backend.before_send = None
+    code, message = _submit(tmp_path)
+    assert code == 1
+    assert message == {
+        "ok": False,
+        "command": "backfill submit",
+        "error": (
+            f"An earlier submit of plan {PLAN_ID} (started {started_at}) may have created a "
+            "job on service svc-1, and its job list shows none from that submit. Nothing was "
+            "submitted. A request that timed out can still create its job later, and a re-run "
+            f"follows it once it is listed. Delete {path} and re-run only once you are sure "
+            f"that submit ended without creating a job for plan {PLAN_ID}."
+        ),
+    }
+    assert backend.calls == ["jobs/get", "jobs/submit", "jobs/list"]
+    assert path.read_text() == intent
+    assert marker.read_text() == marker_before
+    delayed = timed_out.call_args.args[0]
+    assert backend.commit(delayed) == "job-2"
+    assert "job-2" in _submit(tmp_path)[1]["error"]
+    assert backend.submitted == [delayed]
+
+
+def test_does_not_match_a_listed_job_whose_metadata_lacks_submission_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    marker = _setup_saved_plan(tmp_path, job_id="job-1")
+    backend = _FakeJobsBackend(monkeypatch)
+    backend.jobs["job-2"] = _FakeJob(["c1", "c2"], {"planId": PLAN_ID})
+    path = marker.with_suffix(".pending.json")
+    write_json(
+        path,
+        {
+            "planId": PLAN_ID,
+            "submissionId": "aaaabbbbccccdddd",
+            "startedAt": "2026-06-30T00:00:00.000Z",
+        },
+    )
+    intent = path.read_text()
+
+    code, message = _submit(tmp_path)
+    assert code == 1
+    assert "its job list shows none from that submit" in message["error"]
+    assert backend.calls == ["jobs/list"]
+    assert path.read_text() == intent
+    assert json.loads(marker.read_text())["jobId"] == "job-1"
+
+
+def test_refuses_an_unreadable_intent_without_listing_jobs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    marker = _setup_saved_plan(tmp_path, job_id="job-1")
+    backend = _FakeJobsBackend(monkeypatch)
+    path = marker.with_suffix(".pending.json")
+    path.write_text("{}")
+
+    code, message = _submit(tmp_path)
+    assert code == 1
+    assert message == {
+        "ok": False,
+        "command": "backfill submit",
+        "error": (
+            f"The submission record {path} of plan {PLAN_ID} cannot be read. "
+            f"Nothing was submitted. If the console lists no job for plan {PLAN_ID} "
+            f"created by the interrupted submit, delete {path} and re-run."
+        ),
+    }
+    assert backend.calls == []
+    assert path.read_text() == "{}"
+    assert json.loads(marker.read_text())["jobId"] == "job-1"
+
+
+def test_lists_jobs_on_the_service_the_intent_was_sent_to(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    marker = _setup_saved_plan(tmp_path, job_id="job-1")
+    backend = _FakeJobsBackend(monkeypatch)
+    submission_id = "aaaabbbbccccdddd"
+    metadata = {"planId": PLAN_ID, "submissionId": submission_id}
+    backend.jobs["job-2"] = _FakeJob(["c1", "c2"], metadata)
+    path = marker.with_suffix(".pending.json")
+    write_json(path, {**metadata, "startedAt": "2026-06-30T00:00:00.000Z", "serviceSlug": "other"})
+
+    code, message = _submit(tmp_path)
+    assert code == 1
+    assert f"Job job-2 for plan {PLAN_ID} is running" in message["error"]
+    assert backend.listed_services == ["other"]
+    assert backend.calls == ["jobs/list", "jobs/get"]
+    saved = json.loads(marker.read_text())
+    assert saved["jobId"] == "job-2"
+    assert saved["submissionId"] == submission_id
+    assert not path.exists()
+
+
+def test_settles_locally_after_the_marker_write_when_intent_cleanup_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    marker = _setup_saved_plan(tmp_path, job_id="job-1")
+    backend = _FakeJobsBackend(monkeypatch)
+    path = marker.with_suffix(".pending.json")
+    with monkeypatch.context() as crash:
+        crash.setattr(
+            backfill_submit_module,
+            "clear_submission_intent",
+            Mock(side_effect=RuntimeError("intent cleanup failed")),
+        )
+        code, message = _submit(tmp_path)
+    assert code == 1
+    assert message["error"] == "intent cleanup failed"
+    saved = json.loads(marker.read_text())
+    assert saved["jobId"] == "job-2"
+    assert saved["submissionId"] == json.loads(path.read_text())["submissionId"]
+
+    code, message = _submit(tmp_path)
+    assert code == 1
+    assert f"Job job-2 for plan {PLAN_ID} is running" in message["error"]
+    assert backend.calls == ["jobs/get", "jobs/submit", "jobs/get"]
+    assert len(backend.submitted) == 1
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("outcome", ["fails", "succeeds"])
+def test_preserves_the_outcome_when_submit_and_lock_release_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    outcome: str,
+) -> None:
+    marker = _setup_saved_plan(tmp_path, job_id="job-1")
+    backend = _FakeJobsBackend(monkeypatch)
+    if outcome == "fails":
+        backend.before_send = Mock(side_effect=RuntimeError("send failed"))
+    lock_path = marker.parent.parent / "runs" / f"{PLAN_ID}.lock"
+    monkeypatch.setattr(RunLock, "release", Mock(side_effect=RuntimeError("release failed")))
+    warning = (
+        f"The lock {lock_path} could not be removed (release failed): delete it "
+        "once no run, resume, cancel or submit of this plan runs."
+    )
+
+    code, message = _submit(tmp_path)
+    assert lock_path.exists()
+    if outcome == "fails":
+        assert code == 1
+        assert message == {
+            "ok": False,
+            "command": "backfill submit",
+            "error": (
+                f"send failed The job may have been created; `chkit plugin backfill submit "
+                f"--plan-id {PLAN_ID}` finds it instead of sending the chunks again. {warning}"
+            ),
+        }
+        assert capsys.readouterr().err == ""
+    else:
+        assert code == 0
+        assert message == {
+            "ok": True,
+            "command": "backfill submit",
+            "jobId": "job-2",
+            "target": "app.events",
+            "taskCount": 2,
+            "url": f"{BASE}/svc-1/jobs/job-2",
+            "planId": PLAN_ID,
+            "replacedJobId": "job-1",
+            "skippedChunks": 0,
+        }
+        assert capsys.readouterr().err == f"{warning}\n"
+
+
+def test_leaves_the_lock_in_place_when_submit_raises_keyboard_interrupt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    marker = _setup_saved_plan(tmp_path, job_id="job-1")
+    backend = _FakeJobsBackend(monkeypatch)
+    backend.before_send = Mock(side_effect=KeyboardInterrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        _submit(tmp_path)
+    assert (marker.parent.parent / "runs" / f"{PLAN_ID}.lock").exists()
+    assert marker.with_suffix(".pending.json").exists()
+    assert backend.calls == ["jobs/get", "jobs/submit"]
+
+
+def test_clears_the_intent_on_success_and_sends_a_16_hex_submission_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    marker = _setup_saved_plan(tmp_path, job_id="job-1")
+    backend = _FakeJobsBackend(monkeypatch)
+
+    assert _submit(tmp_path)[0] == 0
+    [job] = backend.submitted
+    assert job.metadata == {
+        "planId": PLAN_ID, "mode": "copy", "source": "chkit", "submissionId": ANY
+    }
+    assert re.fullmatch(r"[a-f0-9]{16}", job.metadata["submissionId"])
+    assert not marker.with_suffix(".pending.json").exists()

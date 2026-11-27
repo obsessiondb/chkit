@@ -1,11 +1,17 @@
+import { randomBytes } from 'node:crypto'
+
 import type { ClickHouseSettings } from '@chkit/clickhouse'
 import type { ResolvedChxConfig } from '@chkit/core'
 import {
+	acquireRunLock,
+	backfillPaths,
 	type BackfillPlanState,
 	buildBackfillPlan,
 	assertInsertSettingsKeepPinned,
 	assertPinnedInsertSettingsAccepted,
 	buildChunkExecutionSql,
+	clearSubmissionIntent,
+	computeBackfillStateDir,
 	deliveryOverrideWarning,
 	effectiveInsertSettings,
 	generateIdempotencyToken,
@@ -14,6 +20,8 @@ import {
 	PlanSchema,
 	readPinnedSettingAliases,
 	recordBackfillSubmission,
+	recordSubmissionIntent,
+	runLockPath,
 } from '@chkit/plugin-backfill/sdk'
 
 import { isSessionExpiredError } from '../api-request.js'
@@ -23,6 +31,7 @@ import { createJobsClient, type JobsClient } from './client.js'
 import { buildJobConsoleUrl } from './console-url.js'
 import { resolveBackfillInsertSettings, resolveBackfillPluginOptions, resolveBackfillStateDir } from './plugin-options.js'
 import { loadPlanForResubmit, type ReplacedJob } from './resubmit.js'
+import { reconcileSubmissionIntent } from './submission-intent.js'
 
 interface SubmitTask {
 	id: string
@@ -165,45 +174,40 @@ export interface SubmitContext {
 export async function handleSubmit(
 	context: SubmitContext,
 ): Promise<{ handled: true; exitCode: number }> {
+	let lockWarning = ''
 	try {
 		const jobs = createJobsClient(context.credentials)
-		const { plan, title, concurrency, stateDir, replacedJob, skippedChunks } =
-			context.flags['--plan-id'] !== undefined
-				? await prepareResubmit(context, jobs)
-				: await prepareNewPlan(context)
-
-		// Same INSERT settings the local executor applies (backfill({ insertSettings })).
-		const insertSettings = await checkedInsertSettings(context, plan)
-		const tasks = buildSubmitTasks(plan, insertSettings)
-		const { jobId } = await jobs.submit({
-			serviceSlug: context.serviceSlug,
-			type: 'backfill',
-			target: plan.target,
-			tasks,
-			...(title ? { title } : {}),
-			...(concurrency !== undefined ? { concurrency } : {}),
-			metadata: { planId: plan.planId, mode: plan.execution.mode, source: 'chkit' },
-		})
-		// The job runs server-side and never writes a local run, so mark the plan
-		// as submitted; otherwise `chkit check` counts it as pending forever. A
-		// re-submission replaces the marker of the failed or cancelled job.
-		await recordBackfillSubmission({
-			plan,
-			jobId,
-			configPath: context.configPath,
-			config: context.config,
-			stateDir,
-		})
-
+		const prepared = context.flags['--plan-id'] !== undefined
+			? { ...parseResubmitInput(context.flags), stateDir: resolveBackfillStateDir(context.config.plugins) }
+			: await prepareNewPlan(context)
+		const planId = 'plan' in prepared ? prepared.plan.planId : prepared.planId
+		const stateDir = computeBackfillStateDir(context.config, context.configPath, prepared.stateDir)
+		const lockPath = runLockPath(backfillPaths(stateDir, planId).runsDir, planId)
+		const lock = await acquireRunLock(lockPath, planId)
+		let submission: PreparedSubmission
+		let sent: { jobId: string; taskCount: number }
+		try {
+			submission = 'plan' in prepared ? prepared : await prepareResubmit(context, jobs, prepared)
+			sent = await sendPreparedPlan(context, jobs, submission)
+		} finally {
+			try {
+				await lock.release()
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error)
+				lockWarning = `The lock ${lockPath} could not be removed (${message}): delete it once no run, resume, cancel or submit of this plan runs.`
+			}
+		}
+		const { plan, replacedJob, skippedChunks } = submission
+		const { jobId, taskCount } = sent
 		const url = buildJobConsoleUrl(context.credentials.base_url, context.serviceSlug, jobId)
-		const taskLabel = `${tasks.length} task${tasks.length === 1 ? '' : 's'}`
+		const taskLabel = `${taskCount} task${taskCount === 1 ? '' : 's'}`
 		if (context.jsonMode) {
 			context.print({
 				ok: true,
 				command: 'backfill submit',
 				jobId,
 				target: plan.target,
-				taskCount: tasks.length,
+				taskCount,
 				url,
 				...(replacedJob ? { planId: plan.planId, replacedJobId: replacedJob.id, skippedChunks } : {}),
 			})
@@ -222,13 +226,15 @@ export async function handleSubmit(
 					`Track progress: ${url}`,
 			)
 		}
+		if (lockWarning) process.stderr.write(`${lockWarning}\n`)
 		return { handled: true, exitCode: 0 }
 	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error)
+		const message = lockWarning ? `${detail} ${lockWarning}` : detail
 		if (isSessionExpiredError(error)) {
-			context.print(error instanceof Error ? error.message : String(error))
+			context.print(message)
 			return { handled: true, exitCode: 1 }
 		}
-		const message = error instanceof Error ? error.message : String(error)
 		if (context.jsonMode) {
 			context.print({ ok: false, command: 'backfill submit', error: message })
 		} else {
@@ -236,6 +242,49 @@ export async function handleSubmit(
 		}
 		return { handled: true, exitCode: 1 }
 	}
+}
+
+async function sendPreparedPlan(
+	context: SubmitContext,
+	jobs: JobsClient,
+	{ plan, title, concurrency, stateDir, replacedJob }: PreparedSubmission,
+): Promise<{ jobId: string; taskCount: number }> {
+	// Same INSERT settings the local executor applies (backfill({ insertSettings })).
+	const insertSettings = await checkedInsertSettings(context, plan)
+	const tasks = buildSubmitTasks(plan, insertSettings)
+	const intent = { planId: plan.planId, configPath: context.configPath, config: context.config, stateDir }
+	const submissionId = randomBytes(8).toString('hex')
+	await recordSubmissionIntent({ ...intent, submissionId, replacesJobId: replacedJob?.id, serviceSlug: context.serviceSlug })
+	const { jobId } = await jobs.submit({
+		serviceSlug: context.serviceSlug,
+		type: 'backfill',
+		target: plan.target,
+		tasks,
+		...(title ? { title } : {}),
+		...(concurrency !== undefined ? { concurrency } : {}),
+		metadata: { planId: plan.planId, mode: plan.execution.mode, source: 'chkit', submissionId },
+	}).catch((error: unknown) => {
+		if (isSessionExpiredError(error)) throw error
+		const message = error instanceof Error ? error.message : String(error)
+		throw new Error(
+			`${message} The job may have been created; \`chkit plugin backfill submit --plan-id ${plan.planId}\` finds it instead of sending the chunks again.`,
+			{ cause: error },
+		)
+	})
+	// The job runs server-side and never writes a local run, so mark the plan
+	// as submitted; otherwise `chkit check` counts it as pending forever. A
+	// re-submission replaces the marker of the failed or cancelled job.
+	await recordBackfillSubmission({
+		plan,
+		jobId,
+		submissionId,
+		configPath: context.configPath,
+		config: context.config,
+		stateDir,
+	})
+	await clearSubmissionIntent(intent)
+
+	return { jobId, taskCount: tasks.length }
 }
 
 /**
@@ -309,13 +358,13 @@ async function prepareNewPlan(context: SubmitContext): Promise<PreparedSubmissio
 	return { plan, title, concurrency, stateDir: opts.stateDir }
 }
 
-async function prepareResubmit(context: SubmitContext, jobs: JobsClient): Promise<PreparedSubmission> {
-	const { planId, title, concurrency } = parseResubmitInput(context.flags)
-	// The saved plan and its marker live in the backfill plugin's stateDir.
-	const stateDir = resolveBackfillStateDir(context.config.plugins)
-	const { plan, replacedJob, skippedChunks } = await loadPlanForResubmit(
-		{ planId, configPath: context.configPath, config: context.config, stateDir },
-		{ jobs },
-	)
+async function prepareResubmit(
+	context: SubmitContext,
+	jobs: JobsClient,
+	{ planId, title, concurrency, stateDir }: ReturnType<typeof parseResubmitInput> & { stateDir?: string },
+): Promise<PreparedSubmission> {
+	const input = { planId, configPath: context.configPath, config: context.config, stateDir }
+	await reconcileSubmissionIntent({ ...input, serviceSlug: context.serviceSlug }, { jobs })
+	const { plan, replacedJob, skippedChunks } = await loadPlanForResubmit(input, { jobs })
 	return { plan, title, concurrency, stateDir, replacedJob, skippedChunks }
 }

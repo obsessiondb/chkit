@@ -29,7 +29,7 @@ function deadPid(): number {
 }
 
 function busyMessage(lockPath: string, by: string): string {
-  return `Backfill plan ${PLAN_ID} is locked by another run, resume or cancel (${by}). Wait for it to end. If it has ended without releasing the lock, confirm that its process no longer runs, then delete ${lockPath} and re-run.`
+  return `Backfill plan ${PLAN_ID} is locked by another run, resume, cancel or submit (${by}). Wait for it to end. If it has ended without releasing the lock, confirm that its process no longer runs, then delete ${lockPath} and re-run.`
 }
 
 function runScript(script: string): Promise<{ code: number | null; stdout: string; stderr: string; child: ReturnType<typeof spawn> }> & { child: ReturnType<typeof spawn> } {

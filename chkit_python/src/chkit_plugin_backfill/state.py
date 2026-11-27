@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlsplit
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from chkit_plugin_backfill.chunking.boundary_codec import (
     decode_chunk_plan_from_persistence,
 )
@@ -288,6 +290,7 @@ def record_backfill_submission(
     config_path: str | Path,
     config: _HasMetaDir,
     state_dir: str | None = None,
+    submission_id: str | None = None,
 ) -> str:
     """Record that a plan was handed to a managed job backend, so ``check``
     does not wait for a local run that will never be written.
@@ -297,10 +300,100 @@ def record_backfill_submission(
     write_json(
         submission_path,
         BackfillSubmissionState(
-            plan_id=plan_id, target=target, job_id=job_id, submitted_at=now_iso()
+            plan_id=plan_id,
+            target=target,
+            job_id=job_id,
+            submitted_at=now_iso(),
+            submission_id=submission_id,
         ),
     )
     return submission_path
+
+
+class SubmissionIntent(BaseModel):
+    plan_id: str = Field(alias="planId")
+    submission_id: str = Field(alias="submissionId")
+    replaces_job_id: str | None = Field(default=None, alias="replacesJobId")
+    started_at: str = Field(alias="startedAt")
+    service_slug: str | None = Field(default=None, alias="serviceSlug")
+
+    model_config = ConfigDict(frozen=True)
+
+
+def submission_intent_path(
+    *,
+    plan_id: str,
+    config_path: str | Path,
+    config: _HasMetaDir,
+    state_dir: str | None = None,
+) -> Path:
+    base = compute_backfill_state_dir(config, config_path, state_dir)
+    return base / "submissions" / f"{plan_id}.pending.json"
+
+
+def record_submission_intent(
+    *,
+    plan_id: str,
+    config_path: str | Path,
+    config: _HasMetaDir,
+    state_dir: str | None = None,
+    submission_id: str,
+    replaces_job_id: str | None = None,
+    service_slug: str | None = None,
+) -> None:
+    path = submission_intent_path(
+        plan_id=plan_id, config_path=config_path, config=config, state_dir=state_dir
+    )
+    write_json(
+        path,
+        SubmissionIntent(
+            planId=plan_id,
+            submissionId=submission_id,
+            replacesJobId=replaces_job_id,
+            startedAt=now_iso(),
+            serviceSlug=service_slug,
+        ),
+    )
+
+
+def read_submission_intent(
+    *,
+    plan_id: str,
+    config_path: str | Path,
+    config: _HasMetaDir,
+    state_dir: str | None = None,
+) -> SubmissionIntent | None:
+    path = submission_intent_path(
+        plan_id=plan_id, config_path=config_path, config=config, state_dir=state_dir
+    )
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    if not isinstance(raw, dict) or any(
+        key in raw and not isinstance(raw[key], str)
+        for key in ("replacesJobId", "serviceSlug")
+    ):
+        msg = "Invalid submission record"
+        raise ValueError(msg)
+    return SubmissionIntent.model_validate(raw)
+
+
+def clear_submission_intent(
+    *,
+    plan_id: str,
+    config_path: str | Path,
+    config: _HasMetaDir,
+    state_dir: str | None = None,
+) -> None:
+    path = submission_intent_path(
+        plan_id=plan_id, config_path=config_path, config=config, state_dir=state_dir
+    )
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    sync_directory(path.parent)
 
 
 @dataclass(frozen=True)
@@ -442,6 +535,7 @@ __all__ = [
     "RemoteSubmission",
     "backfill_paths",
     "chunk_ids_in_order",
+    "clear_submission_intent",
     "compute_backfill_state_dir",
     "compute_environment_fingerprint",
     "confirm_backfill_submission",
@@ -456,7 +550,10 @@ __all__ = [
     "read_plan_submission",
     "read_run",
     "read_submission",
+    "read_submission_intent",
     "record_backfill_submission",
+    "record_submission_intent",
+    "submission_intent_path",
     "summarize_run_status",
     "write_json",
 ]

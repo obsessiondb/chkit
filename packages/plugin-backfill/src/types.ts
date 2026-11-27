@@ -91,6 +91,7 @@ export interface BackfillSubmissionState {
   target: string
   jobId: string
   submittedAt: string
+  submissionId?: string
   /** Set once the job backend reported the job completed; check stops asking then. */
   status?: 'completed'
   confirmedAt?: string

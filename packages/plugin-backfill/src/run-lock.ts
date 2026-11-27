@@ -8,15 +8,15 @@ import { BackfillConfigError } from './errors.js'
 import { mkdirDurably, nowIso, syncDirectory, writeFileDurably } from './state.js'
 
 /**
- * The lock a `run`, `resume` or `cancel` holds on its plan from before it
- * reads the checkpoint until it ends, so two of them never write the
- * checkpoint or submit the same chunk under two query ids (#765). chkit-py
+ * The lock a `run`, `resume`, `cancel` or managed `submit` holds on its plan
+ * from before it reads the checkpoint or submission state until it ends.
+ * This serializes checkpoint writes and chunk submission (#765). chkit-py
  * takes the same lock: same path and format.
  *
  * A lock that exists always blocks: no process takes another's lock over,
  * since no pid or host check proves a holder dead across PID namespaces,
- * containers or a reused pid. A holder releases it when it ends, also on
- * SIGINT or SIGTERM (see `withRunLock`); after a crash the operator deletes it.
+ * containers or a reused pid. See `withRunLock` for local signal handling.
+ * After a crash the operator deletes the lock.
  */
 interface RunLockRecord {
   pid: number
@@ -71,7 +71,7 @@ export async function acquireRunLock(lockPath: string, planId: string): Promise<
   } catch (error) {
     const removal = await release().then(
       () => 'was removed',
-      (removeError: unknown) => `could not be removed (${errorMessage(removeError)}): delete it once no run, resume or cancel of this plan runs`,
+      (removeError: unknown) => `could not be removed (${errorMessage(removeError)}): delete it once no run, resume, cancel or submit of this plan runs`,
     )
     throw new Error(`Backfill plan ${planId}: could not take its lock (${errorMessage(error)}); the lock file ${lockPath} ${removal}.`, { cause: error })
   }
@@ -114,7 +114,7 @@ export async function withRunLock<T>(
     const release = async () => {
       released = await lock.release().then(
         () => 'released',
-        (error: unknown) => `could not be removed (${errorMessage(error)}): delete ${lockPath} once no run, resume or cancel of this plan runs`,
+        (error: unknown) => `could not be removed (${errorMessage(error)}): delete ${lockPath} once no run, resume, cancel or submit of this plan runs`,
       )
     }
     let result: T
@@ -197,7 +197,7 @@ async function releaseRunLock(lockPath: string, token: string): Promise<void> {
 function lockBusyError(planId: string, lockPath: string, holder: RunLockRecord | undefined): BackfillConfigError {
   const by = holder ? `pid ${holder.pid} on ${holder.host}, since ${holder.startedAt}` : 'its lock file cannot be read'
   return new BackfillConfigError(
-    `Backfill plan ${planId} is locked by another run, resume or cancel (${by}). Wait for it to end. If it has ended without releasing the lock, confirm that its process no longer runs, then delete ${lockPath} and re-run.`,
+    `Backfill plan ${planId} is locked by another run, resume, cancel or submit (${by}). Wait for it to end. If it has ended without releasing the lock, confirm that its process no longer runs, then delete ${lockPath} and re-run.`,
   )
 }
 
