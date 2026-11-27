@@ -21,6 +21,9 @@ describe.serial('built Attio template installed into a consumer', () => {
   const prefix = createPrefix('registry')
   const root = resolve(import.meta.dir, '../../..')
   const temporary: string[] = []
+  // A multi-replica target (ObsessionDB) can serve a read from a replica that
+  // has not yet seen an acknowledged insert (#865); reads after writes wait for it.
+  const afterWrites = ' SETTINGS select_sequential_consistency = 1'
 
   afterAll(async () => {
     const tables = await executor.query<{ name: string; engine: string }>(
@@ -120,21 +123,21 @@ describe.serial('built Attio template installed into a consumer', () => {
       expect(result.ok, JSON.stringify(result)).toBe(true)
     }
     const people = await executor.query<{ record_id: string; name: string; email_addresses: string[]; company_record_ids: string[] }>(
-      `SELECT record_id, name, email_addresses, company_record_ids FROM ${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(`${prefix}_people`)} ORDER BY record_id`,
+      `SELECT record_id, name, email_addresses, company_record_ids FROM ${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(`${prefix}_people`)} ORDER BY record_id${afterWrites}`,
     )
     expect(people).toEqual([
       { record_id: 'empty-attributes', name: '', email_addresses: [], company_record_ids: [] },
       { record_id: 'record-1', name: 'Ada Updated', email_addresses: ['one@example.test', 'two@example.test'], company_record_ids: [] },
     ])
     for (const resource of ['companies', 'deals']) {
-      const rows = await executor.query(`SELECT * FROM ${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(`${prefix}_${resource}`)}`)
+      const rows = await executor.query(`SELECT * FROM ${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(`${prefix}_${resource}`)}${afterWrites}`)
       expect(rows).toEqual([])
     }
-    const raw = await executor.query<{ count: string }>(`SELECT count() AS count FROM ${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(`${prefix}_records_raw`)} FINAL`)
+    const raw = await executor.query<{ count: string }>(`SELECT count() AS count FROM ${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(`${prefix}_records_raw`)} FINAL${afterWrites}`)
     expect(Number(raw[0]?.count)).toBe(3)
-    const preserved = await executor.query<{ id: string }>(`SELECT id FROM ${existingTable}`)
+    const preserved = await executor.query<{ id: string }>(`SELECT id FROM ${existingTable}${afterWrites}`)
     expect(Number(preserved[0]?.id)).toBe(7)
-    const custom = await executor.query<{ value: string }>(`SELECT JSONExtractString(toJSONString(raw), 'data', 'values', 'unmodeled', 1, 'value') AS value FROM ${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(`${prefix}_records_raw`)} FINAL WHERE JSONExtractString(toJSONString(raw), 'object_slug') = 'subscriptions'`)
+    const custom = await executor.query<{ value: string }>(`SELECT JSONExtractString(toJSONString(raw), 'data', 'values', 'unmodeled', 1, 'value') AS value FROM ${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(`${prefix}_records_raw`)} FINAL WHERE JSONExtractString(toJSONString(raw), 'object_slug') = 'subscriptions'${afterWrites}`)
     expect(custom).toEqual([{ value: 'retained' }])
     const pipelinePath = join(project, 'src/integrations/attio/pipeline.ts')
     const pipelineContent = await readFile(pipelinePath, 'utf8')
