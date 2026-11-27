@@ -671,6 +671,57 @@ def test_checks_uncopied_old_nested_and_pins_only_a_snapshot_from_the_definition
         assert "flatten_nested" not in creates[f"table:app.{name}"]
 
 
+_EXPLICIT_FLATTEN_NESTED_GUARD = (
+    "throwIf(min(flatten_nested_version) = 0, 'app.events: the schema sets flatten_nested, "
+    "and the cutover creates its tables with that setting, which ClickHouse accepts "
+    "in CREATE TABLE from version 25.1. Nothing was created or copied. Upgrade ClickHouse, "
+    "or cut the table over by hand.')"
+)
+
+
+@pytest.mark.parametrize("value", [0, 1])
+@pytest.mark.parametrize("key", ["flatten_nested", "`flatten_nested`", '"flatten_nested"'])
+def test_checks_version_when_new_definition_sets_flatten_nested(key: str, value: int) -> None:
+    start = plan(new_def=events(["user_id", "id"], settings={key: value})).operations[0].sql
+    assert (
+        "(toUInt32OrZero(splitByChar('.', version())[1]) * 100 + "
+        "toUInt32OrZero(splitByChar('.', version())[2]) >= 2501) AS flatten_nested_version"
+    ) in start
+    assert _EXPLICIT_FLATTEN_NESTED_GUARD in start
+
+
+def test_checks_explicit_old_flatten_nested_only_for_a_snapshot_from_the_schema() -> None:
+    settings = {"flatten_nested": 0}
+    local = plan(old_def=events(settings=settings))
+    assert "flatten_nested_version" not in local.operations[0].sql
+
+    engine = "ReplicatedMergeTree('/clickhouse/tables/{shard}/{database}/{table}', '{replica}')"
+    cutover = plan(
+        old_def=events(engine=engine, settings=settings),
+        new_def=events(["user_id", "id"], engine=engine),
+        cluster="c2",
+    )
+    start = cutover.operations[0].sql
+    assert "AS flatten_nested_version" in start
+    assert _EXPLICIT_FLATTEN_NESTED_GUARD in start
+
+
+def test_uses_nested_message_when_snapshot_has_nested_and_new_definition_sets_setting() -> None:
+    engine = "ReplicatedMergeTree"
+    nested = [*COLUMNS, {"name": "n", "type": "Nested(x UInt64)"}]
+    cutover = plan(
+        old_def=events(engine=engine, columns=nested),
+        new_def=events(["user_id", "id"], engine=engine, settings={"flatten_nested": 1}),
+        cluster="c2",
+    )
+    start = cutover.operations[0].sql
+    assert (
+        "throwIf(min(flatten_nested_version) = 0, 'app.events: the cutover of a table with "
+        "Nested columns"
+    ) in start
+    assert _EXPLICIT_FLATTEN_NESTED_GUARD not in start
+
+
 @pytest.mark.parametrize("value", [0, 1])
 # A quoted key names the same setting, and the server applies the last one.
 @pytest.mark.parametrize("key", ["flatten_nested", "`flatten_nested`", '"flatten_nested"'])
