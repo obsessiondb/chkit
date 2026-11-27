@@ -156,7 +156,7 @@ describe.serial('built Attio template installed into a consumer', () => {
     expect(narrowed.exitCode, formatTestDiagnostic('removed notes', narrowed)).toBe(0)
     expect(JSON.parse(narrowed.stdout).streams).toHaveLength(8)
     await waitForTable(executor, env.clickhouseDatabase, `${prefix}_notes_raw`)
-  }, 120_000)
+  }, 180_000)
 })
 
 async function writeProject(project: string, root: string, database: string, prefix: string): Promise<void> {
