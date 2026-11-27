@@ -1,0 +1,5 @@
+---
+"@chkit/plugin-obsessiondb": patch
+---
+
+`chkit plugin backfill submit --plan-id` now requires every run in the failed or cancelled job to be done or failed before re-submitting a plan without an idempotency token, preventing overlapping inserts from writing a chunk twice.
