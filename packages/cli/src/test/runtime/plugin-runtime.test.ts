@@ -220,7 +220,21 @@ describe('resolveContext', () => {
 
     expect(ctx.executor).toBe(second)
     expect(ctx.hasExecutor).toBe(true)
+    // A plugin executor does not send clickhouse.url, so migrate ignores its settings (#879).
+    expect(ctx.configExecutor).toBe(false)
     expect(events).toEqual(['getContext:first', 'getContext:second', 'close:first'])
+  })
+
+  test('marks the executor built from the clickhouse config block (#879)', async () => {
+    const runtime = await loadPluginRuntime({ config: makeConfig([]), configPath: '/fake/clickhouse.config.ts', cliVersion: '1.0.0' })
+    const ctx = await runtime.resolveContext({
+      config: { ...makeConfig([]), clickhouse: { url: 'http://127.0.0.1:1/?ch_async_insert=1', username: 'default', password: '', database: 'default' } } as never,
+      configPath: '/fake/clickhouse.config.ts',
+      command: 'migrate',
+      flags: {},
+    })
+    expect(ctx.configExecutor).toBe(true)
+    await runtime.disposeContext(ctx)
   })
 
   test('a getContext error closes the current executor', async () => {

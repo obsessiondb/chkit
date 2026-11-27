@@ -2,7 +2,7 @@ import { mkdir, readFile } from 'node:fs/promises'
 import { join, relative } from 'node:path'
 import process from 'node:process'
 
-import { assertServerIndexGranularity, type ClickHouseExecutor, type ClickHouseSettings } from '@chkit/clickhouse'
+import { assertServerIndexGranularity, type ClickHouseExecutor, type ClickHouseSettings, insertSettingsFromUrl } from '@chkit/clickhouse'
 import { configuredIndexGranularity, statementFingerprint, type ResolvedChxConfig } from '@chkit/core'
 
 import {
@@ -65,7 +65,7 @@ import {
 import { resolveRecoveryTargets } from './recovery.js'
 import { resolveRetry, type RetryResolution } from './retry.js'
 import { filterPendingByScope } from './scope.js'
-import { assertInsertSettingsChangeable, insertSettingsOverrideWarning, parseSettingFlags } from './settings.js'
+import { assertInsertSettingsChangeable, insertSettingsOverrideWarning, mergeMigrationSettings, parseSettingFlags } from './settings.js'
 import { extractExecutableStatements, extractStatementOperations } from '../../runtime/safety-markers.js'
 import { createQueryTracker, queryTrackingDisabled, type QueryContext, type QueryIdentity, type QueryTracker } from './query-intents.js'
 import { abandonRecovery, assertCancellationClear, assertCancellationUnfinished, cancelPredecessor, freshRecoveryExecutor, finishRecovery, expandRecoveryPlan, markCancellationPending, settleCompensation, prepareCancellation, resolveQueryIdentity } from './cancellation.js'
@@ -128,7 +128,7 @@ interface MigrateContext {
   jsonMode: boolean
   executeRequested: boolean
   allowDestructive: boolean
-  /** --setting values, sent with every migration statement. */
+  /** Effective settings sent with every migration statement. */
   settings: ClickHouseSettings | undefined
   mode: MigrateMode
   migrationsDir: string
@@ -240,8 +240,12 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
   const f = typedFlags(flags, [...GLOBAL_FLAGS, ...MIGRATE_FLAGS] as const)
   const executeRequested = f['--apply'] === true || f['--execute'] === true
   const allowDestructive = f['--allow-destructive'] === true
-  const settings = parseSettingFlags(f['--setting'])
-  const overrideWarning = insertSettingsOverrideWarning(settings)
+  const flagSettings = parseSettingFlags(f['--setting'])
+  const urlSettings = pluginContext.configExecutor && config.clickhouse
+    ? insertSettingsFromUrl(config.clickhouse.url)
+    : undefined
+  const settings = mergeMigrationSettings(flagSettings, urlSettings)
+  const overrideWarning = insertSettingsOverrideWarning(flagSettings, urlSettings)
   if (overrideWarning) console.error(overrideWarning)
   const tableSelector = f['--table']
   const jsonMode = f['--json'] === true
@@ -292,7 +296,7 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
   }
   const withLockHeld = async <T>(fn: () => Promise<T>, { selectedFiles = [], abandon }: WithLockOptions, interruptLock: InterruptLock): Promise<T> => {
     // Every run that writes passes here first, interactive or not (#790).
-    await assertInsertSettingsChangeable(rawDb, settings)
+    await assertInsertSettingsChangeable(rawDb, flagSettings, urlSettings)
     if (migrateLockDisabled()) {
       console.error('⚠ CHKIT_MIGRATE_LOCK is off: this run takes no migrate lock, so a concurrent migrate can apply the same statements.')
       const target = await journalStore.lockTarget()
@@ -408,7 +412,7 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
     )
   }
   // Reading the journal can upgrade its schema, a write (#790).
-  if (executeRequested) await assertInsertSettingsChangeable(rawDb, settings)
+  if (executeRequested) await assertInsertSettingsChangeable(rawDb, flagSettings, urlSettings)
   const journal = await journalStore.readJournal()
   const appliedNames = new Set(journal.applied.map((entry) => entry.name))
   const pendingAll = files.filter((file) => !appliedNames.has(file))

@@ -137,8 +137,8 @@ describe('@chkit/cli migrate --setting e2e (#321)', () => {
     const dir = await mkdtemp(join(tmpdir(), 'chkit-insert-override-e2e-'))
     const migrationsDir = join(dir, 'chkit/migrations')
     const configPath = join(dir, 'clickhouse.config.ts')
-    const migrate = (settings: string[]) =>
-      runCli(dir, ['migrate', '--config', configPath, '--apply', ...settings.flatMap((setting) => ['--setting', setting])], { CHKIT_JOURNAL_TABLE: journalTable, CI: '1' })
+    const migrate = (settings: string[], flags: string[] = []) =>
+      runCli(dir, ['migrate', '--config', configPath, '--apply', ...flags, ...settings.flatMap((setting) => ['--setting', setting])], { CHKIT_JOURNAL_TABLE: journalTable, CI: '1' })
     const writeMigration = (name: string, first: number) =>
       writeFile(
         join(migrationsDir, name),
@@ -148,25 +148,30 @@ describe('@chkit/cli migrate --setting e2e (#321)', () => {
         'utf8',
       )
     const stored = async () => Number((await executor.query<{ n: string }>(`SELECT toString(count()) AS n FROM ${qualifiedSink}`))[0]?.n)
-    const sentSettings = async (tag: string) => {
+    const sentSettings = async (tag?: string) => {
       await executor.command('SYSTEM FLUSH LOGS')
       // Settings lists a setting only when its value is not the server's default.
       const effective = (name: string) => `if(mapContains(Settings, '${name}'), Settings['${name}'], (SELECT default FROM system.settings WHERE name = '${name}')) AS ${name}`
       return await executor.query<{ async_insert: string; wait_for_async_insert: string }>(
         `SELECT ${effective('async_insert')}, ${effective('wait_for_async_insert')} FROM system.query_log ` +
-          `WHERE type = 'QueryFinish' AND query_kind = 'Insert' AND Settings['log_comment'] = '${tag}' AND has(tables, '${database}.${sink}')`,
+          `WHERE type = 'QueryFinish' AND query_kind = 'Insert' AND ` +
+          (tag === undefined
+            ? `has(tables, '${database}.${journalTable}')`
+            : `Settings['log_comment'] = '${tag}' AND has(tables, '${database}.${sink}')`),
       )
     }
-    const warnings = (stderr: string) => stderr.split('\n').filter((line) => line.startsWith('Warning: --setting'))
+    const warnings = (stderr: string) => stderr.split('\n').filter((line) => line.startsWith('Warning: ') && line.includes('what every migration write sets by default'))
 
-    try {
-      await mkdir(migrationsDir, { recursive: true })
-      await writeFile(
+    const writeConfig = (url: string) =>
+      writeFile(
         configPath,
         `export default {\n  schema: '${join(dir, 'schema.ts')}',\n  outDir: '${join(dir, 'chkit')}',\n  migrationsDir: '${migrationsDir}',\n  metaDir: '${join(dir, 'chkit/meta')}',\n` +
-          `  clickhouse: { url: '${liveEnv.clickhouseUrl}', username: '${liveEnv.clickhouseUser}', password: '${liveEnv.clickhousePassword}', database: '${database}' },\n}\n`,
+          `  clickhouse: { url: '${url}', username: '${liveEnv.clickhouseUser}', password: '${liveEnv.clickhousePassword}', database: '${database}' },\n}\n`,
         'utf8',
       )
+    try {
+      await mkdir(migrationsDir, { recursive: true })
+      await writeConfig(liveEnv.clickhouseUrl)
       // Fire-and-forget: without chkit's settings after it, an INSERT would
       // return with its rows still buffered for 3 s.
       await executor.command(
@@ -199,6 +204,37 @@ describe('@chkit/cli migrate --setting e2e (#321)', () => {
         { async_insert: '1', wait_for_async_insert: '1' },
         { async_insert: '1', wait_for_async_insert: '1' },
       ])
+
+      // #879: a URL override follows the profile too. Journal writes stay durable.
+      const url = new URL(liveEnv.clickhouseUrl)
+      url.searchParams.set('ch_async_insert', '1')
+      await writeConfig(url.href)
+      await writeMigration('20990101000002_url.sql', 5)
+      const fromUrl = migrate([`log_comment=${prefix}c`, `profile=${profile}`], ['--json'])
+      expect(fromUrl.exitCode, formatTestDiagnostic('migrate with a URL override failed', fromUrl)).toBe(0)
+      expect(warnings(fromUrl.stderr)).toEqual([
+        'Warning: clickhouse.url overrides what every migration write sets by default: async_insert=1 (an INSERT is queued as an asynchronous insert, which migrate cannot cancel).',
+      ])
+      expect(await stored()).toBe(6)
+      expect(await sentSettings(`${prefix}c`)).toEqual([
+        { async_insert: '1', wait_for_async_insert: '1' },
+        { async_insert: '1', wait_for_async_insert: '1' },
+      ])
+
+      await writeMigration('20990101000003_flag_wins.sql', 7)
+      const flagWins = migrate([`log_comment=${prefix}d`, `profile=${profile}`, 'async_insert=0'])
+      expect(flagWins.exitCode, formatTestDiagnostic('migrate with a flag and URL override failed', flagWins)).toBe(0)
+      expect(warnings(flagWins.stderr)).toEqual([])
+      expect(await stored()).toBe(8)
+      expect(await sentSettings(`${prefix}d`)).toEqual([
+        { async_insert: '0', wait_for_async_insert: '1' },
+        { async_insert: '0', wait_for_async_insert: '1' },
+      ])
+      const journalSettings = await sentSettings()
+      expect(journalSettings.length).toBeGreaterThan(0)
+      for (const settings of journalSettings) {
+        expect(settings).toEqual({ async_insert: '0', wait_for_async_insert: '1' })
+      }
     } finally {
       await executor.command(`DROP TABLE IF EXISTS ${qualifiedSink} SYNC`)
       await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)} SYNC`)

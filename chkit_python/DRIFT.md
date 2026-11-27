@@ -1903,6 +1903,13 @@ stabilizations (#238/#241/#245/#247/#264), the uncommitted backfill
 - `resolveConfig` / `resolve_config` default `secure` to the scheme and reject an
   explicit `secure` that contradicts it with the same message.
 
+### clickhouse.url async insert settings (#879)
+
+Both ports read `async_insert` and `wait_for_async_insert` from `ch_` or
+`clickhouse_setting_` query parameters for config-backed migrations. Flags take
+precedence and journal writes use the durable defaults. Python reads only these
+two settings from the URL. General URL parameter support is tracked in [#462](https://github.com/obsessiondb/chkit/issues/462).
+
 ### Executable statements match TS (#486)
 - No divergence left. `extract_executable_statements` is a 1:1 port of TS
   `extractExecutableStatements`: `--` comments are stripped and every statement keeps its

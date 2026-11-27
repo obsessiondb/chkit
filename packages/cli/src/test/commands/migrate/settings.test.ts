@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
 
-import { assertInsertSettingsChangeable, insertSettingsOverrideWarning, parseSettingFlags } from '../../../commands/migrate/settings.js'
+import { assertInsertSettingsChangeable, insertSettingsOverrideWarning, mergeMigrationSettings, parseSettingFlags } from '../../../commands/migrate/settings.js'
 
 describe('migrate --setting parsing (#321)', () => {
   test('no --setting yields no settings', () => {
@@ -105,4 +105,31 @@ describe('migrate refuses a user whose insert settings are fixed (#790)', () => 
       message: 'Setting wait_for_async_insert is fixed at 0 for this ClickHouse user, and chkit migrate needs wait_for_async_insert = 1 so that a statement it records as applied is stored. Nothing ran.',
     })
   })
+
+  test('names the URL when a fixed setting prevents an override (#879)', async () => {
+    const db = executor([{ name: 'async_insert', value: '0', readonly: 1 }])
+    await expect(assertInsertSettingsChangeable(db, undefined, { async_insert: '1' })).rejects.toMatchObject({
+      code: 'insert_settings_fixed',
+      message: 'Setting async_insert is fixed at 0 for this ClickHouse user, so async_insert=1 from clickhouse.url cannot apply. Nothing ran.',
+    })
+  })
+})
+
+test('names the sources of effective insert overrides (#879)', () => {
+  const asyncGuarantee = 'an INSERT is queued as an asynchronous insert, which migrate cannot cancel'
+  const waitGuarantee = 'an asynchronous INSERT can be journaled as applied before its rows are stored'
+  expect(insertSettingsOverrideWarning(undefined, { async_insert: '1' })).toBe(
+    `Warning: clickhouse.url overrides what every migration write sets by default: async_insert=1 (${asyncGuarantee}).`,
+  )
+  expect(insertSettingsOverrideWarning({ async_insert: '1' }, { wait_for_async_insert: '0' })).toBe(
+    `Warning: --setting and clickhouse.url override what every migration write sets by default: async_insert=1 from --setting (${asyncGuarantee}); wait_for_async_insert=0 from clickhouse.url (${waitGuarantee}).`,
+  )
+  expect(insertSettingsOverrideWarning({ async_insert: '0' }, { async_insert: '1' })).toBeUndefined()
+})
+
+test('merges URL insert settings underneath flags (#879)', () => {
+  expect(mergeMigrationSettings({ async_insert: '0', profile: 'bulk' }, { async_insert: '1', wait_for_async_insert: '0' })).toEqual({
+    async_insert: '0', wait_for_async_insert: '0', profile: 'bulk',
+  })
+  expect(mergeMigrationSettings(undefined, undefined)).toBeUndefined()
 })

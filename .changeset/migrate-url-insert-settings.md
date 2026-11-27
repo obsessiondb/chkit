@@ -1,0 +1,6 @@
+---
+"chkit": patch
+"@chkit/clickhouse": patch
+---
+
+`migrate` now honors `async_insert` and `wait_for_async_insert` from the configured ClickHouse URL and names the source of each override in its warning. Command-line settings take precedence, and migration journal writes use the durable defaults.
