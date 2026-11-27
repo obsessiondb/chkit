@@ -412,10 +412,10 @@ describe('handleSubmit --plan-id', () => {
 
 	const config = { metaDir: './chkit/meta', schema: [] }
 
-	async function setupPlan(options: { jobId?: string } = {}) {
+	async function setupPlan(options: { jobId?: string; plan?: BackfillPlanState } = {}) {
 		const dir = await mkdtemp(join(tmpdir(), 'chkit-resubmit-'))
 		const configPath = join(dir, 'clickhouse.config.ts')
-		const plan = makePlan()
+		const plan = options.plan ?? makePlan()
 		const plansDir = join(dir, 'chkit/meta/backfill/plans')
 		await mkdir(plansDir, { recursive: true })
 		await writeFile(
@@ -511,32 +511,69 @@ describe('handleSubmit --plan-id', () => {
 		)
 	})
 
-	test('leaves out a chunk that finished in an earlier job on every later re-submit', async () => {
-		const { configPath, planId } = await setupPlan({ jobId: 'job-1' })
-		const jobs: Record<string, { taskIds: string[]; doneTaskIds: string[] }> = {
-			'job-1': { taskIds: ['c1', 'c2'], doneTaskIds: ['c1'] },
+	test('across a chain of re-submits sends each owed chunk until it finishes and never one that finished', async () => {
+		const plan = makePlan()
+		const c2 = plan.chunkPlan.chunks[1]
+		if (!c2) throw new Error('makePlan has no second chunk')
+		plan.chunkPlan.chunks.push({ ...c2, id: 'c3' })
+		const { configPath, submissionPath, planId } = await setupPlan({ jobId: 'job-1', plan })
+		// What each job carried, and how it ended: its status and the insert runs of each task.
+		const jobs: Record<string, { taskIds: string[]; status?: string; runs?: Record<string, RunStatus[]> }> = {
+			'job-1': { taskIds: ['c1', 'c2', 'c3'] },
 		}
 		const submitted: string[][] = []
 		globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
 			const request = new Request(input, init)
 			const procedure = new URL(request.url).pathname.replace(/^\/rpc\//, '')
+			if (procedure.startsWith('workbench/')) return orpcResponse(queryResult([]))
 			const { json } = (await request.json()) as { json: { jobId?: string; tasks?: Array<{ id: string }> } }
 			if (procedure === 'jobs/submit') {
 				const taskIds = (json.tasks ?? []).map((task) => task.id)
 				submitted.push(taskIds)
 				const jobId = `job-${submitted.length + 1}`
-				jobs[jobId] = { taskIds, doneTaskIds: [] }
+				jobs[jobId] = { taskIds }
 				return orpcResponse({ jobId })
 			}
 			const job = jobs[json.jobId ?? '']
-			return orpcResponse(jobDetail('failed', job?.doneTaskIds ?? [], job?.taskIds))
+			if (!job?.status) throw new Error(`jobs/get for unknown or unfinished job ${json.jobId}`)
+			return orpcResponse({
+				...jobDetail(job.status, []),
+				id: json.jobId,
+				totalTasks: job.taskIds.length,
+				tasks: job.taskIds.map((id, taskIndex) => jobTaskWithRuns(id, taskIndex, job.runs?.[id] ?? [])),
+			})
 		}) as typeof fetch
+		const finished = new Set<string>()
+		async function endJobAndResubmit(jobId: string, status: string, runs: Record<string, RunStatus[]>) {
+			const job = jobs[jobId]
+			if (!job) throw new Error(`job ${jobId} was never submitted`)
+			Object.assign(job, { status, runs })
+			for (const [id, statuses] of Object.entries(runs)) if (statuses.includes('done')) finished.add(id)
+			const before = submitted.length
+			const outcome = await resubmit(configPath, { '--plan-id': planId })
+			// A re-submit never sends a chunk that already finished in any job.
+			for (const taskIds of submitted.slice(before)) expect(taskIds.filter((id) => finished.has(id))).toEqual([])
+			return outcome
+		}
 
-		await resubmit(configPath, { '--plan-id': planId })
-		const { printed } = await resubmit(configPath, { '--plan-id': planId })
+		// job-1: c1 finished on its retry; c2 was still running and c3 never started.
+		const hop1 = await endJobAndResubmit('job-1', 'failed', { c1: ['failed', 'done'], c2: ['running'] })
+		// job-2: c2 finished; c3 was still pending when the job was cancelled.
+		const hop2 = await endJobAndResubmit('job-2', 'cancelled', { c2: ['done'], c3: ['pending'] })
+		// job-3: c3 failed again.
+		const hop3 = await endJobAndResubmit('job-3', 'failed', { c3: ['failed'] })
+		// job-4: c3 finished, so nothing is owed any more.
+		const hop4 = await endJobAndResubmit('job-4', 'failed', { c3: ['done'] })
 
-		expect(submitted).toEqual([['c2'], ['c2']])
-		expect(printed[0]).toMatchObject({ jobId: 'job-3', replacedJobId: 'job-2', taskCount: 1, skippedChunks: 1 })
+		expect(submitted).toEqual([['c2', 'c3'], ['c3'], ['c3']])
+		expect(hop1.printed[0]).toMatchObject({ jobId: 'job-2', replacedJobId: 'job-1', taskCount: 2, skippedChunks: 1 })
+		expect(hop2.printed[0]).toMatchObject({ jobId: 'job-3', replacedJobId: 'job-2', taskCount: 1, skippedChunks: 2 })
+		expect(hop3.printed[0]).toMatchObject({ jobId: 'job-4', replacedJobId: 'job-3', taskCount: 1, skippedChunks: 2 })
+		expect(hop4.result).toEqual({ handled: true, exitCode: 1 })
+		expect((hop4.printed[0] as { error: string }).error).toContain(`Every chunk of plan ${planId} already finished`)
+		// Every chunk of the plan finished exactly once across the chain.
+		expect([...finished].sort()).toEqual(['c1', 'c2', 'c3'])
+		expect(JSON.parse(await readFile(submissionPath, 'utf8'))).toMatchObject({ jobId: 'job-4' })
 	})
 
 	test('refuses when every chunk finished in the replaced job', async () => {
@@ -599,7 +636,7 @@ describe('handleSubmit --plan-id', () => {
 	})
 })
 
-function jobDetail(status: string, doneTaskIds: string[], taskIds = ['c1', 'c2']) {
+function jobDetail(status: string, doneTaskIds: string[]) {
 	return {
 		id: 'job-old',
 		serviceId: 'svc-1',
@@ -619,7 +656,7 @@ function jobDetail(status: string, doneTaskIds: string[], taskIds = ['c1', 'c2']
 		maxRetries: 3,
 		workflowId: null,
 		metadata: null,
-		tasks: taskIds.map((id, taskIndex) => jobTask(id, taskIndex, doneTaskIds.includes(id) ? 'done' : 'failed')),
+		tasks: ['c1', 'c2'].map((id, taskIndex) => jobTask(id, taskIndex, doneTaskIds.includes(id) ? 'done' : 'failed')),
 	}
 }
 
@@ -660,6 +697,17 @@ function jobTask(id: string, taskIndex: number, runStatus: 'done' | 'failed') {
 				finishedAt: null,
 			},
 		],
+	}
+}
+
+type RunStatus = 'pending' | 'running' | 'done' | 'failed'
+
+/** A task whose insert runs ended in `statuses`, one run per attempt. */
+function jobTaskWithRuns(id: string, taskIndex: number, statuses: RunStatus[]) {
+	const [template] = jobTask(id, taskIndex, 'failed').runs
+	return {
+		...jobTask(id, taskIndex, 'failed'),
+		runs: statuses.map((status, index) => ({ ...template, id: `run-${id}-${index + 1}`, attempt: index + 1, status })),
 	}
 }
 
