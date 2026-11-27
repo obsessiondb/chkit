@@ -574,7 +574,10 @@ describe('handleSubmit --plan-id', () => {
 		expect(JSON.parse(await readFile(submissionPath, 'utf8'))).toMatchObject({ jobId: 'job-4' })
 	})
 
-	test('refuses a job whose task list is incomplete instead of treating a missing task as finished', async () => {
+	test.each([
+		['a task missing', ['c1']],
+		['an unknown task in place of a chunk', ['c1', 'unknown']],
+	])('refuses a job whose task list has %s instead of treating a missing chunk as finished', async (_case, taskIds) => {
 		const { configPath, submissionPath, planId } = await setupPlan({ jobId: 'job-old' })
 		const before = await readFile(submissionPath, 'utf8')
 		const calls: string[] = []
@@ -582,7 +585,7 @@ describe('handleSubmit --plan-id', () => {
 			const procedure = new URL(new Request(input, init).url).pathname.replace(/^\/rpc\//, '')
 			calls.push(procedure)
 			const job = jobDetail('failed', [])
-			return orpcResponse({ ...job, tasks: job.tasks.slice(0, 1) })
+			return orpcResponse({ ...job, tasks: taskIds.map((id, taskIndex) => jobTask(id, taskIndex, 'failed')) })
 		}) as typeof fetch
 
 		const { result, printed } = await resubmit(configPath, { '--plan-id': planId })

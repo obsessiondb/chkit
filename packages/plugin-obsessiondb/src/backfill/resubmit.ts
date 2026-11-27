@@ -46,10 +46,11 @@ export async function loadPlanForResubmit(
 
 	// Task ids are the chunk ids sent by submit. A re-submitted job carries only
 	// the chunks still owed, so a chunk missing from it finished in an earlier job.
-	const carried = new Set(job.tasks.map((task) => task.id))
+	const taskIds = new Set(job.tasks.map((task) => task.id))
+	const carried = new Set(plan.chunkPlan.chunks.filter((chunk) => taskIds.has(chunk.id)).map((chunk) => chunk.id))
 	// A task missing from the response would count as finished and its chunk
-	// would never be sent again, so refuse an incomplete task list.
-	if (carried.size !== job.totalTasks) {
+	// would never be sent again, so refuse unless every task is a listed chunk.
+	if (carried.size !== job.totalTasks || taskIds.size !== job.totalTasks) {
 		throw new Error(
 			`Job ${jobId} for plan ${planId} lists ${carried.size} of its ${job.totalTasks} tasks, ` +
 				'so its unfinished chunks are unknown. Nothing was re-submitted.',

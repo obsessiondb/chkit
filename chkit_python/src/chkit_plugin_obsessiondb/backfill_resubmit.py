@@ -72,10 +72,12 @@ def load_plan_for_resubmit(
 
     # Task ids are the chunk ids sent by submit. A re-submitted job carries only
     # the chunks still owed, so a chunk missing from it finished in an earlier job.
-    carried = {task.get("id") for task in job.tasks}
+    plan = saved.plan
+    task_ids = {task.get("id") for task in job.tasks}
+    carried = {chunk.id for chunk in plan.chunk_plan.chunks if chunk.id in task_ids}
     # A task missing from the response would count as finished and its chunk
-    # would never be sent again, so refuse an incomplete task list.
-    if len(carried) != job.total_tasks:
+    # would never be sent again, so refuse unless every task is a listed chunk.
+    if len(carried) != job.total_tasks or len(task_ids) != job.total_tasks:
         msg = (
             f"Job {job_id} for plan {plan_id} lists {len(carried)} of its"
             f" {job.total_tasks} tasks, so its unfinished chunks are unknown."
@@ -90,7 +92,6 @@ def load_plan_for_resubmit(
             for run in task.get("runs") or []
         )
     }
-    plan = saved.plan
     remaining = [
         chunk
         for chunk in plan.chunk_plan.chunks

@@ -816,10 +816,12 @@ def test_handle_submit_plan_id_across_a_chain_never_resends_a_finished_chunk(
     assert json.loads(submission_path.read_text(encoding="utf-8"))["jobId"] == "job-4"
 
 
+@pytest.mark.parametrize("task_ids", [("c1",), ("c1", "unknown")])
 def test_handle_submit_plan_id_refuses_an_incomplete_task_list(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, task_ids: tuple[str, ...]
 ) -> None:
-    """A task missing from the response is not taken as finished."""
+    """A chunk missing from the response, also behind an unknown task, is not
+    taken as finished."""
     submission_path = _setup_saved_plan(tmp_path, job_id="job-old")
     before = submission_path.read_text(encoding="utf-8")
     calls = _patch_jobs_api(monkeypatch, "failed")
@@ -827,7 +829,9 @@ def test_handle_submit_plan_id_refuses_an_incomplete_task_list(
 
     def partial_get(creds: Credentials, *, job_id: str) -> JobDetail:
         job: JobDetail = real_get(creds, job_id=job_id)
-        return job.model_copy(update={"tasks": job.tasks[:1]})
+        return job.model_copy(
+            update={"tasks": [{**job.tasks[0], "id": task_id} for task_id in task_ids]}
+        )
 
     monkeypatch.setattr(backfill_resubmit_module, "jobs_get", partial_get)
 
