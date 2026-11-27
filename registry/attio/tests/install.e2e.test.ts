@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-import { createStatelessLiveExecutor, createPrefix, getLiveEnv, quoteIdent, waitForTable, waitForView } from '@chkit/clickhouse/e2e-testkit'
+import { createStatelessLiveExecutor, createPrefix, getLiveEnv, pollUntil, quoteIdent, waitForTable, waitForView } from '@chkit/clickhouse/e2e-testkit'
 import { createClickHouseDestination, definePipeline, runIngestion, selectStreams } from '@chkit/plugin-sync'
 import { createMemoryJournal } from '@chkit/plugin-sync/testing'
 
@@ -21,9 +21,9 @@ describe.serial('built Attio template installed into a consumer', () => {
   const prefix = createPrefix('registry')
   const root = resolve(import.meta.dir, '../../..')
   const temporary: string[] = []
-  // A multi-replica target (ObsessionDB) can serve a read from a replica that
-  // has not yet seen an acknowledged insert (#865); reads after writes wait for it.
-  const afterWrites = ' SETTINGS select_sequential_consistency = 1'
+  // On a multi-replica target (ObsessionDB) a read can reach a replica that has
+  // not yet applied an acknowledged insert (#865), as in the Slack install test.
+  const readSettings = { select_sequential_consistency: '1', enable_parallel_replicas: 0 } as const
 
   afterAll(async () => {
     const tables = await executor.query<{ name: string; engine: string }>(
@@ -122,22 +122,32 @@ describe.serial('built Attio template installed into a consumer', () => {
       const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { ...provider, journal, destination: createClickHouseDestination(executor), retry: { retries: 0 } })
       expect(result.ok, JSON.stringify(result)).toBe(true)
     }
-    const people = await executor.query<{ record_id: string; name: string; email_addresses: string[]; company_record_ids: string[] }>(
-      `SELECT record_id, name, email_addresses, company_record_ids FROM ${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(`${prefix}_people`)} ORDER BY record_id${afterWrites}`,
-    )
-    expect(people).toEqual([
+    const expectedPeople = [
       { record_id: 'empty-attributes', name: '', email_addresses: [], company_record_ids: [] },
       { record_id: 'record-1', name: 'Ada Updated', email_addresses: ['one@example.test', 'two@example.test'], company_record_ids: [] },
-    ])
+    ]
+    const people = await pollUntil(
+      () => executor.query<{ record_id: string; name: string; email_addresses: string[]; company_record_ids: string[] }>(
+        `SELECT record_id, name, email_addresses, company_record_ids FROM ${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(`${prefix}_people`)} ORDER BY record_id`, readSettings,
+      ),
+      (rows) => JSON.stringify(rows) === JSON.stringify(expectedPeople),
+    )
+    expect(people).toEqual(expectedPeople)
     for (const resource of ['companies', 'deals']) {
-      const rows = await executor.query(`SELECT * FROM ${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(`${prefix}_${resource}`)}${afterWrites}`)
+      const rows = await executor.query(`SELECT * FROM ${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(`${prefix}_${resource}`)}`, readSettings)
       expect(rows).toEqual([])
     }
-    const raw = await executor.query<{ count: string }>(`SELECT count() AS count FROM ${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(`${prefix}_records_raw`)} FINAL${afterWrites}`)
+    const raw = await pollUntil(
+      () => executor.query<{ count: string }>(`SELECT count() AS count FROM ${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(`${prefix}_records_raw`)} FINAL`, readSettings),
+      (rows) => Number(rows[0]?.count) === 3,
+    )
     expect(Number(raw[0]?.count)).toBe(3)
-    const preserved = await executor.query<{ id: string }>(`SELECT id FROM ${existingTable}${afterWrites}`)
+    const preserved = await pollUntil(() => executor.query<{ id: string }>(`SELECT id FROM ${existingTable}`, readSettings), (rows) => rows.length === 1)
     expect(Number(preserved[0]?.id)).toBe(7)
-    const custom = await executor.query<{ value: string }>(`SELECT JSONExtractString(toJSONString(raw), 'data', 'values', 'unmodeled', 1, 'value') AS value FROM ${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(`${prefix}_records_raw`)} FINAL WHERE JSONExtractString(toJSONString(raw), 'object_slug') = 'subscriptions'${afterWrites}`)
+    const custom = await pollUntil(
+      () => executor.query<{ value: string }>(`SELECT JSONExtractString(toJSONString(raw), 'data', 'values', 'unmodeled', 1, 'value') AS value FROM ${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(`${prefix}_records_raw`)} FINAL WHERE JSONExtractString(toJSONString(raw), 'object_slug') = 'subscriptions'`, readSettings),
+      (rows) => rows.length === 1 && rows[0]?.value === 'retained',
+    )
     expect(custom).toEqual([{ value: 'retained' }])
     const pipelinePath = join(project, 'src/integrations/attio/pipeline.ts')
     const pipelineContent = await readFile(pipelinePath, 'utf8')
