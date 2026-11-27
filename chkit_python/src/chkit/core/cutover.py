@@ -264,13 +264,14 @@ def plan_cutover(
         names=names,
     )
     copied = [column for column in old_canonical.columns if column.name in declared_columns]
-    columns = [name for column in copied for name, _ in _column_leaves(column)]
+    copied_leaves = [leaf for column in copied for leaf in _column_leaves(column)]
+    columns = [name for name, _ in copied_leaves]
     snapshot_from_schema = _snapshot_from_definition(old_canonical)
     sql = _create_cutover_sql(
         database=request.database,
         table=request.table,
         names=names,
-        columns=columns,
+        copied_leaves=copied_leaves,
         copied_columns=declared_columns,
         old_columns=old_canonical.columns,
         old_engine=engine_name(old_canonical.engine),
@@ -636,7 +637,7 @@ def _create_cutover_sql(
     database: str,
     table: str,
     names: CutoverNames,
-    columns: list[str],
+    copied_leaves: list[tuple[str, str]],
     copied_columns: list[str],
     old_columns: list[ColumnDefinition],
     old_engine: str,
@@ -652,7 +653,7 @@ def _create_cutover_sql(
         return render_qualified_name(database, name)
 
     target = f"{database}.{table}"
-    column_list = ", ".join(quote_identifier(column) for column in columns)
+    column_list = ", ".join(quote_identifier(name) for name, _ in copied_leaves)
     key_list = ", ".join(quote_identifier(column) for column in key)
 
     def every_replica(query: str) -> str:
@@ -807,17 +808,24 @@ def _create_cutover_sql(
     )
 
     settings = "" if cluster else " SETTINGS select_sequential_consistency = 1"
-    # Hash a tuple: cityHash64 returns NULL when one of its arguments is NULL,
-    # and sumIf skips NULLs, so a row with a NULL column would not be compared.
+    hash_elements = ", ".join(_verify_hash_element(leaf) for leaf in copied_leaves)
+    row_hash = f"cityHash64(tuple({hash_elements}))"
+    # Hash a tuple because cityHash64 of a NULL argument is NULL and sumIf skips the row.
+    # Tuple hashing throws on NULL before ClickHouse 25.3 and hashes AggregateFunction
+    # states differently per table before 25.11. RowBinary gives NULL its own flag
+    # byte and serializes the state exactly, with each column in its own tuple slot.
+    # RowBinary has no type tags, so the stored type goes beside it: a profile can
+    # create the shadow with another type (data_type_default_nullable).
+    # JSON, Object, Dynamic and Variant keep the tuple hash because their RowBinary
+    # depends on output settings and how parts store their paths.
     verify_query = " ".join(
         [
             "SELECT count() AS bad FROM (",
             f"SELECT {key_list}, sum(src) AS snapshot_rows, sum(1 - src) AS shadow_rows, "
             "sumIf(h, src = 1) AS snapshot_hash, sumIf(h, src = 0) AS shadow_hash",
-            f"FROM (SELECT {key_list}, toUInt8(1) AS src, cityHash64(tuple({column_list})) AS h "
-            f"FROM {q(names.snapshot)}",
+            f"FROM (SELECT {key_list}, toUInt8(1) AS src, {row_hash} AS h FROM {q(names.snapshot)}",
             f"UNION ALL SELECT {key_list}, toUInt8(0) AS src, "
-            f"cityHash64(tuple({column_list})) AS h FROM {q(names.shadow)})",
+            f"{row_hash} AS h FROM {q(names.shadow)})",
             f"GROUP BY {key_list} HAVING snapshot_rows > 0 AND "
             "(snapshot_rows != shadow_rows OR snapshot_hash != shadow_hash))",
         ]
@@ -1440,6 +1448,30 @@ def _is_nullable_type(type_: str) -> bool:
     if name == "LowCardinality" and is_open(after):
         name, after = _type_name_at(tokens, after + 1)
     return name == "Nullable" and is_open(after)
+
+
+def _verify_hash_element(leaf: tuple[str, str]) -> str:
+    column_name, type_ = leaf
+    column = quote_identifier(column_name)
+    # Any spelling of these names keeps the tuple hash; so does a field or label
+    # that only contains one, and a name with an escape, which may spell one.
+    if re.search(r"json|object|dynamic|variant|\\", type_, re.IGNORECASE | re.ASCII):
+        return column
+    tokens = _type_tokens(type_)
+
+    def wraps(index: int) -> bool:
+        name, after = _type_name_at(tokens, index)
+        suffix = tokens[after] if after < len(tokens) else None
+        return (
+            name in ("Nullable", "AggregateFunction")
+            and suffix is not None
+            and suffix.kind == "punctuation"
+            and suffix.text == "("
+        )
+
+    if any(wraps(index) for index in range(len(tokens))):
+        return f"toTypeName({column}), formatRow('RowBinary', {column})"
+    return column
 
 
 def _type_tokens(type_: str) -> list[SQLToken]:

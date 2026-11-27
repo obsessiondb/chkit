@@ -210,13 +210,14 @@ export function planCutover(input: {
     inputColumns: [...input.oldDef.columns, ...input.newDef.columns],
   })
   const copied = oldDef.columns.filter((column) => declaredColumns.includes(column.name))
-  const columns = copied.flatMap((column) => columnLeaves(column).map((leaf) => leaf.name))
+  const copiedLeaves = copied.flatMap(columnLeaves)
+  const columns = copiedLeaves.map((leaf) => leaf.name)
   const snapshotFromSchema = snapshotFromDefinition(oldDef)
   const sql = createCutoverSql({
     database: request.database,
     table: request.table,
     names,
-    columns,
+    copiedLeaves,
     copiedColumns: declaredColumns,
     oldColumns: oldDef.columns,
     oldEngine: engineName(oldDef.engine),
@@ -493,7 +494,7 @@ function createCutoverSql(input: {
   database: string
   table: string
   names: CutoverNames
-  columns: string[]
+  copiedLeaves: Array<{ name: string; type: string }>
   /** Declared names of the copied columns. */
   copiedColumns: string[]
   /** Every column the old definition declares. */
@@ -511,10 +512,10 @@ function createCutoverSql(input: {
   oldSettings: TableDefinition['settings']
   indexGranularity: number
 }): CutoverSql {
-  const { database, table, names, columns, copiedColumns, oldColumns, oldEngine, snapshotFromDefinition, pinFlattenNested, key, cluster, readonlySettings, oldSettings, indexGranularity } = input
+  const { database, table, names, copiedLeaves, copiedColumns, oldColumns, oldEngine, snapshotFromDefinition, pinFlattenNested, key, cluster, readonlySettings, oldSettings, indexGranularity } = input
   const q = (name: string) => renderQualifiedName(database, name)
   const target = `${database}.${table}`
-  const columnList = columns.map(quoteColumn).join(', ')
+  const columnList = copiedLeaves.map((leaf) => quoteColumn(leaf.name)).join(', ')
   const keyList = key.map(quoteColumn).join(', ')
   const everyReplica = (query: string) => (cluster ? `clusterAllReplicas(${stringLiteral(cluster)}, view(${query}))` : `(${query})`)
   const tableCount = (name: string) => `(SELECT count() FROM system.tables WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(name)})`
@@ -631,13 +632,20 @@ function createCutoverSql(input: {
   const pendingMutations = `(SELECT count() FROM system.mutations WHERE database = ${stringLiteral(database)} AND table = ${stringLiteral(table)} AND NOT is_done)`
 
   const settings = cluster ? '' : ' SETTINGS select_sequential_consistency = 1'
-  // Hash a tuple: cityHash64 returns NULL when one of its arguments is NULL,
-  // and sumIf skips NULLs, so a row with a NULL column would not be compared.
+  const rowHash = `cityHash64(tuple(${copiedLeaves.map(verifyHashElement).join(', ')}))`
+  // Hash a tuple because cityHash64 of a NULL argument is NULL and sumIf skips the row.
+  // Tuple hashing throws on NULL before ClickHouse 25.3 and hashes AggregateFunction
+  // states differently per table before 25.11. RowBinary gives NULL its own flag
+  // byte and serializes the state exactly, with each column in its own tuple slot.
+  // RowBinary has no type tags, so the stored type goes beside it: a profile can
+  // create the shadow with another type (data_type_default_nullable).
+  // JSON, Object, Dynamic and Variant keep the tuple hash because their RowBinary
+  // depends on output settings and how parts store their paths.
   const verifyQuery = [
     'SELECT count() AS bad FROM (',
     `SELECT ${keyList}, sum(src) AS snapshot_rows, sum(1 - src) AS shadow_rows, sumIf(h, src = 1) AS snapshot_hash, sumIf(h, src = 0) AS shadow_hash`,
-    `FROM (SELECT ${keyList}, toUInt8(1) AS src, cityHash64(tuple(${columnList})) AS h FROM ${q(names.snapshot)}`,
-    `UNION ALL SELECT ${keyList}, toUInt8(0) AS src, cityHash64(tuple(${columnList})) AS h FROM ${q(names.shadow)})`,
+    `FROM (SELECT ${keyList}, toUInt8(1) AS src, ${rowHash} AS h FROM ${q(names.snapshot)}`,
+    `UNION ALL SELECT ${keyList}, toUInt8(0) AS src, ${rowHash} AS h FROM ${q(names.shadow)})`,
     `GROUP BY ${keyList} HAVING snapshot_rows > 0 AND (snapshot_rows != shadow_rows OR snapshot_hash != shadow_hash))`,
   ].join(' ')
   const verify = (message: string) =>
@@ -995,6 +1003,19 @@ function isNullableType(type: string): boolean {
   let [name, next] = typeNameAt(tokens, 0)
   if (name === 'LowCardinality' && isOpen(next)) [name, next] = typeNameAt(tokens, next + 1)
   return name === 'Nullable' && isOpen(next)
+}
+
+function verifyHashElement(leaf: { name: string; type: string }): string {
+  const column = quoteColumn(leaf.name)
+  // Any spelling of these names keeps the tuple hash; so does a field or label
+  // that only contains one, and a name with an escape, which may spell one.
+  if (/json|object|dynamic|variant|\\/i.test(leaf.type)) return column
+  const tokens = typeTokens(leaf.type)
+  const wraps = tokens.some((_, index) => {
+    const [name, next] = typeNameAt(tokens, index)
+    return (name === 'Nullable' || name === 'AggregateFunction') && tokens[next]?.kind === 'punctuation' && tokens[next]?.text === '('
+  })
+  return wraps ? `toTypeName(${column}), formatRow('RowBinary', ${column})` : column
 }
 
 function typeTokens(type: string): SQLToken[] {

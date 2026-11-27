@@ -451,11 +451,43 @@ describe('planCutover', () => {
   })
 
   test('verifies per key that the shadow holds exactly the snapshot rows', () => {
-    const verify = plan().operations[8]?.sql ?? ''
-    // A tuple, because cityHash64 of a NULL argument is NULL and sumIf skips NULLs.
-    expect(verify).toContain('cityHash64(tuple(`id`, `user_id`, `payload`))')
-    expect(verify).toContain('GROUP BY `id` HAVING snapshot_rows > 0 AND (snapshot_rows != shadow_rows OR snapshot_hash != shadow_hash)')
-    expect(verify).toContain('The table was not swapped.')
+    const hash = 'cityHash64(tuple(`id`, `user_id`, `payload`))'
+    for (const [copy, cluster] of [['migration', undefined], ['backfill', undefined], ['migration', 'c2']] as const) {
+      const engine = cluster ? 'ReplicatedMergeTree' : 'MergeTree'
+      const cutover = plan({ oldDef: { ...OLD, engine }, newDef: { ...NEW, engine }, options: { copy, cluster } })
+      const verify = cutover.operations.find((op) => op.type === 'cutover_verify')?.sql ?? ''
+      expect(verify).toContain(`toUInt8(1) AS src, ${hash} AS h FROM app.${cutover.names.snapshot} UNION ALL`)
+      expect(verify).toContain(`toUInt8(0) AS src, ${hash} AS h FROM app.${cutover.names.shadow})`)
+      expect(verify).toContain('GROUP BY `id` HAVING snapshot_rows > 0 AND (snapshot_rows != shadow_rows OR snapshot_hash != shadow_hash)')
+      expect(verify).toContain(copy === 'migration' ? 'The table was not swapped.' : 'chkit plugin backfill plan --cutover app.events')
+    }
+  })
+
+  test('wraps only tuple elements that need RowBinary on old ClickHouse versions', () => {
+    // #868 covers NULLs on ClickHouse 24.9-25.2 and aggregate states on 24.9-25.10.
+    const mixed = [
+      { name: 'id', type: 'UInt64' },
+      { name: 'price', type: 'Decimal64(2)', nullable: true },
+      { name: 'tags', type: 'Array(/* a comment */ `Nullable`(String))' },
+      { name: 'label', type: 'LowCardinality("Nullable"(String))' },
+      { name: 'state', type: 'AggregateFunction(argMax, LowCardinality(String), DateTime)' },
+      { name: 'j', type: 'JSON' },
+      { name: 'named', type: 'Tuple(`Nullable` UInt8)' },
+      { name: 'mixed', type: 'Tuple(a Nullable(UInt8), b JSON)' },
+      { name: 'lower_json', type: 'Tuple(a Nullable(UInt8), b json)' },
+      { name: 'escaped', type: 'Tuple(a Nullable(UInt8), b `\\x4aSON`(x Float64))' },
+      { name: 'label_s', type: "Nullable(Enum8('jſon' = 1))" },
+      { name: 'n', type: 'Nested(x Nullable(UInt8), y UInt8)' },
+    ]
+    const oldDef = events({ columns: mixed })
+    const newDef = events({ columns: mixed, orderBy: ['id', 'named'] })
+    const cutover = plan({ oldDef, newDef })
+    const verify = cutover.operations.find((op) => op.type === 'cutover_verify')?.sql ?? ''
+    const hash = "cityHash64(tuple(`id`, toTypeName(`price`), formatRow('RowBinary', `price`), toTypeName(`tags`), formatRow('RowBinary', `tags`), " +
+      "toTypeName(`label`), formatRow('RowBinary', `label`), toTypeName(`state`), formatRow('RowBinary', `state`), `j`, `named`, `mixed`, " +
+      "`lower_json`, `escaped`, toTypeName(`label_s`), formatRow('RowBinary', `label_s`), toTypeName(`n.x`), formatRow('RowBinary', `n.x`), `n.y`))"
+    expect(verify).toContain(`toUInt8(1) AS src, ${hash} AS h FROM app.${cutover.names.snapshot} UNION ALL`)
+    expect(verify).toContain(`toUInt8(0) AS src, ${hash} AS h FROM app.${cutover.names.shadow})`)
   })
 
   test('cuts over a change of read-only settings only, telling the tables apart by them (#511)', () => {

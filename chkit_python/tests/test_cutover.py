@@ -240,15 +240,63 @@ def test_does_not_pin_flatten_nested_without_a_nested_column() -> None:
     assert all("flatten_nested" not in op.sql for op in plan().operations)
 
 
-def test_verify_compares_rows_per_key() -> None:
-    verify = plan().operations[8].sql
-    # A tuple, because cityHash64 of a NULL argument is NULL and sumIf skips NULLs.
-    assert "cityHash64(tuple(`id`, `user_id`, `payload`))" in verify
+@pytest.mark.parametrize(
+    ("copy", "cluster"), [("migration", None), ("backfill", None), ("migration", "c2")]
+)
+def test_verify_compares_rows_per_key(copy: str, cluster: str | None) -> None:
+    engine = "ReplicatedMergeTree" if cluster else "MergeTree"
+    cutover = plan(
+        old_def=events(["id"], engine=engine),
+        new_def=events(["user_id", "id"], engine=engine),
+        copy=copy,
+        cluster=cluster,
+    )
+    verify = next(op.sql for op in cutover.operations if op.type == "cutover_verify")
+    row_hash = "cityHash64(tuple(`id`, `user_id`, `payload`))"
+    assert f"toUInt8(1) AS src, {row_hash} AS h FROM app.{cutover.names.snapshot} UNION ALL" in verify
+    assert f"toUInt8(0) AS src, {row_hash} AS h FROM app.{cutover.names.shadow})" in verify
     assert (
         "GROUP BY `id` HAVING snapshot_rows > 0 AND "
         "(snapshot_rows != shadow_rows OR snapshot_hash != shadow_hash)"
     ) in verify
-    assert "The table was not swapped." in verify
+    message = (
+        "The table was not swapped."
+        if copy == "migration"
+        else "chkit plugin backfill plan --cutover app.events"
+    )
+    assert message in verify
+
+
+def test_wraps_only_tuple_elements_that_need_rowbinary_on_old_clickhouse_versions() -> None:
+    # #868 covers NULLs on ClickHouse 24.9-25.2 and aggregate states on 24.9-25.10.
+    mixed: list[Any] = [
+        {"name": "id", "type": "UInt64"},
+        {"name": "price", "type": "Decimal64(2)", "nullable": True},
+        {"name": "tags", "type": "Array(/* a comment */ `Nullable`(String))"},
+        {"name": "label", "type": 'LowCardinality("Nullable"(String))'},
+        {"name": "state", "type": "AggregateFunction(argMax, LowCardinality(String), DateTime)"},
+        {"name": "j", "type": "JSON"},
+        {"name": "named", "type": "Tuple(`Nullable` UInt8)"},
+        {"name": "mixed", "type": "Tuple(a Nullable(UInt8), b JSON)"},
+        {"name": "lower_json", "type": "Tuple(a Nullable(UInt8), b json)"},
+        {"name": "escaped", "type": "Tuple(a Nullable(UInt8), b `\\x4aSON`(x Float64))"},
+        {"name": "label_s", "type": "Nullable(Enum8('j\u017fon' = 1))"},
+        {"name": "n", "type": "Nested(x Nullable(UInt8), y UInt8)"},
+    ]
+    old_def = events(columns=mixed)
+    new_def = events(columns=mixed).model_copy(update={"order_by": ["id", "named"]})
+    cutover = plan(old_def=old_def, new_def=new_def)
+    verify = next(op.sql for op in cutover.operations if op.type == "cutover_verify")
+    row_hash = (
+        "cityHash64(tuple(`id`, toTypeName(`price`), formatRow('RowBinary', `price`), "
+        "toTypeName(`tags`), formatRow('RowBinary', `tags`), "
+        "toTypeName(`label`), formatRow('RowBinary', `label`), "
+        "toTypeName(`state`), formatRow('RowBinary', `state`), `j`, `named`, `mixed`, "
+        "`lower_json`, `escaped`, toTypeName(`label_s`), formatRow('RowBinary', `label_s`), "
+        "toTypeName(`n.x`), formatRow('RowBinary', `n.x`), `n.y`))"
+    )
+    assert f"toUInt8(1) AS src, {row_hash} AS h FROM app.{cutover.names.snapshot} UNION ALL" in verify
+    assert f"toUInt8(0) AS src, {row_hash} AS h FROM app.{cutover.names.shadow})" in verify
 
 
 def test_compares_a_numeric_read_only_setting_by_value() -> None:
