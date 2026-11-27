@@ -15,13 +15,13 @@ from chkit.cli.safety_markers import (
     NonSelectBarrier,
     ScannedDestructiveStatement,
     collect_destructive_operation_markers,
+    collect_destructive_operations,
     collect_unmarked_destructive_statements,
     extract_executable_statements,
     extract_migration_operation_summaries,
     extract_statement_operations,
     find_non_select_barriers,
     is_select_statement,
-    migration_contains_danger_operation,
     migration_contains_destructive_sql,
     scan_destructive_sql_statements,
 )
@@ -99,22 +99,28 @@ def test_extract_summaries_drops_malformed_lines() -> None:
     assert extract_migration_operation_summaries(sql) == []
 
 
-# ---------- migration_contains_danger_operation ----------
+# ---------- collect_destructive_operations (#888) ----------
+
+_DESTRUCTIVE_OPERATIONS_FIXTURE = json.loads(
+    (Path(__file__).resolve().parents[2] / "test/fixtures/destructive-operations.json").read_text(
+        encoding="utf-8"
+    )
+)
 
 
-def test_danger_op_detection_positive() -> None:
-    sql = "-- operation: drop_table key=table:db.t risk=danger\nDROP TABLE t;"
-    assert migration_contains_danger_operation(sql) is True
-
-
-def test_danger_op_detection_negative_when_marker_safe() -> None:
-    sql = "-- operation: create_table key=table:db.t risk=safe\nCREATE TABLE t (id UInt64);"
-    assert migration_contains_danger_operation(sql) is False
-
-
-def test_danger_op_detection_negative_when_no_markers() -> None:
-    sql = "DROP TABLE t;"
-    assert migration_contains_danger_operation(sql) is False
+@pytest.mark.parametrize(
+    ("sql", "operations"),
+    [
+        pytest.param(case["sql"], case["operations"], id=case["name"])
+        for case in _DESTRUCTIVE_OPERATIONS_FIXTURE["cases"]
+    ],
+)
+def test_collect_destructive_operations(sql: str, operations: list[dict[str, str]]) -> None:
+    found = collect_destructive_operations("m.sql", sql)
+    assert [
+        {"type": op.type, "key": op.key, "summary": op.summary, "warningCode": op.warning_code}
+        for op in found
+    ] == operations
 
 
 # ---------- collect_destructive_operation_markers ----------
@@ -215,30 +221,35 @@ def test_scan_flags_extra_unmarked_statement() -> None:
     assert stmt.type == "drop_table"
 
 
-def test_pending_scan_lists_appended_statement_beside_danger_marker_once_each(
+def test_pending_scan_lists_unmarked_and_marked_statements_once_each_in_order(
     tmp_path: Path,
 ) -> None:
-    # Same case as the TS scanDestructive test: both ports list the marked DROP
-    # and the hand-appended one, in that order, each once.
-    (tmp_path / "005_drop_and_appended.sql").write_text(
+    (tmp_path / "005_mixed.sql").write_text(
+        "DROP TABLE default.legacy;\n"
         "-- operation: drop_table key=table:default.old risk=danger\n"
         "DROP TABLE default.old;\n"
-        "DROP TABLE default.legacy;\n",
+        "DROP TABLE default.extra;\n",
         encoding="utf-8",
     )
-    markers = _collect_destructive_markers_for_pending(tmp_path, ["005_drop_and_appended.sql"])
+    markers = _collect_destructive_markers_for_pending(tmp_path, ["005_mixed.sql"])
     assert [(m.migration, m.type, m.key, m.summary) for m in markers] == [
         (
-            "005_drop_and_appended.sql",
+            "005_mixed.sql",
+            "drop_table",
+            "default.legacy",
+            "unmarked destructive SQL: DROP TABLE default.legacy;",
+        ),
+        (
+            "005_mixed.sql",
             "drop_table",
             "table:default.old",
             "drop_table key=table:default.old risk=danger",
         ),
         (
-            "005_drop_and_appended.sql",
+            "005_mixed.sql",
             "drop_table",
-            "default.legacy",
-            "unmarked destructive SQL: DROP TABLE default.legacy;",
+            "default.extra",
+            "unmarked destructive SQL: DROP TABLE default.extra;",
         ),
     ]
 

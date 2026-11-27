@@ -67,18 +67,20 @@ describe('scanDestructive (#2)', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
-  test('lists a statement appended to a migration with risk=danger markers beside the marked one, once each', async () => {
+  test('lists unmarked and marked statements once each in execution order', async () => {
     const { dir, names } = withMigrations({
-      '005_drop_and_appended.sql':
+      '005_mixed.sql':
+        'DROP TABLE default.legacy;\n' +
         '-- operation: drop_table key=table:default.old risk=danger\n' +
         'DROP TABLE default.old;\n' +
-        'DROP TABLE default.legacy;\n',
+        'DROP TABLE default.extra;\n',
     })
     const scan = await scanDestructive(dir, names)
-    expect(scan.migrations).toEqual(['005_drop_and_appended.sql'])
+    expect(scan.migrations).toEqual(['005_mixed.sql'])
     expect(scan.operations.map(({ type, key, summary }) => ({ type, key, summary }))).toEqual([
-      { type: 'drop_table', key: 'table:default.old', summary: 'drop_table key=table:default.old risk=danger' },
       { type: 'drop_table', key: 'default.legacy', summary: 'unmarked destructive SQL: DROP TABLE default.legacy;' },
+      { type: 'drop_table', key: 'table:default.old', summary: 'drop_table key=table:default.old risk=danger' },
+      { type: 'drop_table', key: 'default.extra', summary: 'unmarked destructive SQL: DROP TABLE default.extra;' },
     ])
     rmSync(dir, { recursive: true, force: true })
   })

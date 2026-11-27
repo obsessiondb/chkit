@@ -3,6 +3,7 @@ import {
   extractExecutableStatementsWithComments,
   isTrivia,
   tokenizeSQL,
+  type ExecutableStatementWithComments,
   type SQLToken,
 } from '@chkit/core'
 
@@ -38,14 +39,6 @@ export interface MigrationOperationSummary {
    */
   beforeRetry: string | null
   summary: string
-}
-
-function extractDestructiveOperationSummaries(sql: string): string[] {
-  return sql
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith('-- operation:') && line.includes('risk=danger'))
-    .map((line) => line.replace(/^-- operation:\s*/, ''))
 }
 
 function parseOperationLine(
@@ -287,40 +280,6 @@ function describeDestructiveOperation(
   }
 }
 
-export function collectDestructiveOperationMarkers(
-  migration: string,
-  sql: string
-): DestructiveOperationMarker[] {
-  // A table recreate emits a drop_table + create_table for the SAME key in the
-  // same migration (an engine/ORDER BY/PRIMARY KEY/PARTITION BY/UNIQUE KEY
-  // change). Flag those drops with a louder, distinct warning than a plain drop
-  // so the user knows all rows are lost and the table is recreated empty (#23).
-  const createdTableKeys = new Set(
-    extractMigrationOperationSummaries(sql)
-      .filter((op) => op.type === 'create_table')
-      .map((op) => op.key)
-  )
-  return extractDestructiveOperationSummaries(sql).map((summary) => {
-    const parsed = parseOperationLine(summary, null)
-    const type = parsed?.type ?? 'unknown'
-    const key = parsed?.key ?? 'unknown'
-    const risk = parsed?.risk ?? 'danger'
-    const recreate = type === 'drop_table' && createdTableKeys.has(key)
-    const detail = describeDestructiveOperation(type, { recreate })
-    return {
-      migration,
-      type,
-      key,
-      risk,
-      warningCode: detail.warningCode,
-      reason: detail.reason,
-      impact: detail.impact,
-      recommendation: detail.recommendation,
-      summary,
-    }
-  })
-}
-
 // Defense-in-depth (#2): planner-emitted `-- operation: risk=danger` markers only
 // exist on generated migrations. A hand-written or hand-edited migration can
 // contain destructive SQL with no marker — so we also scan the executable SQL
@@ -383,56 +342,98 @@ export interface ScannedDestructiveStatement {
   statement: string
 }
 
-/**
- * Scan the executable SQL (comments stripped) for destructive statements that
- * are NOT covered by a planner `-- operation:` marker.
- *
- * Generated migrations emit a marker before each statement, so a
- * marker-covered statement is governed by the planner's risk classification
- * and is trusted — e.g. a non-danger `DROP MATERIALIZED VIEW` recreate. Only
- * statements without a marker of their own are flagged (#831): a fully
- * hand-written migration (no markers) or a destructive statement added to a
- * generated one, anywhere in the file.
- */
-export function scanDestructiveSqlStatements(sql: string): ScannedDestructiveStatement[] {
-  const statements = extractExecutableStatements(sql)
-  const operations = extractStatementOperations(sql)
-  const found: ScannedDestructiveStatement[] = []
-  for (let i = 0; i < statements.length; i++) {
-    if (operations[i] !== undefined) continue
-    const statement = statements[i] ?? ''
-    const type = classifyDestructiveStatement(statement)
-    if (type) found.push({ type, statement: statement.trim() })
+const PLANNER_RISKS = new Set(['safe', 'caution', 'danger'])
+
+// Only the last leading operation line can mark the statement for the gate.
+function ownMarker({
+  sql,
+  leadingBlocks,
+}: ExecutableStatementWithComments): MigrationOperationSummary | null {
+  const lines = leadingBlocks.flat()
+  for (const line of lines.reverse()) {
+    if (line.startsWith('-- operation:')) {
+      const first = tokenizeSQL(sql).find((token) => token.kind !== 'whitespace')
+      if (first?.kind === 'line_comment' || first?.kind === 'block_comment') return null
+      const marker = parseOperationLine(line.replace(/^-- operation:\s*/, ''), null)
+      // A risk the planner never writes is not trusted: the SQL is scanned.
+      return marker !== null && PLANNER_RISKS.has(marker.risk) ? marker : null
+    }
+    // Codegen emits only these metadata lines between a marker and its SQL.
+    if (!line.startsWith(BEFORE_RETRY_PREFIX) && !line.startsWith('-- Warning:')) return null
+  }
+  return null
+}
+
+function scanMigrationStatements(sql: string): Array<MigrationOperationSummary | ScannedDestructiveStatement> {
+  const found: Array<MigrationOperationSummary | ScannedDestructiveStatement> = []
+  for (const statement of extractExecutableStatementsWithComments(sql)) {
+    const marker = ownMarker(statement)
+    if (marker !== null) {
+      found.push(marker)
+      continue
+    }
+    const type = classifyDestructiveStatement(statement.sql)
+    if (type !== null) found.push({ type, statement: statement.sql })
   }
   return found
 }
 
-export function migrationContainsDestructiveSql(sql: string): boolean {
-  return scanDestructiveSqlStatements(sql).length > 0
+/** Scan destructively classified SQL that has no planner marker of its own. */
+export function scanDestructiveSqlStatements(sql: string): ScannedDestructiveStatement[] {
+  return scanMigrationStatements(sql).filter((entry) => 'statement' in entry)
 }
 
-/**
- * Synthesize destructive-operation markers for migrations that contain
- * destructive SQL but carry no `-- operation: risk=danger` marker (hand-written
- * migrations). Used as a fallback so these still require --allow-destructive.
- */
-export function collectUnmarkedDestructiveStatements(
+/** List destructive operations in execution order, trusting each statement's own planner marker. */
+export function collectDestructiveOperations(migration: string, sql: string): DestructiveOperationMarker[] {
+  return collectOperations(migration, sql, 'all')
+}
+
+export function collectDestructiveOperationMarkers(migration: string, sql: string): DestructiveOperationMarker[] {
+  return collectOperations(migration, sql, 'planner')
+}
+
+export function collectUnmarkedDestructiveStatements(migration: string, sql: string): DestructiveOperationMarker[] {
+  return collectOperations(migration, sql, 'unmarked')
+}
+
+function collectOperations(
   migration: string,
-  sql: string
+  sql: string,
+  source: 'all' | 'planner' | 'unmarked',
 ): DestructiveOperationMarker[] {
-  return scanDestructiveSqlStatements(sql).map(({ type, statement }) => {
-    const detail = describeDestructiveOperation(type)
-    const preview = statement.length > 120 ? `${statement.slice(0, 117)}...` : statement
-    return {
-      migration,
-      type,
-      key: extractObjectKey(statement),
-      risk: 'danger',
-      warningCode: detail.warningCode,
-      reason: detail.reason,
-      impact: detail.impact,
-      recommendation: detail.recommendation,
-      summary: `unmarked destructive SQL: ${preview}`,
+  const entries = scanMigrationStatements(sql)
+  // A planner drop+create of the same table gets the recreate warning (#23).
+  const createdTableKeys = new Set<string>()
+  for (const entry of entries) {
+    if (!('statement' in entry) && entry.type === 'create_table') createdTableKeys.add(entry.key)
+  }
+
+  const operations: DestructiveOperationMarker[] = []
+  for (const entry of entries) {
+    const { type } = entry
+    if ('statement' in entry) {
+      if (source === 'planner') continue
+      const { statement } = entry
+      const preview = statement.length > 120 ? `${statement.slice(0, 117)}...` : statement
+      operations.push({
+        migration,
+        type,
+        key: extractObjectKey(statement),
+        risk: 'danger',
+        ...describeDestructiveOperation(type),
+        summary: `unmarked destructive SQL: ${preview}`,
+      })
+    } else if (source !== 'unmarked' && entry.risk === 'danger') {
+      const { key, risk, summary } = entry
+      operations.push({
+        migration,
+        type,
+        key,
+        risk,
+        ...describeDestructiveOperation(type, { recreate: type === 'drop_table' && createdTableKeys.has(key) }),
+        summary,
+      })
     }
-  })
+  }
+  return operations
 }

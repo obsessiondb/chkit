@@ -75,10 +75,32 @@ def test_statements_with_comments_group_the_comment_lines_before_each_statement(
     )
     assert extract_executable_statements_with_comments(sql) == [
         ExecutableStatementWithComments(
-            sql="SELECT 1;", comment_blocks=[["-- header", "-- operation: a", "-- before-retry: x"]]
+            sql="SELECT 1;",
+            comment_blocks=[["-- header", "-- operation: a", "-- before-retry: x"]],
+            leading_blocks=[["-- header", "-- operation: a", "-- before-retry: x"]],
         ),
         ExecutableStatementWithComments(
-            sql="/* block */\n\nSELECT\n\n2;", comment_blocks=[["-- operation: b"], ["-- inside"]]
+            sql="/* block */\n\nSELECT\n\n2;",
+            comment_blocks=[["-- operation: b"], ["-- inside"]],
+            leading_blocks=[],
+        ),
+    ]
+
+
+def test_leading_blocks_are_those_only_whitespace_separates_from_the_statement() -> None:
+    # #888, same case as the TS test.
+    sql = "SELECT 1;\n-- leading\n  SELECT\n-- inside\n2;\n-- cut off\n/* x */;\n-- kept\nSELECT 3"
+    assert extract_executable_statements_with_comments(sql) == [
+        ExecutableStatementWithComments(sql="SELECT 1;"),
+        ExecutableStatementWithComments(
+            sql="SELECT\n\n2;",
+            comment_blocks=[["-- leading"], ["-- inside"]],
+            leading_blocks=[["-- leading"]],
+        ),
+        ExecutableStatementWithComments(
+            sql="SELECT 3;",
+            comment_blocks=[["-- cut off"], ["-- kept"]],
+            leading_blocks=[["-- kept"]],
         ),
     ]
 

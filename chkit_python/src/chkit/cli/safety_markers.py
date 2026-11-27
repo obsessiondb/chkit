@@ -9,16 +9,16 @@ Three layers:
    ``write_migration``. Each summary also carries any ``-- before-retry:``
    SQL associated with it (run before each retry).
 
-2. ``collect_destructive_operation_markers`` — among those summaries,
-   keep the ``risk=danger`` ones and decorate them with human-readable
-   ``reason``/``impact``/``recommendation``. Detects table recreate
-   (drop+create same key in one migration) and emits a louder warning.
+2. ``collect_destructive_operations`` — walk the executable statements in
+   order, trusting a leading planner marker when only codegen metadata
+   follows it before the statement. List ``risk=danger`` operations and
+   classify the SQL of statements without their own marker. A planner
+   drop+create of the same table in one migration gets a recreate warning.
 
-3. ``scan_destructive_sql_statements`` + ``collect_unmarked_destructive_statements``
-   — defense-in-depth pass over the executable SQL (comments stripped)
-   that catches hand-written destructive statements lacking a planner
-   marker. Used so a hand-edited migration still requires
-   ``--allow-destructive``.
+3. ``collect_destructive_operation_markers`` and
+   ``collect_unmarked_destructive_statements`` use the same walk to report
+   the planner and unmarked entries, respectively.
+   ``scan_destructive_sql_statements`` returns the unmarked SQL directly.
 
 Re-exports ``extract_executable_statements`` for callers that need both
 the parser and the splitter together.
@@ -33,6 +33,7 @@ from typing import Literal
 
 from chkit.core.sql_lexer import SQLToken, is_trivia, js_regex, js_trim, tokenize_sql
 from chkit.core.sql_splitter import (
+    ExecutableStatementWithComments,
     extract_executable_statements,
     extract_executable_statements_with_comments,
 )
@@ -44,13 +45,13 @@ __all__ = [
     "NonSelectBarrier",
     "ScannedDestructiveStatement",
     "collect_destructive_operation_markers",
+    "collect_destructive_operations",
     "collect_unmarked_destructive_statements",
     "extract_executable_statements",
     "extract_migration_operation_summaries",
     "extract_statement_operations",
     "find_non_select_barriers",
     "is_select_statement",
-    "migration_contains_danger_operation",
     "migration_contains_destructive_sql",
     "scan_destructive_sql_statements",
 ]
@@ -141,19 +142,6 @@ class _OperationDetail:
     reason: str
     impact: str
     recommendation: str
-
-
-def migration_contains_danger_operation(sql: str) -> bool:
-    return len(_extract_destructive_operation_summaries(sql)) > 0
-
-
-def _extract_destructive_operation_summaries(sql: str) -> list[str]:
-    out: list[str] = []
-    for raw_line in sql.split("\n"):
-        line = js_trim(raw_line)
-        if line.startswith("-- operation:") and "risk=danger" in line:
-            out.append(_OPERATION_PREFIX.sub("", line))
-    return out
 
 
 def _parse_operation_line(
@@ -432,44 +420,6 @@ def _describe_destructive_operation(
     )
 
 
-def collect_destructive_operation_markers(
-    migration: str, sql: str
-) -> list[DestructiveOperationMarker]:
-    """Decorate planner ``risk=danger`` markers with reason/impact details.
-
-    A drop_table whose key is ALSO re-created in the same migration gets
-    the louder ``table_recreate_data_loss`` warning instead of the plain
-    ``drop_table_data_loss`` one.
-    """
-    created_table_keys = {
-        op.key
-        for op in extract_migration_operation_summaries(sql)
-        if op.type == "create_table"
-    }
-    markers: list[DestructiveOperationMarker] = []
-    for summary in _extract_destructive_operation_summaries(sql):
-        parsed = _parse_operation_line(summary, None)
-        type_ = parsed.type if parsed is not None else "unknown"
-        key = parsed.key if parsed is not None else "unknown"
-        risk = parsed.risk if parsed is not None else "danger"
-        recreate = type_ == "drop_table" and key in created_table_keys
-        detail = _describe_destructive_operation(type_, recreate=recreate)
-        markers.append(
-            DestructiveOperationMarker(
-                migration=migration,
-                type=type_,
-                key=key,
-                risk=risk,
-                warning_code=detail.warning_code,
-                reason=detail.reason,
-                impact=detail.impact,
-                recommendation=detail.recommendation,
-                summary=summary,
-            )
-        )
-    return markers
-
-
 # ClickHouse also quotes with U+2018/U+2019 (a string) and U+201C/U+201D (a
 # name), which the lexer does not know: it can read an ASCII quote or comment
 # opener inside one as live and so hide real SQL. Where one of these characters
@@ -510,60 +460,119 @@ def _extract_object_key(statement: str) -> str:
     return match.group(1) if match is not None else "unknown"
 
 
-def scan_destructive_sql_statements(sql: str) -> list[ScannedDestructiveStatement]:
-    """Defense-in-depth scan: flag destructive SQL with no matching planner marker.
+_PLANNER_RISKS = frozenset({"safe", "caution", "danger"})
 
-    Generated migrations emit an ``-- operation:`` marker before each
-    statement. A marker-covered statement is trusted to the planner's risk
-    classification. Only statements without a marker of their own are
-    flagged (#831), anywhere in the file.
-    """
-    statements = extract_executable_statements(sql)
-    operations = extract_statement_operations(sql)
-    found: list[ScannedDestructiveStatement] = []
-    for i, statement in enumerate(statements):
-        if operations[i] is not None:
-            continue
-        type_ = _classify_destructive_statement(statement)
-        if type_ is not None:
-            found.append(
-                ScannedDestructiveStatement(type=type_, statement=statement.strip())
+
+def _own_marker(statement: ExecutableStatementWithComments) -> MigrationOperationSummary | None:
+    """Only the last leading operation line can mark the statement for the gate."""
+    lines = [line for block in statement.leading_blocks for line in block]
+    for line in reversed(lines):
+        if line.startswith("-- operation:"):
+            first = next(
+                (token for token in tokenize_sql(statement.sql) if token.kind != "whitespace"),
+                None,
             )
+            if first is not None and first.kind in {"line_comment", "block_comment"}:
+                return None
+            marker = _parse_operation_line(_OPERATION_PREFIX.sub("", line), None)
+            # A risk the planner never writes is not trusted: the SQL is scanned.
+            return marker if marker is not None and marker.risk in _PLANNER_RISKS else None
+        # Codegen emits only these metadata lines between a marker and its SQL.
+        if not line.startswith((_BEFORE_RETRY_PREFIX, "-- Warning:")):
+            return None
+    return None
+
+
+def _scan_migration_statements(
+    sql: str,
+) -> list[MigrationOperationSummary | ScannedDestructiveStatement]:
+    found: list[MigrationOperationSummary | ScannedDestructiveStatement] = []
+    for statement in extract_executable_statements_with_comments(sql):
+        marker = _own_marker(statement)
+        if marker is not None:
+            found.append(marker)
+            continue
+        type_ = _classify_destructive_statement(statement.sql)
+        if type_ is not None:
+            found.append(ScannedDestructiveStatement(type=type_, statement=statement.sql))
     return found
+
+
+def scan_destructive_sql_statements(sql: str) -> list[ScannedDestructiveStatement]:
+    """Scan destructively classified SQL that has no planner marker of its own."""
+    return [
+        entry
+        for entry in _scan_migration_statements(sql)
+        if isinstance(entry, ScannedDestructiveStatement)
+    ]
 
 
 def migration_contains_destructive_sql(sql: str) -> bool:
     return len(scan_destructive_sql_statements(sql)) > 0
 
 
+def collect_destructive_operations(migration: str, sql: str) -> list[DestructiveOperationMarker]:
+    """List destructive operations in execution order, using each statement's own marker."""
+    return _collect_operations(migration, sql, source="all")
+
+
+def collect_destructive_operation_markers(
+    migration: str, sql: str
+) -> list[DestructiveOperationMarker]:
+    return _collect_operations(migration, sql, source="planner")
+
+
 def collect_unmarked_destructive_statements(
     migration: str, sql: str
 ) -> list[DestructiveOperationMarker]:
-    """Synthesize destructive markers for hand-written destructive SQL.
+    return _collect_operations(migration, sql, source="unmarked")
 
-    Migrations carry no planner markers when authored by hand. These would
-    otherwise slip past the ``risk=danger`` check; this layer keeps the
-    ``--allow-destructive`` gate honest.
-    """
-    out: list[DestructiveOperationMarker] = []
-    for entry in scan_destructive_sql_statements(sql):
-        detail = _describe_destructive_operation(entry.type)
-        preview = (
-            entry.statement
-            if len(entry.statement) <= _PREVIEW_MAX_LEN
-            else f"{entry.statement[:_PREVIEW_TRUNCATE_LEN]}..."
-        )
-        out.append(
+
+def _collect_operations(
+    migration: str, sql: str, *, source: Literal["all", "planner", "unmarked"]
+) -> list[DestructiveOperationMarker]:
+    entries = _scan_migration_statements(sql)
+    # A planner drop+create of the same table gets the recreate warning (#23).
+    created_table_keys = {
+        entry.key
+        for entry in entries
+        if isinstance(entry, MigrationOperationSummary) and entry.type == "create_table"
+    }
+
+    operations: list[DestructiveOperationMarker] = []
+    for entry in entries:
+        type_ = entry.type
+        recreate = False
+        if isinstance(entry, ScannedDestructiveStatement):
+            if source == "planner":
+                continue
+            statement = entry.statement
+            preview = (
+                statement
+                if len(statement) <= _PREVIEW_MAX_LEN
+                else f"{statement[:_PREVIEW_TRUNCATE_LEN]}..."
+            )
+            key = _extract_object_key(statement)
+            risk = "danger"
+            summary = f"unmarked destructive SQL: {preview}"
+        else:
+            if source == "unmarked" or entry.risk != "danger":
+                continue
+            key, risk, summary = entry.key, entry.risk, entry.summary
+            recreate = type_ == "drop_table" and key in created_table_keys
+
+        detail = _describe_destructive_operation(type_, recreate=recreate)
+        operations.append(
             DestructiveOperationMarker(
                 migration=migration,
-                type=entry.type,
-                key=_extract_object_key(entry.statement),
-                risk="danger",
+                type=type_,
+                key=key,
+                risk=risk,
                 warning_code=detail.warning_code,
                 reason=detail.reason,
                 impact=detail.impact,
                 recommendation=detail.recommendation,
-                summary=f"unmarked destructive SQL: {preview}",
+                summary=summary,
             )
         )
-    return out
+    return operations
