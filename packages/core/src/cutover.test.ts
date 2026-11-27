@@ -475,15 +475,17 @@ describe('planCutover', () => {
       { name: 'named', type: 'Tuple(`Nullable` UInt8)' },
       { name: 'mixed', type: 'Tuple(a Nullable(UInt8), b JSON)' },
       { name: 'lower_json', type: 'Tuple(a Nullable(UInt8), b json)' },
+      { name: 'escaped', type: 'Tuple(a Nullable(UInt8), b `\\x4aSON`(x Float64))' },
+      { name: 'label_s', type: "Nullable(Enum8('jſon' = 1))" },
       { name: 'n', type: 'Nested(x Nullable(UInt8), y UInt8)' },
     ]
     const oldDef = events({ columns: mixed })
     const newDef = events({ columns: mixed, orderBy: ['id', 'named'] })
     const cutover = plan({ oldDef, newDef })
     const verify = cutover.operations.find((op) => op.type === 'cutover_verify')?.sql ?? ''
-    const hash = "cityHash64(tuple(`id`, formatRow('RowBinary', `price`), formatRow('RowBinary', `tags`), " +
-      "formatRow('RowBinary', `label`), formatRow('RowBinary', `state`), `j`, `named`, `mixed`, " +
-      "`lower_json`, formatRow('RowBinary', `n.x`), `n.y`))"
+    const hash = "cityHash64(tuple(`id`, toTypeName(`price`), formatRow('RowBinary', `price`), toTypeName(`tags`), formatRow('RowBinary', `tags`), " +
+      "toTypeName(`label`), formatRow('RowBinary', `label`), toTypeName(`state`), formatRow('RowBinary', `state`), `j`, `named`, `mixed`, " +
+      "`lower_json`, `escaped`, toTypeName(`label_s`), formatRow('RowBinary', `label_s`), toTypeName(`n.x`), formatRow('RowBinary', `n.x`), `n.y`))"
     expect(verify).toContain(`toUInt8(1) AS src, ${hash} AS h FROM app.${cutover.names.snapshot} UNION ALL`)
     expect(verify).toContain(`toUInt8(0) AS src, ${hash} AS h FROM app.${cutover.names.shadow})`)
   })

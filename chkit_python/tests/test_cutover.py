@@ -279,6 +279,8 @@ def test_wraps_only_tuple_elements_that_need_rowbinary_on_old_clickhouse_version
         {"name": "named", "type": "Tuple(`Nullable` UInt8)"},
         {"name": "mixed", "type": "Tuple(a Nullable(UInt8), b JSON)"},
         {"name": "lower_json", "type": "Tuple(a Nullable(UInt8), b json)"},
+        {"name": "escaped", "type": "Tuple(a Nullable(UInt8), b `\\x4aSON`(x Float64))"},
+        {"name": "label_s", "type": "Nullable(Enum8('j\u017fon' = 1))"},
         {"name": "n", "type": "Nested(x Nullable(UInt8), y UInt8)"},
     ]
     old_def = events(columns=mixed)
@@ -286,9 +288,12 @@ def test_wraps_only_tuple_elements_that_need_rowbinary_on_old_clickhouse_version
     cutover = plan(old_def=old_def, new_def=new_def)
     verify = next(op.sql for op in cutover.operations if op.type == "cutover_verify")
     row_hash = (
-        "cityHash64(tuple(`id`, formatRow('RowBinary', `price`), formatRow('RowBinary', `tags`), "
-        "formatRow('RowBinary', `label`), formatRow('RowBinary', `state`), `j`, `named`, `mixed`, "
-        "`lower_json`, formatRow('RowBinary', `n.x`), `n.y`))"
+        "cityHash64(tuple(`id`, toTypeName(`price`), formatRow('RowBinary', `price`), "
+        "toTypeName(`tags`), formatRow('RowBinary', `tags`), "
+        "toTypeName(`label`), formatRow('RowBinary', `label`), "
+        "toTypeName(`state`), formatRow('RowBinary', `state`), `j`, `named`, `mixed`, "
+        "`lower_json`, `escaped`, toTypeName(`label_s`), formatRow('RowBinary', `label_s`), "
+        "toTypeName(`n.x`), formatRow('RowBinary', `n.x`), `n.y`))"
     )
     assert f"toUInt8(1) AS src, {row_hash} AS h FROM app.{cutover.names.snapshot} UNION ALL" in verify
     assert f"toUInt8(0) AS src, {row_hash} AS h FROM app.{cutover.names.shadow})" in verify

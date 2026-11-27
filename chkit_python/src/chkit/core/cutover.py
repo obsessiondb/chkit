@@ -814,6 +814,8 @@ def _create_cutover_sql(
     # Tuple hashing throws on NULL before ClickHouse 25.3 and hashes AggregateFunction
     # states differently per table before 25.11. RowBinary gives NULL its own flag
     # byte and serializes the state exactly, with each column in its own tuple slot.
+    # RowBinary has no type tags, so the stored type goes beside it: a profile can
+    # create the shadow with another type (data_type_default_nullable).
     # JSON, Object, Dynamic and Variant keep the tuple hash because their RowBinary
     # depends on output settings and how parts store their paths.
     verify_query = " ".join(
@@ -1452,8 +1454,8 @@ def _verify_hash_element(leaf: tuple[str, str]) -> str:
     column_name, type_ = leaf
     column = quote_identifier(column_name)
     # Any spelling of these names keeps the tuple hash; so does a field or label
-    # that only contains one.
-    if re.search(r"json|object|dynamic|variant", type_, re.IGNORECASE):
+    # that only contains one, and a name with an escape, which may spell one.
+    if re.search(r"json|object|dynamic|variant|\\", type_, re.IGNORECASE | re.ASCII):
         return column
     tokens = _type_tokens(type_)
 
@@ -1468,7 +1470,7 @@ def _verify_hash_element(leaf: tuple[str, str]) -> str:
         )
 
     if any(wraps(index) for index in range(len(tokens))):
-        return f"formatRow('RowBinary', {column})"
+        return f"toTypeName({column}), formatRow('RowBinary', {column})"
     return column
 
 

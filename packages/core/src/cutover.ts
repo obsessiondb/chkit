@@ -637,6 +637,8 @@ function createCutoverSql(input: {
   // Tuple hashing throws on NULL before ClickHouse 25.3 and hashes AggregateFunction
   // states differently per table before 25.11. RowBinary gives NULL its own flag
   // byte and serializes the state exactly, with each column in its own tuple slot.
+  // RowBinary has no type tags, so the stored type goes beside it: a profile can
+  // create the shadow with another type (data_type_default_nullable).
   // JSON, Object, Dynamic and Variant keep the tuple hash because their RowBinary
   // depends on output settings and how parts store their paths.
   const verifyQuery = [
@@ -1006,14 +1008,14 @@ function isNullableType(type: string): boolean {
 function verifyHashElement(leaf: { name: string; type: string }): string {
   const column = quoteColumn(leaf.name)
   // Any spelling of these names keeps the tuple hash; so does a field or label
-  // that only contains one.
-  if (/json|object|dynamic|variant/i.test(leaf.type)) return column
+  // that only contains one, and a name with an escape, which may spell one.
+  if (/json|object|dynamic|variant|\\/i.test(leaf.type)) return column
   const tokens = typeTokens(leaf.type)
   const wraps = tokens.some((_, index) => {
     const [name, next] = typeNameAt(tokens, index)
     return (name === 'Nullable' || name === 'AggregateFunction') && tokens[next]?.kind === 'punctuation' && tokens[next]?.text === '('
   })
-  return wraps ? `formatRow('RowBinary', ${column})` : column
+  return wraps ? `toTypeName(${column}), formatRow('RowBinary', ${column})` : column
 }
 
 function typeTokens(type: string): SQLToken[] {
