@@ -143,7 +143,7 @@ def test_mv_query_recreates_view_when_migration_changes_source_column_type() -> 
 
 
 def test_mv_query_recreates_view_reading_recreated_view_through_unchanged_view() -> None:
-    shared = [
+    shared: list[SchemaDefinition] = [
         app_table("src"),
         app_table("out"),
         app_table("up_out"),
