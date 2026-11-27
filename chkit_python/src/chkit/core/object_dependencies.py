@@ -46,6 +46,7 @@ _WITH_MODIFIER: Final[frozenset[str]] = frozenset({"totals", "rollup", "cube", "
 class _ObjectReference:
     database: str
     name: str
+    unqualified: bool = False
 
 
 @dataclass(slots=True)
@@ -347,7 +348,7 @@ def _object_name_argument(
     name = identifier_name(argument)
     after = _text_at(tokens, i + 3)
     if name is not None and after in (",", ")"):
-        return _ObjectReference(own_database, name)
+        return _ObjectReference(own_database, name, unqualified=True)
     return None
 
 
@@ -372,7 +373,7 @@ def _unqualified_table_target(
         return None
     if any(target in scope.cte_names for scope in scopes):
         return None
-    return _ObjectReference(own_database, target)
+    return _ObjectReference(own_database, target, unqualified=True)
 
 
 def _parse_object_name(value: str, own_database: str) -> _ObjectReference | None:
@@ -382,8 +383,21 @@ def _parse_object_name(value: str, own_database: str) -> _ObjectReference | None
     if any(len(part) == 0 for part in parts) or len(parts) > 2:  # noqa: PLR2004
         return None
     if len(parts) == 1:
-        return _ObjectReference(own_database, parts[0])
+        return _ObjectReference(own_database, parts[0], unqualified=True)
     return _ObjectReference(parts[0], parts[1])
+
+
+def has_unqualified_reference(sql: str) -> bool:
+    """Whether the query names an object without specifying its database."""
+    return any(ref.unqualified for ref in _sql_references(sql, ""))
+
+
+def query_column_mentions(sql: str) -> Callable[[str], bool]:
+    """Match case-sensitive identifier names in the query. A star matches every column."""
+    tokens = _significant_tokens(sql)
+    star = any(token.text == "*" for token in tokens)
+    names = {identifier_name(token) for token in tokens}
+    return lambda column: star or column in names
 
 
 def _significant_tokens(sql: str) -> list[SQLToken]:

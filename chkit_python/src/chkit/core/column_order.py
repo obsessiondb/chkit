@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Sequence, Set
+from collections.abc import Callable, Sequence
 
 from chkit.core.canonical import definition_key
 from chkit.core.column_cycle_repair import _cycle_releases, _repaired_order
@@ -24,7 +24,11 @@ from chkit.core.model import (
     SchemaDefinition,
     TableDefinition,
 )
-from chkit.core.object_dependencies import build_dependency_graph, order_by_dependencies
+from chkit.core.object_dependencies import (
+    build_dependency_graph,
+    order_by_dependencies,
+    query_column_mentions,
+)
 from chkit.core.sql import column_type_fingerprint
 
 # The table TTL statement (MODIFY or REMOVE TTL) sorts with the column
@@ -73,11 +77,10 @@ def order_column_statements(  # noqa: PLR0915
     - when the order still closes a cycle in a table whose reads are certain
       (``_repaired_order``), the first breaker in key order runs before the
       MODIFY that closes it (``_break_closed_cycles``, #775);
-    - a MODIFY QUERY runs after the ADD, MODIFY and RENAME of every column of
-      the tables its new query reads or writes, since ClickHouse analyzes the
-      new query, and before the DROP of a column of a table its old query
-      reads or writes, since ClickHouse refuses to drop a column a view still
-      reads;
+    - a MODIFY QUERY runs after an ADD or MODIFY of X or a RENAME to X if
+      its new query mentions X, and before a DROP of X if its old query
+      mentions X, on tables that the respective query reads or writes. A
+      star mentions every column;
     - statements of the same column keep their order.
 
     Members of a cycle keep their key order. The statements fill the positions
@@ -97,14 +100,6 @@ def order_column_statements(  # noqa: PLR0915
         _rename_object_id(rename): _column_object_id(rename.database, rename.table, rename.to)
         for rename in renames
     }
-    query_reads = _materialized_view_query_reads(next_)
-    old_query_reads = _materialized_view_query_reads(previous)
-
-    def changes_column_of(op: MigrationOperation, tables: Set[str]) -> bool:
-        return any(
-            op.key.startswith((f"{table}:column:", f"{table}:column_rename:")) for table in tables
-        )
-
     statements = sorted((op for op in operations if is_column_statement(op)), key=lambda op: op.key)
     queries = [
         index
@@ -112,6 +107,9 @@ def order_column_statements(  # noqa: PLR0915
         if op.type == "alter_materialized_view_modify_query"
     ]
     ids = _statement_object_ids(statements, previous, next_, renames)
+    query_reads = _materialized_view_query_reads(next_) if queries else {}
+    old_query_reads = _materialized_view_query_reads(previous) if queries else {}
+    columns = [_statement_column(renamed_to.get(id_, id_)) for id_ in ids] if queries else []
     # The statements of one object (``ids``) are next to each other in key order.
     last_of: dict[str, int] = {}
     previous_of: list[int | None] = []
@@ -158,14 +156,19 @@ def order_column_statements(  # noqa: PLR0915
             for other in releasers.get(id_, []):
                 found[other] = None
             for query in queries:
-                if changes_column_of(op, old_query_reads.get(statements[query].key, set())):
+                reads_column = old_query_reads.get(statements[query].key)
+                if reads_column is not None and reads_column(columns[index]):
                     found[query] = None
         if op.type == "alter_materialized_view_modify_query":
-            for candidate_index, candidate in enumerate(statements):
-                if candidate.type != "alter_table_drop_column" and changes_column_of(
-                    candidate, query_reads.get(op.key, set())
-                ):
-                    found[candidate_index] = None
+            reads_column = query_reads.get(op.key)
+            if reads_column is not None:
+                for candidate_index, candidate in enumerate(statements):
+                    if candidate.type in (
+                        "alter_table_add_column",
+                        "alter_table_modify_column",
+                        "alter_table_rename_column",
+                    ) and reads_column(columns[candidate_index]):
+                        found[candidate_index] = None
         # A column's last statement is the MODIFY COLUMN that sets its new expression.
         if op.type == "alter_table_modify_column" and last_of[id_] == index:
             for column in releases.get(id_, []):
@@ -201,19 +204,50 @@ def order_column_statements(  # noqa: PLR0915
     return [statements[next(ordered)] if is_column_statement(op) else op for op in operations]
 
 
+def _statement_column(id_: str) -> tuple[str, str] | None:
+    """The exact table key and column name represented by a resolved statement id."""
+    parts: list[str] = json.loads(id_)
+    if parts[0] != "column" or len(parts) != 4:  # noqa: PLR2004
+        return None
+    _, database, table, name = parts
+    return f"table:{database}.{table}", name
+
+
+def dropped_statement_columns(
+    operations: Sequence[MigrationOperation], previous: Sequence[SchemaDefinition]
+) -> list[tuple[str, str]]:
+    drops = [op for op in operations if op.type == "alter_table_drop_column"]
+    if not drops:
+        return []
+    return [
+        column
+        for id_ in _statement_object_ids(drops, previous, (), ())
+        if (column := _statement_column(id_)) is not None
+    ]
+
+
 def _materialized_view_query_reads(
     definitions: Sequence[SchemaDefinition],
-) -> dict[str, set[str]]:
-    """MODIFY QUERY operation key to the keys of the definitions the view reads.
-
-    The view's target is one of them.
-    """
+) -> dict[str, Callable[[tuple[str, str] | None], bool]]:
+    """MODIFY QUERY operation key to whether the query mentions a column it reads or writes."""
     graph = build_dependency_graph(definitions)
-    return {
-        f"{definition_key(definition)}:query": graph.get(definition_key(definition), set())
-        for definition in definitions
-        if isinstance(definition, MaterializedViewDefinition)
-    }
+    reads: dict[str, Callable[[tuple[str, str] | None], bool]] = {}
+    for definition in definitions:
+        if not isinstance(definition, MaterializedViewDefinition):
+            continue
+        key = definition_key(definition)
+        tables = graph.get(key, set())
+        mentions = query_column_mentions(definition.as_)
+
+        def reads_column(
+            column: tuple[str, str] | None,
+            tables: set[str] = tables,
+            mentions: Callable[[str], bool] = mentions,
+        ) -> bool:
+            return column is not None and column[0] in tables and mentions(column[1])
+
+        reads[f"{key}:query"] = reads_column
+    return reads
 
 
 def _statement_object_ids(

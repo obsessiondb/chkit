@@ -215,9 +215,9 @@ def test_new_query_reading_added_column_and_not_dropped_one_migrates_in_place(
         f"SELECT kind, count() AS events FROM {database}.events "
         "WHERE kind != 'heartbeat' GROUP BY kind",
     )
-    assert sorted(project.plan_types()) == [
-        "alter_materialized_view_modify_query",
+    assert project.plan_types() == [
         "alter_table_add_column",
+        "alter_materialized_view_modify_query",
         "alter_table_drop_column",
     ]
     project.migrate("switch", ["--allow-destructive"])

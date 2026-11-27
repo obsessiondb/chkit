@@ -7,7 +7,7 @@ import re
 from collections.abc import Sequence
 
 from chkit.core.canonical import canonicalize_definitions, definition_key
-from chkit.core.column_order import order_column_statements
+from chkit.core.column_order import dropped_statement_columns, order_column_statements
 from chkit.core.column_shape import _column_identity, _columns_equal, _normalized_column
 from chkit.core.constraint import constraint_kind
 from chkit.core.diff_primitives import diff_by_name, diff_clauses, diff_settings
@@ -36,8 +36,10 @@ from chkit.core.model import (
 from chkit.core.object_dependencies import (
     DependencyGraph,
     build_dependency_graph,
+    has_unqualified_reference,
     invert_dependency_graph,
     order_by_dependencies,
+    query_column_mentions,
 )
 from chkit.core.sql import (
     key_fingerprint,
@@ -337,33 +339,21 @@ def _diff_materialized_view(
     old: MaterializedViewDefinition,
     new: MaterializedViewDefinition,
     *,
-    reads_created_object: bool,
+    recreate: bool,
 ) -> list[MigrationOperation]:
     """Plan a changed materialized view (TS diffMaterializedView).
 
     A new query on the same target is a MODIFY QUERY, which swaps the query of
     a view that keeps feeding its target, so no INSERT into its source is
-    missed. The view is dropped and recreated instead when it is refreshable
-    (after MODIFY QUERY it keeps its last result until the next scheduled
-    refresh, while CREATE refreshes at once) or when it reads or writes an
-    object the migration creates, which ClickHouse cannot analyze before that
-    create runs.
+    missed. Recreate it for structural or refreshable query changes,
+    unqualified names in the new query, or dependencies that cannot safely
+    span the swap (objects created, changed or dropped and columns the new
+    query still mentions).
     """
-    old_append = old.refresh is not None and old.refresh.append is True
-    new_append = new.refresh is not None and new.refresh.append is True
-    has_old_refresh = old.refresh is not None
     has_new_refresh = new.refresh is not None
     query_changed = new.as_ != old.as_
 
-    structural = (
-        new.to.database != old.to.database
-        or new.to.name != old.to.name
-        or has_old_refresh != has_new_refresh
-        or old_append != new_append
-        or (query_changed and (has_new_refresh or reads_created_object))
-    )
-
-    if structural:
+    if recreate:
         return [
             MigrationOperation(
                 type="drop_materialized_view",
@@ -410,32 +400,56 @@ def _diff_materialized_views(
     changed_views: Sequence[tuple[MaterializedViewDefinition, MaterializedViewDefinition]],
     operations: Sequence[MigrationOperation],
     create_graph: DependencyGraph,
+    drop_graph: DependencyGraph,
+    dropped_columns: Sequence[tuple[str, str]],
 ) -> list[MigrationOperation]:
-    """Plan the materialized views both schemas hold (TS diffMaterializedViews).
-
-    ``operations`` is the rest of the plan. The views are planned in create
-    order, so a view whose new query reads a view this plan recreates is
-    recreated after it.
-    """
-    created = {op.key for op in operations if op.type.startswith("create_")}
-    planned: list[MigrationOperation] = []
-    for old_view, new_view in order_by_dependencies(
-        changed_views,
-        lambda pair: definition_key(pair[1]),
-        lambda key: create_graph.get(key, ()),
-    ):
-        key = definition_key(new_view)
-        view_ops = _diff_materialized_view(
-            old_view,
-            new_view,
-            reads_created_object=any(
-                dependency in created for dependency in create_graph.get(key, ())
-            ),
+    """Plan the materialized views both schemas hold in dependency order."""
+    query_changes = {definition_key(new) for old, new in changed_views if old.as_ != new.as_}
+    unavailable = query_changes | {op.key for op in operations if op.type.startswith("create_")}
+    dropped = {op.key for op in operations if op.type.startswith("drop_")}
+    for old, new in changed_views:
+        key = definition_key(new)
+        old_append = old.refresh is not None and old.refresh.append is True
+        new_append = new.refresh is not None and new.refresh.append is True
+        if (
+            new.to.database != old.to.database
+            or new.to.name != old.to.name
+            or (old.refresh is None) != (new.refresh is None)
+            or old_append != new_append
+            or (new.refresh is not None and key in query_changes)
+        ):
+            unavailable.add(key)
+            dropped.add(key)
+    for _, new in changed_views:
+        key = definition_key(new)
+        if key not in query_changes or key in dropped:
+            continue
+        reads = create_graph.get(key, ())
+        mentions = query_column_mentions(new.as_)
+        if (
+            any(dependency in unavailable for dependency in reads)
+            or has_unqualified_reference(new.as_)
+            or any(table in reads and mentions(column) for table, column in dropped_columns)
+        ):
+            dropped.add(key)
+    # Every old query that switches away from a dropped object must already be
+    # gone when that object is dropped. Recreating a view can expose more such reads.
+    pending = list(dropped)
+    for key in pending:
+        for dependent in drop_graph.get(key, ()):
+            if dependent not in query_changes or dependent in dropped:
+                continue
+            dropped.add(dependent)
+            pending.append(dependent)
+    return [
+        op
+        for old, new in order_by_dependencies(
+            changed_views,
+            lambda pair: definition_key(pair[1]),
+            lambda key: create_graph.get(key, ()),
         )
-        if any(op.type == "create_materialized_view" for op in view_ops):
-            created.add(key)
-        planned.extend(view_ops)
-    return planned
+        for op in _diff_materialized_view(old, new, recreate=definition_key(new) in dropped)
+    ]
 
 
 def _recreate_drop_risk(old: TableDefinition) -> RiskLevel:
@@ -865,7 +879,7 @@ def _order_operations(
     Drops run dependents first, creates run dependencies first (#231). Alters
     and create_database keep their place, except that the column statements
     of a table are ordered by the columns they read and remove, and a
-    materialized view's MODIFY QUERY by the tables its query reads.
+    materialized view's MODIFY QUERY by the columns its queries mention.
     """
     drops = [op for op in ordered if _rank(op) == 0]
     middle = [op for op in ordered if _rank(op) in (1, 2)]
@@ -941,7 +955,7 @@ def _diff_dictionary(
     ]
 
 
-def plan_diff(
+def plan_diff(  # noqa: PLR0915
     old_definitions: Sequence[SchemaDefinition],
     new_definitions: Sequence[SchemaDefinition],
     *,
@@ -953,6 +967,7 @@ def plan_diff(
     old_map = _map_by_key(old_canonical)
     new_map = _map_by_key(new_canonical)
     create_graph = build_dependency_graph(new_canonical)
+    drop_graph = invert_dependency_graph(build_dependency_graph(old_canonical))
     operations: list[MigrationOperation] = []
     rename_suggestions: list[ColumnRenameSuggestion] = []
     databases_to_create: set[str] = set()
@@ -1006,7 +1021,16 @@ def plan_diff(
         databases_to_create.add(new_def.database)
         _push_create(operations, new_def, "safe")
 
-    operations.extend(_diff_materialized_views(changed_views, operations, create_graph))
+    if changed_views:
+        operations.extend(
+            _diff_materialized_views(
+                changed_views,
+                operations,
+                create_graph,
+                drop_graph,
+                dropped_statement_columns(operations, old_canonical),
+            )
+        )
 
     for database in sorted(databases_to_create):
         _push_create_database(operations, database, "safe")
@@ -1016,7 +1040,7 @@ def plan_diff(
     operations.sort(key=lambda op: (_rank(op), _alter_rank(op), op.key))
     operations = _order_operations(
         operations,
-        drop=invert_dependency_graph(build_dependency_graph(old_canonical)),
+        drop=drop_graph,
         create=create_graph,
         previous=old_canonical,
         next_=new_canonical,

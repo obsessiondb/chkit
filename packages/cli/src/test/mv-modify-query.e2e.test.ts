@@ -109,9 +109,9 @@ describe('materialized view query change e2e (#760)', () => {
           `table(${JSON.stringify(countsTable(database))})`,
           `materializedView(${JSON.stringify(countsView(database, `SELECT kind, count() AS events FROM ${database}.events WHERE kind != 'heartbeat' GROUP BY kind`))})`,
         ])
-        expect(planTypes(fixture).sort()).toEqual([
-          'alter_materialized_view_modify_query',
+        expect(planTypes(fixture)).toEqual([
           'alter_table_add_column',
+          'alter_materialized_view_modify_query',
           'alter_table_drop_column',
         ])
         await generateAndMigrate(fixture, 'switch', ['--allow-destructive'])
