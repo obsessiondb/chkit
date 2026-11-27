@@ -111,6 +111,8 @@ export interface PluginContext {
   executor: ClickHouseExecutor
   /** True when an executor was provided (either from config or a plugin). False when using the null executor. */
   hasExecutor: boolean
+  /** True when the executor was built from the clickhouse config block and uses clickhouse.url. */
+  configExecutor?: boolean
 }
 
 export interface ChxGetContextInput {

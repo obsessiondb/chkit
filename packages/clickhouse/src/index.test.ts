@@ -4,6 +4,7 @@ import {
   assertStreamedQuerySucceeded,
   ClickHouseStreamedException,
   createClickHouseExecutor,
+  insertSettingsFromUrl,
   createExecutorWithClient,
   createSessionClickHouseClient,
   createStatelessClickHouseExecutor,
@@ -36,6 +37,44 @@ type InsertCall = {
   values: Array<Record<string, unknown>>
   columns?: string[]
 }
+
+test.each([
+  ['http://localhost/?ch_async_insert=1&clickhouse_setting_wait_for_async_insert=0', { async_insert: '1', wait_for_async_insert: '0' }],
+  ['http://localhost/?clickhouse_setting_async_insert=0&ch_async_insert=TRUE&ch_wait_for_async_insert', { async_insert: 'TRUE', wait_for_async_insert: '' }],
+  ['http://localhost/?ch_async_insert=0&ch_async_insert=1&clickhouse_setting_async_insert=1', { async_insert: '1' }],
+  ['http://localhost/?clickhouse_setting_async_insert=1&clickhouse_setting_async_insert=0', { async_insert: '0' }],
+  ['http://localhost/?ch_async_insert=1&ch_wait_for_async_insert=0&clickhouse_setting_wait_for_async_insert=1&ch_wait_for_async_insert=1', { async_insert: '1', wait_for_async_insert: '1' }],
+  [' http://localhost/?ch_async_insert=0\t \n', { async_insert: '0' }],
+  ['http://localhost/?ch_async_insert=%201+', { async_insert: ' 1 ' }],
+  ['http://localhost/?ch_max_threads=4&async_insert=1', undefined],
+  ['http://localhost/', undefined],
+  ['http://[broken/?ch_async_insert=1', undefined],
+  ['http://localhost:bad/?ch_async_insert=1', undefined],
+] as const)('extracts migration insert settings from %s (#879)', (url, expected) => {
+  expect(insertSettingsFromUrl(url)).toEqual(expected)
+})
+
+test('sends insert settings after the profile even when the URL contains them (#879)', async () => {
+  const requests: URLSearchParams[] = []
+  const server = Bun.serve({ port: 0, fetch(request) {
+    requests.push(new URL(request.url).searchParams)
+    return new Response('')
+  } })
+  const db = createClickHouseExecutor({
+    url: new URL('?ch_async_insert=1&ch_wait_for_async_insert=0', server.url).href,
+    username: 'default', password: '', database: 'default', secure: false,
+  })
+  try {
+    const settings = Object.fromEntries([['profile', 'x'], ['async_insert', '1'], ['wait_for_async_insert', '0']])
+    await db.command('INSERT INTO t VALUES (1)', settings)
+    await db.command('INSERT INTO t VALUES (2)')
+    const keys = ['profile', 'async_insert', 'wait_for_async_insert']
+    expect(requests.map((params) => [...params].filter(([key]) => keys.includes(key)))).toEqual([
+      [['profile', 'x'], ['async_insert', '1'], ['wait_for_async_insert', '0']],
+      [['async_insert', '0'], ['wait_for_async_insert', '1']],
+    ])
+  } finally { await db.close(); server.stop(true) }
+})
 
 describe('tracked command physical attempts (#732)', () => {
   test('control sends its own query id and receipt settings without command routing', async () => {

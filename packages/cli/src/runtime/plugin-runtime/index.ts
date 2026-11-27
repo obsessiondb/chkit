@@ -108,6 +108,7 @@ export async function loadPluginRuntime(input: {
       const defaults: PluginContext = {
         executor: wrapExecutorWithDebug(rawExecutor),
         hasExecutor: hasClickhouseConfig,
+        configExecutor: hasClickhouseConfig,
       }
       let ctx = defaults
       for (const item of loaded) {
@@ -130,7 +131,7 @@ export async function loadPluginRuntime(input: {
             } else if (ctx === defaults && defaults.executor !== NULL_EXECUTOR) {
               await defaults.executor.close()
             }
-            ctx = { ...ctx, ...result, hasExecutor: true }
+            ctx = { ...ctx, ...result, hasExecutor: true, configExecutor: false }
           }
         } catch (error) {
           await ctx.executor.close()

@@ -897,6 +897,40 @@ const SILENT_CLIENT_LOG = { level: ClickHouseLogLevel.OFF }
 // timeout entirely — TCP keepalive still detects dead connections.
 const NO_REQUEST_TIMEOUT = 0
 
+const INSERT_SETTING_URL_KEYS = new Map([
+	['ch_async_insert', 'async_insert'],
+	['clickhouse_setting_async_insert', 'async_insert'],
+	['ch_wait_for_async_insert', 'wait_for_async_insert'],
+	['clickhouse_setting_wait_for_async_insert', 'wait_for_async_insert'],
+])
+
+/**
+ * Reads the two insert settings migrate accepts from the connection URL
+ * (#879). The last assignment of a setting wins, under either prefix, as with
+ * repeated `--setting` flags.
+ */
+export function insertSettingsFromUrl(url: string): Record<string, string> | undefined {
+	if (!URL.canParse(url)) return undefined
+	let settings: Record<string, string> | undefined
+	for (const [key, value] of new URL(url).searchParams) {
+		const name = INSERT_SETTING_URL_KEYS.get(key)
+		if (name === undefined) continue
+		settings ??= {}
+		settings[name] = value
+	}
+	return settings
+}
+
+function clientUrl(url: string): string {
+	if (!URL.canParse(url)) return url
+	const parsed = new URL(url)
+	const keys = [...INSERT_SETTING_URL_KEYS.keys()].filter((key) => parsed.searchParams.has(key))
+	if (!keys.length) return url
+	// Keep these out of client settings so per-write settings follow profile (#879).
+	for (const key of keys) parsed.searchParams.delete(key)
+	return parsed.href
+}
+
 // @clickhouse/client takes credentials in the URL over username/password and logs
 // a warning for each override, whatever the log level. Leaving out what the URL
 // sets keeps the same credentials without the warnings.
@@ -914,7 +948,7 @@ export function createStatelessClickHouseClient(
 	options: ClickHouseClientOptions = {},
 ): ClickHouseClient {
 	return createClient({
-		url: config.url,
+		url: clientUrl(config.url),
 		...credentialOptions(config),
 		database: config.database,
 		application: CHKIT_APPLICATION_ID,
@@ -940,7 +974,7 @@ export function createSessionClickHouseClient(
 	options: ClickHouseClientOptions = {},
 ): ClickHouseClient {
 	return createClient({
-		url: config.url,
+		url: clientUrl(config.url),
 		...credentialOptions(config),
 		database: config.database,
 		session_id: sessionId,
@@ -1020,7 +1054,7 @@ export function createExecutorWithClient(
 					check?.()
 				}
 				const fallback = createClient({
-					url: config.url,
+					url: clientUrl(config.url),
 					...credentialOptions(config),
 					application: CHKIT_APPLICATION_ID,
 					request_timeout: NO_REQUEST_TIMEOUT,

@@ -21,7 +21,7 @@ const RESERVED_NAMES: ReadonlySet<string> = new Set([
 ])
 
 /**
- * What every migration write sends unless `--setting` names it, so that a
+ * What every migration write sends by default, so that a
  * statement migrate journals as applied is stored (#790), each with the
  * guarantee another value turns off. The client sends them after the other
  * settings, so a settings profile among those cannot change them.
@@ -66,30 +66,54 @@ export function parseSettingFlags(values: readonly string[] | undefined): ClickH
 }
 
 /**
- * The one warning line a migrate run prints when `--setting` gives
- * async_insert or wait_for_async_insert another value than chkit's default,
- * or undefined (#790).
+ * A migration statement's settings: the insert settings clickhouse.url sets,
+ * with `--setting` on top, as the driver lets request settings replace URL
+ * ones (#879).
  */
-export function insertSettingsOverrideWarning(settings: ClickHouseSettings | undefined): string | undefined {
+export function mergeMigrationSettings(
+  flagSettings: ClickHouseSettings | undefined,
+  urlSettings: ClickHouseSettings | undefined,
+): ClickHouseSettings | undefined {
+  return urlSettings ? { ...urlSettings, ...flagSettings } : flagSettings
+}
+
+/** The single warning for effective insert settings that differ from the defaults (#790, #879). */
+export function insertSettingsOverrideWarning(
+  flagSettings: ClickHouseSettings | undefined,
+  urlSettings?: ClickHouseSettings,
+): string | undefined {
+  const settings = mergeMigrationSettings(flagSettings, urlSettings)
   const overridden = [...INSERT_SETTING_DEFAULTS].flatMap(([name, { value, guarantee }]) => {
     const own = settings?.[name]
-    return own === undefined || plainSettingValue(own) === value ? [] : [`${name}=${String(own)} (${guarantee})`]
+    if (own === undefined || plainSettingValue(own) === value) return []
+    const source = flagSettings?.[name] === undefined ? 'clickhouse.url' : '--setting'
+    return [{ assignment: `${name}=${String(own)}`, source, guarantee }]
   })
-  if (overridden.length === 0) return undefined
-  return `Warning: --setting overrides what every migration write sets by default: ${overridden.join('; ')}.`
+  if (!overridden[0]) return undefined
+  const mixed = new Set(overridden.map(({ source }) => source)).size > 1
+  const source = mixed ? '--setting and clickhouse.url override' : `${overridden[0].source} overrides`
+  const entries = overridden.map((entry) =>
+    `${entry.assignment}${mixed ? ` from ${entry.source}` : ''} (${entry.guarantee})`,
+  )
+  return `Warning: ${source} what every migration write sets by default: ${entries.join('; ')}.`
 }
 
 /**
  * Refuses an applying run, before anything is sent, for a user whose settings
  * constraints fix async_insert or wait_for_async_insert at another value than
- * a write sends: a migration statement sends the `--setting` value if any,
+ * a write sends: a migration statement sends any flag or URL override,
  * chkit's own journal writes chkit's default (#790). A readonly = 1 user is
  * left to the server's own refusal of its writes. A failed read stops the
  * run, as any failed request does, except while the configured database does
  * not exist yet: a run that creates it is then left to the server's refusal
  * of its writes.
  */
-export async function assertInsertSettingsChangeable(db: ClickHouseExecutor, settings?: ClickHouseSettings): Promise<void> {
+export async function assertInsertSettingsChangeable(
+  db: ClickHouseExecutor,
+  flagSettings?: ClickHouseSettings,
+  urlSettings?: ClickHouseSettings,
+): Promise<void> {
+  const settings = mergeMigrationSettings(flagSettings, urlSettings)
   let rows: Array<{ name: string; value: unknown; readonly: unknown }>
   try {
     rows = await db.query("SELECT name, value, readonly FROM system.settings WHERE name IN ('readonly', 'async_insert', 'wait_for_async_insert')")
@@ -105,7 +129,9 @@ export async function assertInsertSettingsChangeable(db: ClickHouseExecutor, set
     const fixed = String(row.value)
     const own = settings?.[name]
     if (own !== undefined && plainSettingValue(own) !== fixed) {
-      throw new MigrateError('insert_settings_fixed', `Setting ${name} is fixed at ${fixed} for this ClickHouse user, so --setting ${name}=${String(own)} cannot apply. Nothing ran.`)
+      const assignment = `${name}=${String(own)}`
+      const override = flagSettings?.[name] === undefined ? `${assignment} from clickhouse.url` : `--setting ${assignment}`
+      throw new MigrateError('insert_settings_fixed', `Setting ${name} is fixed at ${fixed} for this ClickHouse user, so ${override} cannot apply. Nothing ran.`)
     }
     if (value !== fixed) throw new MigrateError('insert_settings_fixed', insertSettingsFixedMessage(name, fixed, value))
   }

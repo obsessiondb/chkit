@@ -92,35 +92,57 @@ def parse_setting_flags(values: Sequence[str] | None) -> dict[str, str] | None:
     return settings
 
 
-def insert_settings_override_warning(settings: dict[str, str] | None) -> str | None:
-    """The one warning line a migrate run prints when ``--setting`` gives
-    ``async_insert`` or ``wait_for_async_insert`` another value than chkit's
-    default, or None (#790). TS ``insertSettingsOverrideWarning``."""
-    overridden = [
-        f"{name}={(settings or {})[name]} ({guarantee})"
-        for name, (default, guarantee) in _INSERT_SETTING_DEFAULTS.items()
-        if name in (settings or {}) and plain_setting_value((settings or {})[name]) != default
-    ]
+def merge_migration_settings(
+    flag_settings: dict[str, str] | None, url_settings: dict[str, str] | None
+) -> dict[str, str] | None:
+    """A migration statement's settings: the insert settings clickhouse.url
+    sets, with ``--setting`` on top, as the TS driver lets request settings
+    replace URL ones (#879). TS ``mergeMigrationSettings``."""
+    return {**url_settings, **(flag_settings or {})} if url_settings else flag_settings
+
+
+def insert_settings_override_warning(
+    flag_settings: dict[str, str] | None, url_settings: dict[str, str] | None = None
+) -> str | None:
+    """The single warning for effective insert settings that differ from the defaults."""
+    flags = flag_settings or {}
+    settings = merge_migration_settings(flag_settings, url_settings) or {}
+    overridden: list[tuple[str, str, str]] = []
+    for name, (default, guarantee) in _INSERT_SETTING_DEFAULTS.items():
+        own = settings.get(name)
+        if own is None or plain_setting_value(own) == default:
+            continue
+        source = "--setting" if name in flags else "clickhouse.url"
+        overridden.append((f"{name}={own}", source, guarantee))
     if not overridden:
         return None
+    mixed = len({source for _, source, _ in overridden}) > 1
+    source = "--setting and clickhouse.url override" if mixed else f"{overridden[0][1]} overrides"
+    entries = [
+        f"{assignment}{f' from {origin}' if mixed else ''} ({guarantee})"
+        for assignment, origin, guarantee in overridden
+    ]
     return (
-        "Warning: --setting overrides what every migration write sets by default: "
-        f"{'; '.join(overridden)}."
+        f"Warning: {source} what every migration write sets by default: "
+        f"{'; '.join(entries)}."
     )
 
 
 def assert_insert_settings_changeable(
-    client: ClickHouseClient, settings: dict[str, str] | None = None
+    client: ClickHouseClient,
+    flag_settings: dict[str, str] | None = None,
+    url_settings: dict[str, str] | None = None,
 ) -> None:
     """Refuse an applying run, before anything is sent, for a user whose
     settings constraints fix ``async_insert`` or ``wait_for_async_insert`` at
-    another value than a write sends: a migration statement sends the
-    ``--setting`` value if any, chkit's own journal writes chkit's default
+    another value than a write sends: a migration statement sends any flag
+    or URL override, chkit's own journal writes chkit's default
     (#790). A ``readonly = 1`` user is left to the server's own refusal of its
     writes. A failed read stops the run, as any failed request does, except
     while the configured database does not exist yet: a run that creates it is
     then left to the server's refusal of its writes.
     TS ``assertInsertSettingsChangeable``."""
+    settings = merge_migration_settings(flag_settings, url_settings) or {}
     try:
         rows = client.query(
             "SELECT name, value, readonly FROM system.settings "
@@ -139,11 +161,16 @@ def assert_insert_settings_changeable(
         if row is None or str(row["readonly"]) == "0":
             continue
         fixed = str(row["value"])
-        own = (settings or {}).get(name)
+        own = settings.get(name)
         if own is not None and plain_setting_value(own) != fixed:
+            assignment = f"{name}={own}"
+            override = (
+                f"--setting {assignment}"
+                if name in (flag_settings or {}) else f"{assignment} from clickhouse.url"
+            )
             msg = (
                 f"Setting {name} is fixed at {fixed} for this ClickHouse user, so "
-                f"--setting {name}={own} cannot apply. Nothing ran."
+                f"{override} cannot apply. Nothing ran."
             )
             raise MigrateError("insert_settings_fixed", msg)
         if default != fixed:

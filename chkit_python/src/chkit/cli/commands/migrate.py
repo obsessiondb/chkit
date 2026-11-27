@@ -123,6 +123,7 @@ from chkit.cli.commands.migrate_scope import filter_pending_by_scope
 from chkit.cli.commands.migrate_settings import (
     assert_insert_settings_changeable,
     insert_settings_override_warning,
+    merge_migration_settings,
     parse_setting_flags,
 )
 from chkit.cli.config_loader import load_config
@@ -154,6 +155,7 @@ from chkit.cli.table_scope import (
     table_keys_from_definitions,
 )
 from chkit.clickhouse.client import ClickHouseClient, clickhouse_error_message
+from chkit.clickhouse.insert_settings import insert_settings_from_url
 from chkit.clickhouse.replicas import ReplicaFanout
 from chkit.core.model import ChxConfigEnv, ChxResolvedConfig, configured_index_granularity
 from chkit.core.sql_fingerprint import statement_fingerprint
@@ -167,7 +169,7 @@ class _MigrateContext:
     json_mode: bool
     execute_requested: bool
     allow_destructive: bool
-    # --setting values, sent with every migration statement.
+    # Effective settings sent with every migration statement.
     settings: dict[str, str] | None
     mode: str
     migrations_dir: Path
@@ -431,10 +433,7 @@ def _run(
             "--cancel-lock-queries requires explicit --apply, --break-lock <claim>, "
             "an enabled migrate lock and query tracking, and no --abandon.",
         )
-    settings = parse_setting_flags(setting)
-    override_warning = insert_settings_override_warning(settings)
-    if override_warning:
-        typer.echo(override_warning, err=True)
+    flag_settings = parse_setting_flags(setting)
     config = load_config(config_path, ChxConfigEnv(command="migrate"))
     plugin_runtime = load_plugin_runtime(
         [p for p in config.plugins if isinstance(p, ChxPlugin)]
@@ -448,6 +447,15 @@ def _run(
         service=service,
         flags=hook_flags,
     )
+    url_settings = (
+        insert_settings_from_url(config.clickhouse.url)
+        if executor is None and config.clickhouse is not None else None
+    )
+    settings = merge_migration_settings(flag_settings, url_settings)
+    override_warning = insert_settings_override_warning(flag_settings, url_settings)
+    if override_warning:
+        typer.echo(override_warning, err=True)
+
     if executor is None and config.clickhouse is None:
         msg = "clickhouse config is required for migrate (journal is stored in ClickHouse)"
         exit_no_target("migrate", msg, json_mode=output_json)
@@ -519,7 +527,9 @@ def _run(
         )
         # Reading the journal can upgrade its schema, a write (#790).
         if execute_requested:
-            assert_insert_settings_changeable(cast(ClickHouseClient, raw_client), settings)
+            assert_insert_settings_changeable(
+                cast(ClickHouseClient, raw_client), flag_settings, url_settings
+            )
         journal = journal_store.read_journal(project_files=files)
         applied_names = {entry.name for entry in journal.applied}
         ctx = _MigrateContext(
@@ -542,7 +552,8 @@ def _run(
             retry_target=targets.retry_target,
             with_lock=_MigrateLockRunner(
                 raw_client=raw_client,
-                settings=settings,
+                flag_settings=flag_settings,
+                url_settings=url_settings,
                 journal_store=journal_store,
                 initial_identity=initial_identity,
                 migrations_dir=migrations_dir,
@@ -1085,7 +1096,8 @@ class _MigrateLockRunner(WithLock):
         self,
         *,
         raw_client: Any,
-        settings: dict[str, str] | None = None,
+        flag_settings: dict[str, str] | None = None,
+        url_settings: dict[str, str] | None = None,
         journal_store: JournalStore,
         holder: _LockHolder,
         break_lock: str | None,
@@ -1097,7 +1109,8 @@ class _MigrateLockRunner(WithLock):
         initial_identity: QueryIdentity | None = None,
     ) -> None:
         self._raw_client = raw_client
-        self._settings = settings
+        self._flag_settings = flag_settings
+        self._url_settings = url_settings
         self._initial_identity = initial_identity
         self._journal_store = journal_store
         self._holder = holder
@@ -1147,7 +1160,9 @@ class _MigrateLockRunner(WithLock):
         abandon: str | None, lock_state: InterruptLock,
     ) -> _T:
         # Every run that writes passes here first, interactive or not (#790).
-        assert_insert_settings_changeable(self._raw_client, self._settings)
+        assert_insert_settings_changeable(
+            self._raw_client, self._flag_settings, self._url_settings
+        )
         if migrate_lock_disabled():
             typer.echo(
                 "⚠ CHKIT_MIGRATE_LOCK is off: this run takes no migrate lock, so a "
