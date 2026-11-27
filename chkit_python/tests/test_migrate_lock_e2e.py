@@ -35,10 +35,13 @@ from tests.e2e_testkit import (
     wait_for_table_on_every_replica,
 )
 
+# Two consecutive heartbeat write+read-back cycles plus the interval must fit
+# within valid_ms on a remote replicated target. Keep the lease longer so the
+# expiry test's crashed run has lapsed by the time its claim expires.
 SHORT = replace(
     LOCK_TIMINGS,
-    lease_ms=12_000,
-    valid_ms=6_000,
+    lease_ms=25_000,
+    valid_ms=20_000,
     heartbeat_ms=1_000,
     observe_margin_ms=2_000,
     attempts=1,
@@ -126,8 +129,10 @@ def test_a_held_lock_stops_another_run_until_it_is_released(live: Live) -> None:
     refused = _refused(live.other, live.target)
     assert refused.code == "migrate_locked"
     assert f"pid {os.getpid()}" in refused.message
-    # Heartbeats keep it held past the lease.
-    time.sleep((SHORT.lease_ms + 1_000) / 1000)
+    # Heartbeats keep it held past the lease. The first renewal is sent
+    # within valid_ms of the claim and holds for valid_ms from its send, so
+    # a run still holding after 2 * valid_ms renewed at least twice.
+    time.sleep((2 * SHORT.valid_ms + 1_000) / 1000)
     held.assert_held()
     assert _refused(live.other, live.target).code == "migrate_locked"
     held.release()
