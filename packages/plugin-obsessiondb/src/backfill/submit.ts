@@ -278,7 +278,7 @@ interface PreparedSubmission {
 	stateDir?: string
 	/** The failed or cancelled job that a `--plan-id` re-submission replaces. */
 	replacedJob?: ReplacedJob
-	/** Chunks a re-submission leaves out because they finished in the replaced job. */
+	/** Chunks a re-submission leaves out because they already finished. */
 	skippedChunks?: number
 }
 

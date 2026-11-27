@@ -62,7 +62,7 @@ describe('tinybird import command', () => {
         datasource: { translated: 13, untranslatable: 1 },
         materialized: { translated: 5, untranslatable: 0 },
         copy: { translated: 5, untranslatable: 2 },
-        endpoint: { translated: 4, untranslatable: 1 },
+        endpoint: { translated: 5, untranslatable: 1 },
         // The Kafka connection file.
         skipped: 1,
       },
@@ -99,7 +99,7 @@ describe('tinybird import command', () => {
     const { code, printed } = await runImport({ '--out-file': outFile, '--dryrun': true }, false)
     expect(code).toBe(0)
     expect(String(printed[0])).toBe(
-      'Tinybird import preview (datasource: 13 translated, 1 not; materialized: 5 translated, 0 not; copy: 5 translated, 2 not; endpoint: 4 translated, 1 not)'
+      'Tinybird import preview (datasource: 13 translated, 1 not; materialized: 5 translated, 0 not; copy: 5 translated, 2 not; endpoint: 5 translated, 1 not)'
     )
     expect(printed.some((line) => String(line).startsWith("import { schema, table, materializedView } from '@chkit/core'"))).toBe(true)
     expect(await access(outFile).then(() => true, () => false)).toBe(false)
