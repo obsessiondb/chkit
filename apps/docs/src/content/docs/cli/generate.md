@@ -127,21 +127,12 @@ chkit generate --name events_by_user --cutover analytics.events=id
 
 ### When a cutover does not fit
 
-A table without a unique key, a change that transforms rows, an engine that merges rows, or a table the cutover's first statement refuses (such as a `Replicated` table created without `PRIMARY KEY` whose replication path has no `{uuid}`, on ClickHouse before 26.7) needs a reviewed manual migration, with writers paused from the copy until the swap:
+A table without a unique key, a change that transforms rows, or an engine that merges rows needs a reviewed [hand-written migration](/guides/migration-workflow/#hand-written-migrations) instead of `--cutover`. chkit does not mirror, verify or guard such a migration: pause the writers from the copy until the swap, run its DDL on every replica (`ON CLUSTER` with `clickhouse.cluster`), and run `chkit drift` after it is applied.
 
-1. Keep the schema unchanged and scaffold a migration with `chkit generate --empty --name copy_events`. In it, create the new table as `analytics.events_previous` with the new definition, copy the rows with `INSERT INTO analytics.events_previous SELECT ... FROM analytics.events`, applying the transformation you need, and validate the copy with a guard such as `SELECT throwIf(...)`. `generate` and `check` warn about the copy's `INSERT`; the warning does not stop them. For a `Replicated` table, give the new table its own replication path: ClickHouse expands `{table}` when it creates the table, so each table keeps its path after the swap.
-2. Change the schema to the final definition of `analytics.events`, and declare the old layout as `analytics.events_previous` if you keep it. Run `chkit generate`, which records the final definitions in the snapshot, and replace the statements it planned for both tables with a guard and the swap:
+The cutover's first statement also refuses a `Replicated` table created without `PRIMARY KEY` whose replication path in the schema has no `{uuid}`, while a replica runs ClickHouse older than 26.7: the cutover's snapshot then takes `PRIMARY KEY` from the schema, and the table's parts do not attach to it. The statement creates and copies nothing, so either:
 
-```sql
--- operation: cutover_validate key=table:analytics.events:cutover:before_exchange risk=caution
-SELECT throwIf((SELECT sorting_key FROM system.tables WHERE database = 'analytics' AND name = 'events') != 'id', 'events is no longer on its old layout; inspect before you retry');
-
--- operation: exchange_tables key=table:analytics.events risk=caution
--- before-retry: SELECT throwIf((SELECT sorting_key FROM system.tables WHERE database = 'analytics' AND name = 'events') != 'id', 'the EXCHANGE may already have run')
-EXCHANGE TABLES analytics.events AND analytics.events_previous;
-```
-
-3. Apply both migrations, check that `chkit status`, `chkit drift`, `chkit check` and `chkit generate --dryrun` report nothing left to do, and resume the writers. To drop the old table, remove `analytics.events_previous` from the schema later, a normal destructive change, or leave it out of the schema in step 2 and add `DROP TABLE analytics.events_previous` after the swap.
+- upgrade every replica to ClickHouse 26.7 or later and run `chkit migrate --apply` again, or
+- remove the cutover migration as [Abandoning a failed migration](/cli/migrate/#abandoning-a-failed-migration) describes (delete the file and restore `chkit/meta/snapshot.json` from git to its state before the cutover was generated), then move the table with a hand-written migration.
 
 ### Dictionary password warnings
 
