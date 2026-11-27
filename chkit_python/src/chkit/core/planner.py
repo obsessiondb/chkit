@@ -403,6 +403,7 @@ def _reachable(graph: DependencyGraph, start: str) -> set[str]:
             if following not in seen:
                 seen.add(following)
                 pending.append(following)
+    seen.discard(start)
     return seen
 
 
@@ -432,6 +433,10 @@ def _diff_materialized_views(
             dropped.add(key)
         elif not _refresh_equal(old.refresh, new.refresh):
             unavailable.add(key)
+    # The objects whose old definitions read a changed table, through unchanged views too.
+    changed_table_readers = {
+        reader for table in changed_tables for reader in _reachable(drop_graph, table)
+    }
     for old, new in changed_views:
         key = definition_key(new)
         if key not in query_changes or key in dropped:
@@ -440,10 +445,8 @@ def _diff_materialized_views(
         reads = _reachable(create_graph, key)
         if (
             any(dependency in unavailable for dependency in reads)
-            or any(
-                table in reads or key in _reachable(drop_graph, table)
-                for table in changed_tables
-            )
+            or any(table in reads for table in changed_tables)
+            or key in changed_table_readers
             or has_unqualified_reference(old.as_)
             or has_unqualified_reference(new.as_)
         ):
@@ -452,7 +455,7 @@ def _diff_materialized_views(
     # gone when that object is dropped. Recreating a view can expose more such reads.
     pending = list(dropped)
     for key in pending:
-        for dependent in drop_graph.get(key, ()):
+        for dependent in _reachable(drop_graph, key):
             if dependent not in query_changes or dependent in dropped:
                 continue
             dropped.add(dependent)

@@ -365,6 +365,7 @@ function reachable(graph: DependencyGraph, start: string): Set<string> {
       pending.push(next)
     }
   }
+  seen.delete(start)
   return seen
 }
 
@@ -394,6 +395,8 @@ function diffMaterializedViews(
       unavailable.add(key)
     }
   }
+  // The objects whose old definitions read a changed table, through unchanged views too.
+  const changedTableReaders = new Set([...changedTables].flatMap((table) => [...reachable(dropGraph, table)]))
   for (const [oldDef, newDef] of changedViews) {
     const key = definitionKey(newDef)
     if (!queryChanges.has(key) || dropped.has(key)) continue
@@ -401,7 +404,8 @@ function diffMaterializedViews(
     const reads = reachable(createGraph, key)
     if (
       [...reads].some((dependency) => unavailable.has(dependency)) ||
-      [...changedTables].some((table) => reads.has(table) || reachable(dropGraph, table).has(key)) ||
+      [...changedTables].some((table) => reads.has(table)) ||
+      changedTableReaders.has(key) ||
       hasUnqualifiedReference(oldDef.as) ||
       hasUnqualifiedReference(newDef.as)
     ) dropped.add(key)
@@ -410,7 +414,7 @@ function diffMaterializedViews(
   // gone when that object is dropped. Recreating a view can expose more such reads.
   const pending = [...dropped]
   for (const key of pending) {
-    for (const dependent of dropGraph.get(key) ?? []) {
+    for (const dependent of reachable(dropGraph, key)) {
       if (!queryChanges.has(dependent) || dropped.has(dependent)) continue
       dropped.add(dependent)
       pending.push(dependent)
