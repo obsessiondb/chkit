@@ -1000,12 +1000,8 @@ def _run_destructive_gate(ctx: _MigrateContext, pending: list[str]) -> None:
         raise typer.Exit(code=3)
 
     if not confirm_destructive_execution(destructive_markers):
-        typer.secho(
-            f"Destructive migration cancelled by user. "
-            f"Destructive migrations: {', '.join(destructive_files)}",
-            fg=typer.colors.RED,
-            err=True,
-        )
+        typer.secho("Destructive migration cancelled by user.", fg=typer.colors.RED, err=True)
+        typer.echo(f"Destructive migrations: {', '.join(destructive_files)}", err=True)
         raise typer.Exit(code=3)
 
 
