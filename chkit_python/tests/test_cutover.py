@@ -730,6 +730,17 @@ def test_checks_every_replica_stores_uuid_in_the_path_when_the_snapshot_is_creat
     assert "FROM clusterAllReplicas('c2', view(" in start
 
 
+def test_forces_skip_unavailable_shards_off_on_statement_1_with_a_cluster() -> None:
+    engine = "ReplicatedMergeTree"
+    start = plan(
+        old_def=events(["id"], engine=engine),
+        new_def=events(["user_id", "id"], engine=engine),
+        cluster="c2",
+    ).operations[0].sql
+    assert start.endswith(")) SETTINGS skip_unavailable_shards = 0;")
+    assert "skip_unavailable_shards" not in plan().operations[0].sql
+
+
 def test_checks_the_table_stores_the_stored_columns_and_computes_the_alias_ones() -> None:
     # The mirror, the copy and the verify skip an ALIAS column, so a stored one would
     # lose its values. TS cutover.test.ts asserts the same.
