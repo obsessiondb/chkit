@@ -366,6 +366,13 @@ describe('planCutover', () => {
     expect(start).toContain("FROM clusterAllReplicas('c2', view(")
   })
 
+  test('forces skip_unavailable_shards = 0 on statement 1 with a cluster, so a user setting cannot skip a replica (#866)', () => {
+    const engine = 'ReplicatedMergeTree'
+    const start = plan({ oldDef: { ...OLD, engine }, newDef: { ...NEW, engine }, options: { cluster: 'c2' } }).operations[0]?.sql
+    expect(start).toEndWith(')) SETTINGS skip_unavailable_shards = 0, use_query_cache = 0;')
+    expect(plan().operations[0]?.sql).not.toContain('skip_unavailable_shards')
+  })
+
   test('checks the table stores the columns the schema stores, and computes the ALIAS and EPHEMERAL ones', () => {
     // The mirror, the copy and the verify skip an ALIAS column, so a stored one would lose its values.
     // chkit-py's test_cutover.py asserts the same.

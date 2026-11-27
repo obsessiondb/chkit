@@ -1097,7 +1097,11 @@ def _create_cutover_sql(
                 if settings_match
                 else []
             ),
-            f"FROM {every_replica(validate_start_query)};",
+            # Query-level SETTINGS override profile, URL and --setting values, so an
+            # unreachable replica fails this statement instead of being skipped, and no
+            # cached result stands in for asking every replica (#866).
+            f"FROM {every_replica(validate_start_query)}"
+            f"{' SETTINGS skip_unavailable_shards = 0, use_query_cache = 0' if cluster else ''};",
         ]
     )
     sync_replicas = (

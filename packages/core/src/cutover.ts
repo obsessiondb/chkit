@@ -726,6 +726,9 @@ function createCutoverSql(input: {
             `  throwIf(min(settings) = 0, ${stringLiteral(`${target} does not store the read-only settings this migration expects (${expectedSettings}), so the cutover would stop at the EXCHANGE. Nothing was created or copied. A table that does not declare index_granularity stores the server's MergeTree default, which chkit takes as ${indexGranularity}: check it with SELECT value FROM system.merge_tree_settings WHERE name = 'index_granularity', set clickhouse.indexGranularity to it, run chkit drift, and generate the cutover again.`)})`,
           ]
         : []),
+      // Query-level SETTINGS override profile, URL and --setting values, so an
+      // unreachable replica fails this statement instead of being skipped, and no
+      // cached result stands in for asking every replica (#866).
       `FROM ${everyReplica(
         [
           // Both snapshot paths use ATTACH PARTITION ALL FROM, which needs ClickHouse 24.9.
@@ -746,7 +749,7 @@ function createCutoverSql(input: {
           `${pendingMutations} AS mutations${settingsMatch ? ',' : ''}`,
           ...(settingsMatch ? [settingsMatch] : []),
         ].join(' ')
-      )};`,
+      )}${cluster ? ' SETTINGS skip_unavailable_shards = 0, use_query_cache = 0' : ''};`,
     ].join('\n'),
     createMirror: `CREATE MATERIALIZED VIEW IF NOT EXISTS ${q(names.mirror)} TO ${q(names.shadow)} AS\nSELECT ${columnList} FROM ${q(table)};`,
     insertBarrier: "SELECT query_id FROM system.processes WHERE query_kind IN ('Insert', 'AsyncInsertFlush');",
