@@ -1,0 +1,34 @@
+DESCRIPTION >
+    Set operations over other nodes, inside a CTE and a FROM list, with
+    queries in parens that open with another paren.
+
+NODE clickers
+SQL >
+    SELECT user_id FROM events WHERE event_type = 'click'
+
+NODE carters
+SQL >
+    SELECT user_id FROM events WHERE event_type = 'add_to_cart'
+
+NODE buyers
+SQL >
+    SELECT user_id FROM events WHERE event_type = 'purchase'
+
+NODE endpoint
+SQL >
+    WITH engaged_buyers AS (
+        ( SELECT ALL user_id FROM clickers
+          UNION DISTINCT
+          SELECT ALL user_id FROM carters )
+        INTERSECT
+        SELECT ALL user_id from buyers
+    )
+    SELECT
+        e.user_id,
+        count() AS hits,
+        (SELECT count(DISTINCT user_id) FROM buyers) AS all_buyers
+    FROM engaged_buyers AS e, ((SELECT 1 AS one FROM clickers) UNION ALL SELECT 1 AS one FROM carters) AS u
+    WHERE u.one = 1
+    GROUP BY e.user_id
+
+TYPE endpoint
