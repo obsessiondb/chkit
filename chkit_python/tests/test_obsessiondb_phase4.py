@@ -988,7 +988,9 @@ def test_run_onboarding_claim_verified_uses_the_token_from_this_signup(
     requests = httpx_mock.get_requests()
     paths = [r.url.path for r in requests]
     assert "/rpc/services/claimInstance" in paths
-    after_sign_in = requests[paths.index("/api/auth/sign-in/email-otp") + 1 :]
+    sign_in, *after_sign_in = requests
+    assert sign_in.url.path == "/api/auth/sign-in/email-otp"
+    assert "authorization" not in sign_in.headers
     assert all(r.headers["authorization"] == "Bearer token-b" for r in after_sign_in)
     selected = load_selected_service(cfg)
     assert selected is not None

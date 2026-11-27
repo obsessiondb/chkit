@@ -158,7 +158,8 @@ describe('runOnboarding claim with an earlier login of another account on disk',
     await runOnboarding({ configPath, connect: 'claim', email: 'b@example.com', code: '123456' })
 
     expect(requests.map((r) => r.path)).toContain('/rpc/services/claimInstance')
-    const afterSignIn = requests.slice(requests.findIndex((r) => r.path === '/api/auth/sign-in/email-otp') + 1)
+    const [signIn, ...afterSignIn] = requests
+    expect(signIn).toEqual({ path: '/api/auth/sign-in/email-otp', auth: null })
     expect(afterSignIn.every((r) => r.auth === 'Bearer token-b')).toBe(true)
     expect(await loadSelectedService(configPath)).toEqual({ service_slug: 'dev-b', service_name: 'dev-b' })
   })
