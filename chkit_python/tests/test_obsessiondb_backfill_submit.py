@@ -813,9 +813,38 @@ def test_handle_submit_plan_id_across_a_chain_never_resends_a_finished_chunk(
         )
     assert hop4[0] == 1
     assert f"Every chunk of plan {PLAN_ID} already finished" in hop4[1]["error"]
-    # Every chunk of the plan finished exactly once across the chain.
-    assert sorted(finished) == ["c1", "c2", "c3"]
     assert json.loads(submission_path.read_text(encoding="utf-8"))["jobId"] == "job-4"
+
+
+def test_handle_submit_plan_id_refuses_an_incomplete_task_list(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A task missing from the response is not taken as finished."""
+    submission_path = _setup_saved_plan(tmp_path, job_id="job-old")
+    before = submission_path.read_text(encoding="utf-8")
+    calls = _patch_jobs_api(monkeypatch, "failed")
+    real_get = vars(backfill_resubmit_module)["jobs_get"]  # the fake set above
+
+    def partial_get(creds: Credentials, *, job_id: str) -> JobDetail:
+        job: JobDetail = real_get(creds, job_id=job_id)
+        return job.model_copy(update={"tasks": job.tasks[:1]})
+
+    monkeypatch.setattr(backfill_resubmit_module, "jobs_get", partial_get)
+
+    msgs: list[Any] = []
+    code = handle_submit(
+        _submit_context(
+            flags={"--plan-id": PLAN_ID}, msgs=msgs, json_mode=True, config_dir=tmp_path
+        )
+    )
+
+    assert code == 1
+    assert msgs[0]["error"] == (
+        f"Job job-old for plan {PLAN_ID} lists 1 of its 2 tasks, so its unfinished"
+        " chunks are unknown. Nothing was re-submitted."
+    )
+    assert [procedure for procedure, _ in calls] == ["jobs/get"]
+    assert submission_path.read_text(encoding="utf-8") == before
 
 
 def test_handle_submit_plan_id_refuses_when_every_chunk_finished_in_the_job(

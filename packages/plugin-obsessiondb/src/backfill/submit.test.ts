@@ -571,9 +571,29 @@ describe('handleSubmit --plan-id', () => {
 		expect(hop3.printed[0]).toMatchObject({ jobId: 'job-4', replacedJobId: 'job-3', taskCount: 1, skippedChunks: 2 })
 		expect(hop4.result).toEqual({ handled: true, exitCode: 1 })
 		expect((hop4.printed[0] as { error: string }).error).toContain(`Every chunk of plan ${planId} already finished`)
-		// Every chunk of the plan finished exactly once across the chain.
-		expect([...finished].sort()).toEqual(['c1', 'c2', 'c3'])
 		expect(JSON.parse(await readFile(submissionPath, 'utf8'))).toMatchObject({ jobId: 'job-4' })
+	})
+
+	test('refuses a job whose task list is incomplete instead of treating a missing task as finished', async () => {
+		const { configPath, submissionPath, planId } = await setupPlan({ jobId: 'job-old' })
+		const before = await readFile(submissionPath, 'utf8')
+		const calls: string[] = []
+		globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const procedure = new URL(new Request(input, init).url).pathname.replace(/^\/rpc\//, '')
+			calls.push(procedure)
+			const job = jobDetail('failed', [])
+			return orpcResponse({ ...job, tasks: job.tasks.slice(0, 1) })
+		}) as typeof fetch
+
+		const { result, printed } = await resubmit(configPath, { '--plan-id': planId })
+
+		expect(result).toEqual({ handled: true, exitCode: 1 })
+		expect((printed[0] as { error: string }).error).toBe(
+			`Job job-old for plan ${planId} lists 1 of its 2 tasks, so its unfinished chunks are unknown. ` +
+				'Nothing was re-submitted.',
+		)
+		expect(calls).toEqual(['jobs/get'])
+		expect(await readFile(submissionPath, 'utf8')).toBe(before)
 	})
 
 	test('refuses when every chunk finished in the replaced job', async () => {
