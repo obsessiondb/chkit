@@ -715,14 +715,17 @@ def _create_cutover_sql(
             " SETTINGS show_create_query_identifier_quoting_rule = 'always'",
         )
     )
+    server_version = (
+        "toUInt32OrZero(splitByChar('.', version())[1]) "
+        "* 100 + toUInt32OrZero(splitByChar('.', version())[2])"
+    )
     # A snapshot rendered from the old definition always declares PRIMARY KEY.
     # Before ClickHouse 26.7 parts attach only between tables that both declare
     # it or both leave it out; 26.7 compares the key by value.
     declared_key = (
         f"({table_count(table)} = 0 OR (SELECT any(position(engine_full, ' PRIMARY KEY ') > 0) "
         f"FROM system.tables WHERE database = {_string_literal(database)} "
-        f"AND name = {_string_literal(table)}) OR toUInt32OrZero(splitByChar('.', version())[1]) "
-        "* 100 + toUInt32OrZero(splitByChar('.', version())[2]) >= 2607) AS declared_key"
+        f"AND name = {_string_literal(table)}) OR {server_version} >= 2607) AS declared_key"
         if snapshot_from_definition
         else None
     )
@@ -862,7 +865,9 @@ def _create_cutover_sql(
 
     validate_start_query = " ".join(
         [
-            f"SELECT (SELECT count() FROM system.databases WHERE name = "
+            # Both snapshot paths use ATTACH PARTITION ALL FROM, which needs ClickHouse 24.9.
+            f"SELECT {server_version} >= 2409 AS supported_version,",
+            f"(SELECT count() FROM system.databases WHERE name = "
             f"{_string_literal(database)} AND engine IN ('Atomic', 'Replicated')) AS atomic,",
             f"{table_count(table)} AS present,",
             f"{stored_engine},",
@@ -882,6 +887,13 @@ def _create_cutover_sql(
     validate_start = "\n".join(
         [
             "SELECT",
+            "  throwIf(min(supported_version) = 0, "
+            + _string_literal(
+                "A cutover needs ClickHouse 24.9 or later on every replica: an older server "
+                "cannot attach the table's parts to the snapshot (ATTACH PARTITION ALL FROM). "
+                "Nothing was created or copied."
+            )
+            + "),",
             "  throwIf(min(atomic) = 0, "
             + _string_literal(
                 f"Database {database} must use the Atomic or Replicated engine: "

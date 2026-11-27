@@ -598,11 +598,12 @@ function createCutoverSql(input: {
         'no_ttl',
         " SETTINGS show_create_query_identifier_quoting_rule = 'always'"
       )
+  const serverVersion = "toUInt32OrZero(splitByChar('.', version())[1]) * 100 + toUInt32OrZero(splitByChar('.', version())[2])"
   // A snapshot rendered from the old definition always declares PRIMARY KEY.
   // Before ClickHouse 26.7 parts attach only between tables that both declare
   // it or both leave it out; 26.7 compares the key by value.
   const declaredKey = snapshotFromDefinition
-    ? `(${tableCount(table)} = 0 OR (SELECT any(position(engine_full, ' PRIMARY KEY ') > 0) FROM system.tables WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(table)}) OR toUInt32OrZero(splitByChar('.', version())[1]) * 100 + toUInt32OrZero(splitByChar('.', version())[2]) >= 2607) AS declared_key`
+    ? `(${tableCount(table)} = 0 OR (SELECT any(position(engine_full, ' PRIMARY KEY ') > 0) FROM system.tables WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(table)}) OR ${serverVersion} >= 2607) AS declared_key`
     : undefined
   // Per replica: 1 when the condition holds. A guard throws unless every replica reports 1.
   const guard = (condition: string, message: string) =>
@@ -675,6 +676,7 @@ function createCutoverSql(input: {
   return {
     validateStart: [
       'SELECT',
+      `  throwIf(min(supported_version) = 0, ${stringLiteral("A cutover needs ClickHouse 24.9 or later on every replica: an older server cannot attach the table's parts to the snapshot (ATTACH PARTITION ALL FROM). Nothing was created or copied.")}),`,
       `  throwIf(min(atomic) = 0, ${stringLiteral(`Database ${database} must use the Atomic or Replicated engine: EXCHANGE TABLES needs it.`)}),`,
       `  throwIf(min(present) = 0, ${stringLiteral(`Table ${target} does not exist.`)}),`,
       `  throwIf(min(stored_engine) = 0, ${stringLiteral(`${target} does not use the engine the schema declares (${oldEngine}). The cutover's snapshot, created AS the table, would take its engine, and an engine such as SummingMergeTree or ReplacingMergeTree merges rows away before they are copied. Nothing was created or copied. Run chkit drift, change the schema to match the table, and generate the cutover again.`)}),`,
@@ -706,7 +708,9 @@ function createCutoverSql(input: {
         : []),
       `FROM ${everyReplica(
         [
-          `SELECT (SELECT count() FROM system.databases WHERE name = ${stringLiteral(database)} AND engine IN ('Atomic', 'Replicated')) AS atomic,`,
+          // Both snapshot paths use ATTACH PARTITION ALL FROM, which needs ClickHouse 24.9.
+          `SELECT ${serverVersion} >= 2409 AS supported_version,`,
+          `(SELECT count() FROM system.databases WHERE name = ${stringLiteral(database)} AND engine IN ('Atomic', 'Replicated')) AS atomic,`,
           `${tableCount(table)} AS present,`,
           `${storedEngine},`,
           `${undeclaredColumns},`,
