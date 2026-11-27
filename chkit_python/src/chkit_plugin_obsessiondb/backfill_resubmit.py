@@ -5,6 +5,7 @@ Port of ``packages/plugin-obsessiondb/src/backfill/resubmit.ts``.
 ``backfill submit --plan-id <id>`` re-submits only a plan whose job failed or
 was cancelled, and only with the chunks that job carried but did not finish, so
 no chunk is written twice, however often a plan is re-submitted.
+A plan is re-submitted only once every run of its job is done or failed.
 """
 
 from __future__ import annotations
@@ -82,6 +83,30 @@ def load_plan_for_resubmit(
             f"Job {job_id} for plan {plan_id} lists {len(carried)} of its"
             f" {job.total_tasks} tasks, so its unfinished chunks are unknown."
             " Nothing was re-submitted."
+        )
+        raise ValueError(msg)
+    unsettled_chunks: dict[str, None] = {}
+    for task in job.tasks:
+        runs = task.get("runs")
+        if not isinstance(runs, list) or any(
+            not isinstance(run, dict) or run.get("status") not in ("done", "failed")
+            for run in runs
+        ):
+            unsettled_chunks[task["id"]] = None
+    if unsettled_chunks:
+        chunks = list(unsettled_chunks)
+        extra_chunks = len(chunks) - 5
+        listed_chunks = ", ".join(chunks[:5]) + (
+            f" and {extra_chunks} more" if extra_chunks > 0 else ""
+        )
+        chunk_suffix = "" if len(chunks) == 1 else "s"
+        msg = (
+            f"Job {job_id} for plan {plan_id} has runs that are not done or failed yet,"
+            f" for chunk{chunk_suffix} {listed_chunks}. A re-submit now could write"
+            " those chunks twice."
+            f" Wait until every run of job {job_id} is done or failed"
+            f" (chkit plugin backfill status --job-id {job_id} --json lists them),"
+            " then re-submit. Nothing was re-submitted."
         )
         raise ValueError(msg)
     finished = {

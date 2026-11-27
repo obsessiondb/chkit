@@ -579,6 +579,8 @@ def _patch_jobs_api(
     monkeypatch: pytest.MonkeyPatch,
     status: str,
     done_task_ids: tuple[str, ...] = (),
+    *,
+    tasks: list[dict[str, Any]] | None = None,
 ) -> list[tuple[str, dict[str, Any]]]:
     """``jobs_get`` answers with a job in ``status`` whose tasks ``done_task_ids``
     finished; ``jobs_submit`` returns job-new.
@@ -595,13 +597,13 @@ def _patch_jobs_api(
                 "target": "app.events",
                 "status": status,
                 "concurrency": 4,
-                "totalTasks": 2,
+                "totalTasks": len(tasks) if tasks is not None else 2,
                 "completedTasks": len(done_task_ids),
                 "failedTasks": 0,
                 "createdAt": "2026-03-29T00:00:00Z",
                 "updatedAt": "2026-03-29T01:00:00Z",
                 "maxRetries": 3,
-                "tasks": [
+                "tasks": tasks if tasks is not None else [
                     {
                         "id": task_id,
                         "taskIndex": index,
@@ -789,11 +791,11 @@ def test_handle_submit_plan_id_across_a_chain_never_resends_a_finished_chunk(
             assert [t for t in task_ids if t in finished] == []
         return code, msgs[0]
 
-    # job-1: c1 finished on its retry; c2 was still running and c3 never started.
-    hop1 = end_job_and_resubmit("job-1", "failed", {"c1": ["failed", "done"], "c2": ["running"]})
-    # job-2: c2 finished; c3 was still pending when the job was cancelled.
-    hop2 = end_job_and_resubmit("job-2", "cancelled", {"c2": ["done"], "c3": ["pending"]})
-    # job-3: c3 failed again.
+    # job-1 had a successful retry for c1, a failed run for c2, and no runs for c3.
+    hop1 = end_job_and_resubmit("job-1", "failed", {"c1": ["failed", "done"], "c2": ["failed"]})
+    # job-2 finished c2 and was cancelled before c3 started.
+    hop2 = end_job_and_resubmit("job-2", "cancelled", {"c2": ["done"], "c3": []})
+    # job-3 failed its first run of c3.
     hop3 = end_job_and_resubmit("job-3", "failed", {"c3": ["failed"]})
     # job-4: c3 finished, so nothing is owed any more.
     hop4 = end_job_and_resubmit("job-4", "failed", {"c3": ["done"]})
@@ -814,6 +816,149 @@ def test_handle_submit_plan_id_across_a_chain_never_resends_a_finished_chunk(
     assert hop4[0] == 1
     assert f"Every chunk of plan {PLAN_ID} already finished" in hop4[1]["error"]
     assert json.loads(submission_path.read_text(encoding="utf-8"))["jobId"] == "job-4"
+
+
+def _expect_unsettled_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    status: str,
+    plan: BackfillPlanState,
+    tasks: list[dict[str, Any]],
+    *,
+    chunks: str,
+) -> None:
+    submission_path = _setup_saved_plan(tmp_path, job_id="job-old", plan=plan)
+    before = submission_path.read_text(encoding="utf-8")
+    calls = _patch_jobs_api(monkeypatch, status, tasks=tasks)
+
+    msgs: list[Any] = []
+    code = handle_submit(
+        _submit_context(
+            flags={"--plan-id": PLAN_ID}, msgs=msgs, json_mode=True, config_dir=tmp_path
+        )
+    )
+
+    assert code == 1
+    assert msgs[0] == {
+        "ok": False,
+        "command": "backfill submit",
+        "error": (
+            f"Job job-old for plan {PLAN_ID} has runs that are not done or failed yet, for {chunks}."
+            " A re-submit now could write those chunks twice."
+            " Wait until every run of job job-old is done or failed"
+            " (chkit plugin backfill status --job-id job-old --json lists them),"
+            " then re-submit. Nothing was re-submitted."
+        ),
+    }
+    assert [procedure for procedure, _ in calls] == ["jobs/get"]
+    assert submission_path.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize("status", ["failed", "cancelled"])
+@pytest.mark.parametrize("require_idempotency_token", [True, False])
+@pytest.mark.parametrize(
+    "run_fields",
+    [{"status": "running"}, {"status": "pending"}, {"status": "queued"}, {}, {"status": None}],
+    ids=["running", "pending", "queued", "missing", "null"],
+)
+def test_handle_submit_plan_id_refuses_unsettled_runs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    status: str,
+    require_idempotency_token: bool,
+    run_fields: dict[str, Any],
+) -> None:
+    _expect_unsettled_refusal(
+        monkeypatch,
+        tmp_path,
+        status,
+        make_plan(require_idempotency_token=require_idempotency_token),
+        [
+            {"id": "c1", "runs": [{"type": "insert", "status": "done"}]},
+            {"id": "c2", "runs": [{"type": "insert", **run_fields}]},
+        ],
+        chunks="chunk c2",
+    )
+
+
+@pytest.mark.parametrize("task", [{"id": "c2"}, {"id": "c2", "runs": {}}], ids=["missing", "non-list"])
+@pytest.mark.parametrize("require_idempotency_token", [True, False])
+def test_handle_submit_plan_id_refuses_invalid_runs_field(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    task: dict[str, Any],
+    require_idempotency_token: bool,
+) -> None:
+    _expect_unsettled_refusal(
+        monkeypatch,
+        tmp_path,
+        "failed",
+        make_plan(require_idempotency_token=require_idempotency_token),
+        [{"id": "c1", "runs": [{"type": "insert", "status": "done"}]}, task],
+        chunks="chunk c2",
+    )
+
+
+@pytest.mark.parametrize("require_idempotency_token", [True, False])
+def test_handle_submit_plan_id_lists_at_most_five_unsettled_chunks_in_task_order(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, require_idempotency_token: bool
+) -> None:
+    plan = make_plan(require_idempotency_token=require_idempotency_token)
+    chunks = plan.chunk_plan.chunks
+    chunks.extend(chunks[1].model_copy(update={"id": f"c{index}"}) for index in range(3, 8))
+    _expect_unsettled_refusal(
+        monkeypatch,
+        tmp_path,
+        "failed",
+        plan,
+        [
+            {
+                "id": "c2",
+                "runs": [
+                    {"type": "insert", "status": "running"},
+                    {"type": "cleanup", "status": "pending"},
+                ],
+            },
+            *[
+                {"id": chunk_id, "runs": [{"type": "insert", "status": "pending"}]}
+                for chunk_id in ("c1", "c3", "c4", "c5", "c6", "c7")
+            ],
+        ],
+        chunks="chunks c2, c1, c3, c4, c5 and 2 more",
+    )
+
+
+@pytest.mark.parametrize("statuses", [["failed"], []], ids=["only-failed-runs", "no-runs"])
+@pytest.mark.parametrize("require_idempotency_token", [True, False])
+def test_handle_submit_plan_id_resubmits_owed_chunk_when_all_runs_are_settled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    statuses: list[str],
+    require_idempotency_token: bool,
+) -> None:
+    _setup_saved_plan(
+        tmp_path, job_id="job-old", plan=make_plan(require_idempotency_token=require_idempotency_token)
+    )
+    calls = _patch_jobs_api(
+        monkeypatch,
+        "cancelled",
+        ("c1",),
+        tasks=[
+            {"id": "c1", "runs": [{"type": "insert", "status": status} for status in ("failed", "done")]},
+            {"id": "c2", "runs": [{"type": "insert", "status": status} for status in statuses]},
+        ],
+    )
+
+    msgs: list[Any] = []
+    code = handle_submit(
+        _submit_context(
+            flags={"--plan-id": PLAN_ID}, msgs=msgs, json_mode=True, config_dir=tmp_path
+        )
+    )
+
+    assert code == 0
+    assert [procedure for procedure, _ in calls] == ["jobs/get", "jobs/submit"]
+    assert [task.id for task in calls[1][1]["tasks"]] == ["c2"]
 
 
 @pytest.mark.parametrize("task_ids", [("c1",), ("c1", "unknown")])

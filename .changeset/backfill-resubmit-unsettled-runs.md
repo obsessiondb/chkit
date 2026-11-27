@@ -1,0 +1,5 @@
+---
+"@chkit/plugin-obsessiondb": patch
+---
+
+`chkit plugin backfill submit --plan-id` now refuses while the failed or cancelled job still reports a run that is not done or failed, instead of sending that chunk again.

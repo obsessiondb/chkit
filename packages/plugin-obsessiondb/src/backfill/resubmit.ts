@@ -13,6 +13,7 @@ export interface ReplacedJob {
  * was cancelled is re-submitted, and only with the chunks that job carried but
  * did not finish, so no chunk is written twice, however often a plan is
  * re-submitted.
+ * A plan is re-submitted only once every run of its job is done or failed.
  */
 export async function loadPlanForResubmit(
 	input: {
@@ -54,6 +55,23 @@ export async function loadPlanForResubmit(
 		throw new Error(
 			`Job ${jobId} for plan ${planId} lists ${carried.size} of its ${job.totalTasks} tasks, ` +
 				'so its unfinished chunks are unknown. Nothing was re-submitted.',
+		)
+	}
+	const unsettledChunks = new Set<string>()
+	for (const task of job.tasks) {
+		if (!Array.isArray(task.runs) || task.runs.some((run) => run?.status !== 'done' && run?.status !== 'failed')) {
+			unsettledChunks.add(task.id)
+		}
+	}
+	if (unsettledChunks.size > 0) {
+		const chunks = [...unsettledChunks]
+		const extraChunks = chunks.length - 5
+		const listedChunks = chunks.slice(0, 5).join(', ') + (extraChunks > 0 ? ` and ${extraChunks} more` : '')
+		throw new Error(
+			`Job ${jobId} for plan ${planId} has runs that are not done or failed yet, ` +
+				`for chunk${chunks.length === 1 ? '' : 's'} ${listedChunks}. A re-submit now could write those chunks twice. ` +
+				`Wait until every run of job ${jobId} is done or failed ` +
+				`(chkit plugin backfill status --job-id ${jobId} --json lists them), then re-submit. Nothing was re-submitted.`,
 		)
 	}
 	const finished = new Set(
