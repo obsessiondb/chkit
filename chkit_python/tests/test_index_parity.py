@@ -510,9 +510,9 @@ def test_changes_mv_query_in_place_when_target_stays_the_same() -> None:
         [mv("SELECT id FROM app.users")],
         [mv("SELECT id FROM app.users WHERE id > 0", "positive ids")],
     )
-    assert sorted(op.type for op in plan.operations) == [
-        "alter_materialized_view_modify_query",
+    assert [op.type for op in plan.operations] == [
         "alter_table_modify_comment",
+        "alter_materialized_view_modify_query",
     ]
     assert plan.risk_summary.model_dump() == {"safe": 1, "caution": 1, "danger": 0}
 

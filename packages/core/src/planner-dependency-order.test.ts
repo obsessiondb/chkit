@@ -48,90 +48,65 @@ describe('materialized view query dependency order', () => {
     materializedView({ database: 'app', name, to: { database: 'app', name: target }, as })
   const types = (old: SchemaDefinition[], next: SchemaDefinition[]) => planDiff(old, next).operations.map((op) => op.type)
   const id = { name: 'id', type: 'UInt64' }
-  const dbTable = (name: string, columns: ColumnDefinition[] = [id]) =>
-    table({ database: 'db', name, columns, engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'] })
 
-  test('MV guard: adds columns before a new COLUMNS query expands', () => {
-    const out = appTable('out', [id, { name: 'fresh', type: 'UInt64' }])
-    const next = dbTable('src', [id, { name: 'fresh', type: 'UInt64' }])
+  const oldQuery = 'SELECT id FROM app.src'
+  const newQuery = 'SELECT id FROM app.src WHERE id > 0'
+
+  test.each([
+    ['adds a source column', 'src', false, 'alter_table_add_column'],
+    ['drops a source column', 'src', true, 'alter_table_drop_column'],
+    ['adds a target column', 'out', false, 'alter_table_add_column'],
+  ] as const)('recreates the view when the migration %s', (_label, name, drop, op) => {
+    const plain = appTable(name)
+    const extra = appTable(name, [id, { name: 'tag', type: 'String' }])
+    const other = appTable(name === 'src' ? 'out' : 'src')
     expect(types(
-      [dbTable('src'), out, mv('SELECT id FROM db.src')],
-      [next, out, mv("SELECT COLUMNS('^fresh$') FROM db.src")]
-    )).toEqual(['alter_table_add_column', 'alter_materialized_view_modify_query'])
+      [drop ? extra : plain, other, mv(oldQuery)],
+      [drop ? plain : extra, other, mv(newQuery)]
+    )).toEqual(['drop_materialized_view', op, 'create_materialized_view'])
   })
 
-  test('MV guard: recreates the view around a dependent drop and type change', () => {
-    const old = dbTable('src', [
+  test('keeps unrelated column statements in order and changes the query in place', () => {
+    const src = appTable('src')
+    const out = appTable('out')
+    const old = appTable('src:column:x', [id, { name: 'legacy', type: 'String' }])
+    const next = appTable('src:column:x', [id, { name: 'fresh', type: 'UInt64' }])
+    expect(types(
+      [src, out, old, mv(oldQuery)],
+      [src, out, next, mv(newQuery)]
+    )).toEqual(['alter_materialized_view_modify_query', 'alter_table_add_column', 'alter_table_drop_column'])
+  })
+
+  test('recreates the view and preserves column order when a nested column becomes a scalar', () => {
+    const old = appTable('src', [id, { name: 'k.x', type: 'Array(UInt32)' }])
+    const next = appTable('src', [
       id,
-      { name: 'a', type: 'String' },
-      { name: 'b', type: 'UInt64', default: { expression: 'length(a)' } },
+      { name: 'k', type: 'UInt64', default: { expression: 'n' } },
+      { name: 'n', type: 'UInt64' },
     ])
-    const next = dbTable('src', [id, { name: 'a', type: 'UInt64' }])
     const out = appTable('out')
-    expect(types(
-      [old, out, mv('SELECT b AS id FROM db.src')],
-      [next, out, mv('SELECT a + 1 AS id FROM db.src')]
-    )).toEqual([
-      'drop_materialized_view',
-      'alter_table_drop_column',
-      'alter_table_modify_column',
-      'create_materialized_view',
+    const plan = planDiff([old, out, mv(oldQuery)], [next, out, mv(newQuery)])
+    expect(plan.operations.map((op) => [op.type, op.key])).toEqual([
+      ['drop_materialized_view', 'materialized_view:app.mv'],
+      ['alter_table_drop_column', 'table:app.src:column:k.x'],
+      ['alter_table_add_column', 'table:app.src:column:n'],
+      ['alter_table_add_column', 'table:app.src:column:k'],
+      ['create_materialized_view', 'materialized_view:app.mv'],
     ])
   })
 
-  test('MV guard: recreates a view with a new unqualified IN table operand', () => {
-    const src = dbTable('src')
+  test('recreates the view when either query reads a renamed table', () => {
+    const src = appTable('src')
     const out = appTable('out')
-    expect(types(
-      [src, out, mv('SELECT id FROM db.src')],
-      [src, out, dbTable('allowed'), mv('SELECT id FROM db.src WHERE id IN allowed')]
-    )).toEqual(['drop_materialized_view', 'create_database', 'create_table', 'create_materialized_view'])
-  })
-
-  test('MV guard: recreates a view when a qualified IN table loses a column', () => {
-    const src = dbTable('src')
-    const out = appTable('out')
-    const allowed = dbTable('allowed', [id, { name: 'legacy', type: 'UInt64' }])
-    expect(types(
-      [src, out, allowed, mv('SELECT id FROM db.src')],
-      [src, out, dbTable('allowed'), mv('SELECT id FROM db.src WHERE id IN db.allowed')]
-    )).toEqual(['drop_materialized_view', 'alter_table_drop_column', 'create_materialized_view'])
-  })
-
-  test('MV guard: recreates a view whose old IN subquery uses an unqualified name', () => {
-    const src = dbTable('src')
-    const out = appTable('out')
-    expect(types(
-      [src, out, dbTable('allowed'), mv('SELECT id FROM db.src WHERE id IN (SELECT id FROM allowed)')],
-      [src, out, mv('SELECT id FROM db.src')]
-    )).toEqual(['drop_materialized_view', 'drop_table', 'create_materialized_view'])
-  })
-
-  test('recreates a changed view for a source column modification and matches other tables exactly', () => {
-    const old = appTable('src', [
-      id,
-      { name: 'a', type: 'String' },
-      { name: 'b', type: 'UInt64', default: { expression: 'length(a)' } },
-    ])
-    const next = appTable('src', [id, { name: 'a', type: 'UInt64' }])
-    const out = appTable('out')
-    expect(types(
-      [old, out, mv('SELECT id FROM app.src')],
-      [next, out, mv('SELECT id FROM app.src WHERE id > 0')]
-    )).toEqual([
-      'drop_materialized_view',
-      'alter_table_drop_column',
-      'alter_table_modify_column',
-      'create_materialized_view',
-    ])
-
-    const src = appTable('src', [id, { name: 'tag', type: 'String' }])
-    const other = appTable('src:column:x')
-    const otherWithTag = appTable('src:column:x', [id, { name: 'tag', type: 'String' }])
-    expect(types(
-      [src, out, other, mv('SELECT id FROM app.src')],
-      [src, out, otherWithTag, mv("SELECT id FROM app.src WHERE tag != ''")]
-    )).toEqual(['alter_materialized_view_modify_query', 'alter_table_add_column'])
+    const lookup = appTable('renamed_lookup')
+    const previousTableAliases = new Map([['app.lookup', 'table:app.renamed_lookup']])
+    for (const [before, after] of [
+      [mv('SELECT id FROM app.src WHERE id IN app.lookup'), mv(newQuery)],
+      [mv(oldQuery), mv('SELECT id FROM app.src WHERE id IN app.renamed_lookup')],
+    ] as const) {
+      const plan = planDiff([src, out, lookup, before], [src, out, lookup, after], { previousTableAliases })
+      expect(plan.operations.map((op) => op.type)).toEqual(['drop_materialized_view', 'create_materialized_view'])
+    }
   })
 
   test('recreates a changed view that reads an upstream materialized view whose query changes', () => {
@@ -144,26 +119,19 @@ describe('materialized view query dependency order', () => {
     )).toEqual(['drop_materialized_view', 'alter_materialized_view_modify_query', 'create_materialized_view'])
   })
 
-  test('recreates a view whose new wildcard query includes a dropped column', () => {
-    const old = appTable('src', [id, { name: 'legacy', type: 'UInt64' }])
-    const next = appTable('src')
-    const out = appTable('out', [id, { name: 'legacy', type: 'UInt64' }])
-    expect(types(
-      [old, out, mv('SELECT id, legacy FROM app.src')],
-      [next, out, mv('SELECT * FROM app.src WHERE id > 0')]
-    )).toEqual(['drop_materialized_view', 'alter_table_drop_column', 'create_materialized_view'])
-  })
-
-  test('recreates a view whose new query uses an unqualified object name', () => {
+  test('recreates a view when either query uses an unqualified object name', () => {
     const src = appTable('src')
     const out = appTable('out')
     for (const query of [
       'SELECT id FROM src WHERE id > 0',
+      'SELECT id FROM app.src WHERE id IN allowed',
       "SELECT id FROM app.src WHERE dictHas('allowed', id)",
       'SELECT id FROM app.src WHERE dictHas(allowed, id)',
     ]) {
-      expect(types([src, out, mv('SELECT id FROM app.src')], [src, out, mv(query)]))
-        .toEqual(['drop_materialized_view', 'create_materialized_view'])
+      for (const [before, after] of [[oldQuery, query], [query, oldQuery]] as const) {
+        expect(types([src, out, mv(before)], [src, out, mv(after)]))
+          .toEqual(['drop_materialized_view', 'create_materialized_view'])
+      }
     }
     expect(types(
       [src, out, mv('SELECT id FROM app.src')],
@@ -191,16 +159,6 @@ describe('materialized view query dependency order', () => {
       ['create_materialized_view', 'materialized_view:app.a_down'],
       ['create_materialized_view', 'materialized_view:app.z_up'],
     ])
-  })
-
-  test('adds the new source column before swapping the query and drops the old column after', () => {
-    const old = appTable('src', [id, { name: 'legacy_kind', type: 'String' }])
-    const next = appTable('src', [id, { name: 'kind', type: 'LowCardinality(String)' }])
-    const out = appTable('out', [id, { name: 'kind', type: 'String' }])
-    expect(types(
-      [old, out, mv('SELECT id, `legacy_kind` AS kind FROM app.src')],
-      [next, out, mv('SELECT id, "kind" FROM app.src')]
-    )).toEqual(['alter_table_add_column', 'alter_materialized_view_modify_query', 'alter_table_drop_column'])
   })
 })
 

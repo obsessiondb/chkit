@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Sequence
 
-from chkit.core.canonical import definition_key
 from chkit.core.column_cycle_repair import _cycle_releases, _repaired_order
 from chkit.core.column_reads import (
     _column_default_reads,
@@ -19,16 +18,11 @@ from chkit.core.column_reads import (
 from chkit.core.identifier import quote_identifier, render_qualified_name
 from chkit.core.model import (
     ColumnRenameSuggestion,
-    MaterializedViewDefinition,
     MigrationOperation,
     SchemaDefinition,
     TableDefinition,
 )
-from chkit.core.object_dependencies import (
-    DependencyGraph,
-    build_dependency_graph,
-    order_by_dependencies,
-)
+from chkit.core.object_dependencies import order_by_dependencies
 from chkit.core.sql import column_type_fingerprint
 
 # The table TTL statement (MODIFY or REMOVE TTL) sorts with the column
@@ -40,7 +34,6 @@ _COLUMN_STATEMENTS = frozenset(
         "alter_table_drop_column",
         "alter_table_rename_column",
         "alter_table_modify_ttl",
-        "alter_materialized_view_modify_query",
     }
 )
 
@@ -49,18 +42,17 @@ def is_column_statement(op: MigrationOperation) -> bool:
     return op.type in _COLUMN_STATEMENTS
 
 
-def order_column_statements(  # noqa: PLR0915
+def order_column_statements(
     operations: Sequence[MigrationOperation],
     *,
     previous: Sequence[SchemaDefinition],
     next_: Sequence[SchemaDefinition],
     renames: Sequence[ColumnRenameSuggestion],
 ) -> list[MigrationOperation]:
-    """Order the column, TTL and view query statements in one sort (TS orderColumnStatements).
+    """Order the column and TTL statements of every table in one sort (TS orderColumnStatements).
 
     The statements are ADD, MODIFY, DROP and RENAME COLUMN and the table TTL
-    statement of every table, and the MODIFY QUERY of every materialized view,
-    from their key order (#681, #745, #746, #758, #760, #769, #775):
+    statement, from their key order (#681, #745, #746, #758, #769, #775):
 
     - an ADD or MODIFY whose new DEFAULT, MATERIALIZED or ALIAS expression, or
       a table TTL that reads column X runs after the ADD of X or the RENAME to X;
@@ -77,19 +69,12 @@ def order_column_statements(  # noqa: PLR0915
     - when the order still closes a cycle in a table whose reads are certain
       (``_repaired_order``), the first breaker in key order runs before the
       MODIFY that closes it (``_break_closed_cycles``, #775);
-    - a MODIFY QUERY runs after every ADD COLUMN on a table its new query reads
-      or writes, and before every DROP COLUMN on a table its old query reads or
-      writes. The planner recreates a view if either query depends on a table
-      with a MODIFY or RENAME COLUMN. The remaining edges go from ADD to query
-      to DROP, and no DROP precedes an ADD by dependency on those tables, so
-      the query edges cannot close a cycle;
     - statements of the same column keep their order.
 
     Members of a cycle keep their key order. The statements fill the positions
     the column statements had, so every other operation keeps its place, and
-    a table's statements move past another table's only through a MODIFY
-    QUERY that reads both (they share no other edge). ``renames`` names the
-    columns of each RENAME COLUMN in ``operations``.
+    a table's statements never move past another table's (they share no
+    edge). ``renames`` names the columns of each RENAME COLUMN in ``operations``.
     """
     reads = _column_default_reads(next_, column_key_of=_column_object_id)
     old_reads = _column_default_reads(previous, column_key_of=_column_object_id)
@@ -103,15 +88,7 @@ def order_column_statements(  # noqa: PLR0915
         for rename in renames
     }
     statements = sorted((op for op in operations if is_column_statement(op)), key=lambda op: op.key)
-    queries = [
-        index
-        for index, op in enumerate(statements)
-        if op.type == "alter_materialized_view_modify_query"
-    ]
     ids = _statement_object_ids(statements, previous, next_, renames)
-    query_reads = _materialized_view_query_reads(next_) if queries else {}
-    old_query_reads = _materialized_view_query_reads(previous) if queries else {}
-    columns = [_statement_column(id_) for id_ in ids] if queries else []
     # The statements of one object (``ids``) are next to each other in key order.
     last_of: dict[str, int] = {}
     previous_of: list[int | None] = []
@@ -157,19 +134,6 @@ def order_column_statements(  # noqa: PLR0915
         if op.type == "alter_table_drop_column":
             for other in releasers.get(id_, []):
                 found[other] = None
-            if queries and (statement_column := columns[index]) is not None:
-                for query in queries:
-                    if statement_column[0] in old_query_reads.get(statements[query].key, ()):
-                        found[query] = None
-        if op.type == "alter_materialized_view_modify_query":
-            tables = query_reads.get(op.key, ())
-            for candidate_index, candidate in enumerate(statements):
-                if (
-                    candidate.type == "alter_table_add_column"
-                    and (statement_column := columns[candidate_index]) is not None
-                    and statement_column[0] in tables
-                ):
-                    found[candidate_index] = None
         # A column's last statement is the MODIFY COLUMN that sets its new expression.
         if op.type == "alter_table_modify_column" and last_of[id_] == index:
             for column in releases.get(id_, []):
@@ -203,54 +167,6 @@ def order_column_statements(  # noqa: PLR0915
         )
     )
     return [statements[next(ordered)] if is_column_statement(op) else op for op in operations]
-
-
-def _statement_column(id_: str) -> tuple[str, str] | None:
-    """The exact table key and column name represented by a resolved statement id."""
-    parts: list[str] = json.loads(id_)
-    if parts[0] != "column" or len(parts) != 4:  # noqa: PLR2004
-        return None
-    _, database, table, name = parts
-    return f"table:{database}.{table}", name
-
-
-def dropped_statement_columns(
-    operations: Sequence[MigrationOperation], previous: Sequence[SchemaDefinition]
-) -> list[tuple[str, str]]:
-    drops = [op for op in operations if op.type == "alter_table_drop_column"]
-    if not drops:
-        return []
-    return [
-        column
-        for id_ in _statement_object_ids(drops, previous, (), ())
-        if (column := _statement_column(id_)) is not None
-    ]
-
-
-def modified_statement_tables(
-    operations: Sequence[MigrationOperation],
-    previous: Sequence[SchemaDefinition],
-    next_: Sequence[SchemaDefinition],
-) -> list[str]:
-    modifies = [op for op in operations if op.type == "alter_table_modify_column"]
-    if not modifies:
-        return []
-    return [
-        column[0]
-        for id_ in _statement_object_ids(modifies, previous, next_, ())
-        if (column := _statement_column(id_)) is not None
-    ]
-
-
-def _materialized_view_query_reads(definitions: Sequence[SchemaDefinition]) -> DependencyGraph:
-    """MODIFY QUERY operation key to keys of the objects the query reads or writes."""
-    graph = build_dependency_graph(definitions)
-    return {
-        f"{key}:query": graph.get(key, set())
-        for definition in definitions
-        if isinstance(definition, MaterializedViewDefinition)
-        for key in (definition_key(definition),)
-    }
 
 
 def _statement_object_ids(

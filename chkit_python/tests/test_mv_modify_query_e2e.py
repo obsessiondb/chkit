@@ -199,7 +199,7 @@ def test_query_only_change_keeps_view_feeding_target_while_migrate_runs(
     project.assert_no_drift()
 
 
-def test_new_query_reading_added_column_and_not_dropped_one_migrates_in_place(
+def test_recreates_view_when_query_switches_from_dropped_column_to_added_column(
     project: _Project, ch_client: Any
 ) -> None:
     database = project.database
@@ -216,9 +216,10 @@ def test_new_query_reading_added_column_and_not_dropped_one_migrates_in_place(
         "WHERE kind != 'heartbeat' GROUP BY kind",
     )
     assert project.plan_types() == [
+        "drop_materialized_view",
         "alter_table_add_column",
-        "alter_materialized_view_modify_query",
         "alter_table_drop_column",
+        "create_materialized_view",
     ]
     project.migrate("switch", ["--allow-destructive"])
     _insert(ch_client._client, database, "view", "heartbeat")

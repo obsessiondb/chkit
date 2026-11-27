@@ -339,20 +339,6 @@ export function hasUnqualifiedReference(sql: string): boolean {
     })
 }
 
-/** Conservatively check whether the query may still read a column being dropped. */
-export function queryMayReadDroppedColumn(sql: string): (column: string) => boolean {
-  const tokens = significantTokens(sql)
-  const names = new Set(tokens.map(identifierName))
-  const allColumns = tokens.some((token, i) => {
-    const next = tokens[i + 1]
-    const keyword = token.kind === 'identifier' ? token.text.toLowerCase() : ''
-    return token.text === '*' ||
-      (keyword === 'columns' && next?.text === '(') ||
-      (keyword === 'in' && next !== undefined && next.text !== '(')
-  })
-  return (column) => allColumns || names.has(column) || names.has(column.split('.', 1)[0])
-}
-
 function significantTokens(sql: string): SQLToken[] {
   return tokenizeSQL(sql).filter((token) => !isTrivia(token))
 }

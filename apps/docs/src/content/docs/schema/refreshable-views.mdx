@@ -198,7 +198,7 @@ SELECT toDate(ts) AS day, count() AS total FROM analytics.events GROUP BY day;
 | Changing `comment` only | `ALTER TABLE ... MODIFY COMMENT` | `safe` |
 | No change | No operation | — |
 
-A query change recreates a refreshable view, while a materialized view without `refresh` gets `ALTER TABLE ... MODIFY QUERY`. After `MODIFY QUERY` a refreshable view keeps its last result until the next scheduled refresh, while a new view refreshes as soon as it is created (unless `empty`).
+A recreated view refreshes as soon as it is created unless `empty` is set. See [Structural vs. alterable properties](/schema/dsl-reference/#structural-vs-alterable-properties) for query changes on ordinary materialized views.
 
 ## Monitoring
 

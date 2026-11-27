@@ -407,24 +407,6 @@ def has_unqualified_reference(sql: str) -> bool:
     )
 
 
-def query_may_read_dropped_column(sql: str) -> Callable[[str], bool]:
-    """Conservatively check whether the query may still read a column being dropped."""
-    tokens = _significant_tokens(sql)
-    names = {identifier_name(token) for token in tokens}
-    all_columns = any(
-        token.text == "*"
-        or (
-            token.kind == "identifier"
-            and (
-                (token.text.lower() == "columns" and _text_at(tokens, i + 1) == "(")
-                or (token.text.lower() == "in" and _text_at(tokens, i + 1) not in ("", "("))
-            )
-        )
-        for i, token in enumerate(tokens)
-    )
-    return lambda column: all_columns or column in names or column.partition(".")[0] in names
-
-
 def _significant_tokens(sql: str) -> list[SQLToken]:
     return [token for token in tokenize_sql(sql) if not is_trivia(token)]
 

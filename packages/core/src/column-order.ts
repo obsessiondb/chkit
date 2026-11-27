@@ -9,10 +9,9 @@ import {
   tableTtlReads,
   ttlObjectId,
 } from './column-reads.js'
-import { definitionKey } from './canonical.js'
 import { quoteIdentifier, renderQualifiedName } from './identifier.js'
-import type { MigrationOperation, SchemaDefinition, TableDefinition } from './model.js'
-import { buildDependencyGraph, type DependencyGraph, orderByDependencies } from './object-dependencies.js'
+import type { MigrationOperation, TableDefinition } from './model.js'
+import { type DependencyGraph, orderByDependencies } from './object-dependencies.js'
 import { compareCodePoints } from './order.js'
 import { columnTypeFingerprint } from './sql.js'
 
@@ -24,7 +23,6 @@ const COLUMN_STATEMENTS: ReadonlySet<MigrationOperation['type']> = new Set([
   'alter_table_drop_column',
   'alter_table_rename_column',
   'alter_table_modify_ttl',
-  'alter_materialized_view_modify_query',
 ])
 
 export function isColumnStatement(op: MigrationOperation): boolean {
@@ -33,9 +31,8 @@ export function isColumnStatement(op: MigrationOperation): boolean {
 
 /**
  * Orders the column statements (ADD, MODIFY, DROP and RENAME COLUMN) and the
- * table TTL statement of every table, and the MODIFY QUERY of every
- * materialized view, in one dependency sort, from their key order (#681,
- * #745, #746, #758, #760, #769, #775):
+ * table TTL statement of every table in one dependency sort, from their key
+ * order (#681, #745, #746, #758, #769, #775):
  * - an ADD or MODIFY whose new DEFAULT, MATERIALIZED or ALIAS expression, or
  *   a table TTL that reads column X runs after the ADD of X or the RENAME to X;
  * - a DROP of X runs after the MODIFY or DROP of every column whose old
@@ -50,17 +47,10 @@ export function isColumnStatement(op: MigrationOperation): boolean {
  * - when the order still closes a cycle in a table whose reads are certain
  *   (`repairedOrder`), the first breaker in key order runs before the
  *   MODIFY that closes it (`breakClosedCycles`, #775);
- * - a MODIFY QUERY runs after every ADD COLUMN on a table its new query reads
- *   or writes, and before every DROP COLUMN on a table its old query reads or
- *   writes. The planner recreates a view if either query depends on a table
- *   with a MODIFY or RENAME COLUMN. The remaining edges go from ADD to query
- *   to DROP, and no DROP precedes an ADD by dependency on those tables, so
- *   the query edges cannot close a cycle;
  * - statements of the same column keep their order.
  * Members of a cycle keep their key order. The statements fill the positions
  * the column statements had, so every other operation keeps its place, and a
- * table's statements move past another table's only through a MODIFY QUERY
- * that reads both (they share no other edge).
+ * table's statements never move past another table's (they share no edge).
  * `renames` names the columns of each RENAME COLUMN in `operations`.
  */
 export function orderColumnStatements(
@@ -79,11 +69,7 @@ export function orderColumnStatements(
   const statements = operations
     .filter(isColumnStatement)
     .sort((a, b) => compareCodePoints(a.key, b.key))
-  const queries = statements.flatMap((op, index) => (op.type === 'alter_materialized_view_modify_query' ? [index] : []))
   const ids = statementObjectIds(statements, definitions, renames)
-  const queryReads = queries.length ? materializedViewQueryReads(definitions.next) : undefined
-  const oldQueryReads = queries.length ? materializedViewQueryReads(definitions.previous) : undefined
-  const columnTables = queries.length ? ids.map((id) => statementColumn(id)?.table) : []
   // The statements of one object (`ids`) are next to each other in key order.
   const lastOf = new Map<string, number>()
   const previousOf = ids.map((id, index) => {
@@ -124,17 +110,6 @@ export function orderColumnStatements(
     }
     if (op.type === 'alter_table_drop_column') {
       for (const other of releasers.get(id) ?? []) found.add(other)
-      const table = columnTables[index]
-      for (const query of queries) {
-        if (table !== undefined && oldQueryReads?.get(statements[query]?.key ?? '')?.has(table)) found.add(query)
-      }
-    }
-    if (op.type === 'alter_materialized_view_modify_query') {
-      const tables = queryReads?.get(op.key)
-      statements.forEach((other, otherIndex) => {
-        const table = columnTables[otherIndex]
-        if (other.type === 'alter_table_add_column' && table !== undefined && tables?.has(table)) found.add(otherIndex)
-      })
     }
     // A column's last statement is the MODIFY COLUMN that sets its new expression.
     if (op.type === 'alter_table_modify_column' && lastOf.get(id) === index) {
@@ -159,45 +134,6 @@ export function orderColumnStatements(
   const ordered = repairedOrder(prerequisites, statements, definitions, renames)
   let next = 0
   return operations.map((op) => (isColumnStatement(op) ? (statements[ordered[next++] ?? -1] ?? op) : op))
-}
-
-type StatementColumn = { table: string; name: string }
-
-/** The exact table key and column name represented by a resolved statement id. */
-function statementColumn(id: string): StatementColumn | undefined {
-  const [kind, database, table, name]: string[] = JSON.parse(id)
-  if (kind === 'column' && name !== undefined) return { table: `table:${database}.${table}`, name }
-}
-
-export function droppedStatementColumns(
-  operations: readonly MigrationOperation[],
-  previous: SchemaDefinition[]
-): StatementColumn[] {
-  const drops = operations.filter((op) => op.type === 'alter_table_drop_column')
-  if (drops.length === 0) return []
-  return statementObjectIds(drops, { previous, next: [] }, []).flatMap((id) => statementColumn(id) ?? [])
-}
-
-export function modifiedStatementTables(
-  operations: readonly MigrationOperation[],
-  definitions: ColumnStatementDefinitions
-): string[] {
-  const modifies = operations.filter((op) => op.type === 'alter_table_modify_column')
-  if (modifies.length === 0) return []
-  return statementObjectIds(modifies, definitions, []).flatMap((id) => statementColumn(id)?.table ?? [])
-}
-
-/** MODIFY QUERY operation key → keys of the objects the query reads or writes. */
-function materializedViewQueryReads(definitions: SchemaDefinition[]): DependencyGraph {
-  const graph = buildDependencyGraph(definitions)
-  return new Map(
-    definitions
-      .filter((def) => def.kind === 'materialized_view')
-      .map((def) => {
-        const key = definitionKey(def)
-        return [`${key}:query`, graph.get(key) ?? new Set<string>()]
-      })
-  )
 }
 
 /**

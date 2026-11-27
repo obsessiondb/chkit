@@ -7,11 +7,7 @@ import re
 from collections.abc import Mapping, Sequence
 
 from chkit.core.canonical import canonicalize_definitions, definition_key
-from chkit.core.column_order import (
-    dropped_statement_columns,
-    modified_statement_tables,
-    order_column_statements,
-)
+from chkit.core.column_order import is_column_statement, order_column_statements
 from chkit.core.column_shape import _column_identity, _columns_equal, _normalized_column
 from chkit.core.constraint import constraint_kind
 from chkit.core.diff_primitives import diff_by_name, diff_clauses, diff_settings
@@ -43,7 +39,6 @@ from chkit.core.object_dependencies import (
     has_unqualified_reference,
     invert_dependency_graph,
     order_by_dependencies,
-    query_may_read_dropped_column,
 )
 from chkit.core.sql import (
     key_fingerprint,
@@ -351,8 +346,7 @@ def _diff_materialized_view(
     a view that keeps feeding its target, so no INSERT into its source is
     missed. Recreate it for structural or refreshable query changes,
     unqualified names in either query, or dependencies that cannot safely
-    span the swap (object changes, column modifications or renames, and column
-    drops the new query may still read).
+    span the swap (object changes, column statements and table renames).
     """
     has_new_refresh = new.refresh is not None
     query_changed = new.as_ != old.as_
@@ -405,12 +399,9 @@ def _diff_materialized_views(
     operations: Sequence[MigrationOperation],
     create_graph: DependencyGraph,
     drop_graph: DependencyGraph,
-    *,
-    old_column_dependents: DependencyGraph,
-    dropped_columns: Sequence[tuple[str, str]],
-    modified_tables: Sequence[str],
+    changed_tables: set[str],
 ) -> list[MigrationOperation]:
-    """Plan the materialized views both schemas hold in dependency order."""
+    """Plan materialized views after the operations on their dependencies are known."""
     query_changes = {definition_key(new) for old, new in changed_views if old.as_ != new.as_}
     unavailable = query_changes | {op.key for op in operations if op.type.startswith("create_")}
     dropped = {op.key for op in operations if op.type.startswith("drop_")}
@@ -427,24 +418,21 @@ def _diff_materialized_views(
         ):
             unavailable.add(key)
             dropped.add(key)
+        elif not _refresh_equal(old.refresh, new.refresh):
+            unavailable.add(key)
     for old, new in changed_views:
         key = definition_key(new)
         if key not in query_changes or key in dropped:
             continue
         reads = create_graph.get(key, ())
-        drops_on_read_tables = [column for table, column in dropped_columns if table in reads]
         if (
             any(dependency in unavailable for dependency in reads)
             or any(
-                table in reads or key in old_column_dependents.get(table, ())
-                for table in modified_tables
+                table in reads or key in drop_graph.get(table, ())
+                for table in changed_tables
             )
             or has_unqualified_reference(old.as_)
             or has_unqualified_reference(new.as_)
-            or (
-                drops_on_read_tables
-                and any(map(query_may_read_dropped_column(new.as_), drops_on_read_tables))
-            )
         ):
             dropped.add(key)
     # Every old query that switches away from a dropped object must already be
@@ -458,11 +446,7 @@ def _diff_materialized_views(
             pending.append(dependent)
     return [
         op
-        for old, new in order_by_dependencies(
-            changed_views,
-            lambda pair: definition_key(pair[1]),
-            lambda key: create_graph.get(key, ()),
-        )
+        for old, new in changed_views
         for op in _diff_materialized_view(old, new, recreate=definition_key(new) in dropped)
     ]
 
@@ -893,9 +877,7 @@ def _order_operations(
 
     Drops run dependents first, creates run dependencies first (#231). Alters
     and create_database keep their place, except that the column statements
-    of a table are ordered by the columns they read and remove, and a
-    materialized view's MODIFY QUERY runs between column adds and drops on
-    the tables its new and old queries depend on, respectively.
+    of a table are ordered by the columns they read and remove.
     """
     drops = [op for op in ordered if _rank(op) == 0]
     middle = [op for op in ordered if _rank(op) in (1, 2)]
@@ -986,7 +968,13 @@ def plan_diff(  # noqa: PLR0915
     old_map = _map_by_key(old_canonical)
     new_map = _map_by_key(new_canonical)
     create_graph = build_dependency_graph(new_canonical)
-    drop_graph = invert_dependency_graph(build_dependency_graph(old_canonical))
+    drop_graph = invert_dependency_graph(
+        build_dependency_graph(old_canonical, previous_table_aliases)
+    )
+    changed_tables = {
+        *(previous_table_aliases or {}).values(),
+        *(f"table:{rename.database}.{rename.table}" for rename in column_renames),
+    }
     operations: list[MigrationOperation] = []
     rename_suggestions: list[ColumnRenameSuggestion] = []
     databases_to_create: set[str] = set()
@@ -1005,6 +993,8 @@ def plan_diff(  # noqa: PLR0915
 
         if isinstance(new_def, TableDefinition) and isinstance(matched, TableDefinition):
             ops, renames = _diff_tables(matched, new_def)
+            if any(is_column_statement(op) and op.type != "alter_table_modify_ttl" for op in ops):
+                changed_tables.add(key)
             operations.extend(ops)
             rename_suggestions.extend(renames)
             continue
@@ -1041,26 +1031,9 @@ def plan_diff(  # noqa: PLR0915
         _push_create(operations, new_def, "safe")
 
     if changed_views:
-        modified_tables = [
-            *modified_statement_tables(operations, old_canonical, new_canonical),
-            *(f"table:{rename.database}.{rename.table}" for rename in column_renames),
-        ]
-        # Generate diffs remapped tables, but an old query can still name the
-        # table by its original name. Use those names for the column-change guard.
-        old_column_dependents = (
-            invert_dependency_graph(build_dependency_graph(old_canonical, previous_table_aliases))
-            if modified_tables and previous_table_aliases
-            else drop_graph
-        )
         operations.extend(
             _diff_materialized_views(
-                changed_views,
-                operations,
-                create_graph,
-                drop_graph,
-                old_column_dependents=old_column_dependents,
-                dropped_columns=dropped_statement_columns(operations, old_canonical),
-                modified_tables=modified_tables,
+                changed_views, operations, create_graph, drop_graph, changed_tables
             )
         )
 
@@ -1072,7 +1045,7 @@ def plan_diff(  # noqa: PLR0915
     operations.sort(key=lambda op: (_rank(op), _alter_rank(op), op.key))
     operations = _order_operations(
         operations,
-        drop=drop_graph,
+        drop=invert_dependency_graph(build_dependency_graph(old_canonical)),
         create=create_graph,
         previous=old_canonical,
         next_=new_canonical,

@@ -1341,9 +1341,14 @@ The `auto_minmax_index_*` skip indexes ClickHouse creates for the `add_minmax_in
 
 A view uses drop + recreate for a change to its query. For an ordinary materialized view with the same `TO` target, chkit uses `ALTER TABLE ... MODIFY QUERY` (`risk=caution`) when the query can change in place. The view keeps feeding its target throughout, and rows already in the target keep the values the old query wrote.
 
-A materialized view uses drop + recreate when its `TO` target changes, when `refresh` is added or removed or `refresh.append` changes, or when a [refreshable view](/schema/refreshable-views/) changes its query. A query change also uses drop + recreate if the old query reads an object the migration drops, or if the new query reads or writes an object the migration creates or recreates, or reads a materialized view whose query is changing. Drop + recreate also applies when either query reads or writes a table with a `MODIFY COLUMN` or `RENAME COLUMN` in the plan, or either query uses an unqualified object name, including an unqualified `IN` table operand.
+A materialized view uses drop + recreate for any of these changes.
 
-If the plan drops a column of a table the new query reads or writes, chkit recreates the view when the new query contains `*`, a `COLUMNS(...)` call, an `IN` operand without parentheses, or an identifier matching the column name or the first part of its dotted name.
+- The `TO` target changes.
+- The schema adds or removes `refresh`, or toggles `refresh.append`.
+- The query changes in a [refreshable view](/schema/refreshable-views/).
+- The query changes and either version reads a table with a column change or rename in the same migration, or the `TO` table has a column change.
+- The query changes and either version uses an unqualified object name, including a bare `IN` table operand.
+- The new query reads an object the migration creates or a view whose query or definition changes, or the old query reads an object the migration drops.
 
 A comment-only change uses `ALTER TABLE ... MODIFY COMMENT` in place. See [Comments](#comments).
 

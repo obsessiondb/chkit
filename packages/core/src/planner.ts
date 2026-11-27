@@ -41,7 +41,7 @@ import {
   toCreateSQL,
 } from './sql.js'
 import type { ColumnStatementDefinitions } from './column-cycle-repair.js'
-import { droppedStatementColumns, modifiedStatementTables, orderColumnStatements } from './column-order.js'
+import { isColumnStatement, orderColumnStatements } from './column-order.js'
 import type { ColumnRename } from './column-reads.js'
 import { normalizeColumn, shapeKey } from './column-shape.js'
 import { constraintKind } from './constraint.js'
@@ -58,7 +58,6 @@ import {
   hasUnqualifiedReference,
   invertDependencyGraph,
   orderByDependencies,
-  queryMayReadDroppedColumn,
   type DependencyGraph,
 } from './object-dependencies.js'
 
@@ -304,8 +303,7 @@ function refreshEqual(
  * view that keeps feeding its target, so no INSERT into its source is missed.
  * Recreate it for structural or refreshable query changes, unqualified
  * names in either query, or dependencies that cannot safely span the swap
- * (object changes, column modifications or renames, and column drops the
- * new query may still read).
+ * (object changes, column statements and table renames).
  */
 function diffMaterializedView(
   oldDef: MaterializedViewDefinition,
@@ -356,15 +354,13 @@ function diffMaterializedView(
   return [...queryOps, ...refreshOps, ...diffComment(oldDef, newDef)]
 }
 
-/** Plans the materialized views both schemas hold in dependency order. */
+/** Plans materialized views after the operations on their dependencies are known. */
 function diffMaterializedViews(
   changedViews: ReadonlyArray<[MaterializedViewDefinition, MaterializedViewDefinition]>,
   operations: readonly MigrationOperation[],
   createGraph: DependencyGraph,
   dropGraph: DependencyGraph,
-  oldColumnDependents: DependencyGraph,
-  droppedColumns: ReturnType<typeof droppedStatementColumns>,
-  modifiedTables: readonly string[]
+  changedTables: ReadonlySet<string>
 ): MigrationOperation[] {
   const queryChanges = new Set(changedViews.filter(([oldDef, newDef]) => oldDef.as !== newDef.as).map(([, def]) => definitionKey(def)))
   const unavailable = new Set([...queryChanges, ...operations.filter((op) => op.type.startsWith('create_')).map((op) => op.key)])
@@ -380,19 +376,19 @@ function diffMaterializedViews(
     ) {
       unavailable.add(key)
       dropped.add(key)
+    } else if (!refreshEqual(oldDef.refresh, newDef.refresh)) {
+      unavailable.add(key)
     }
   }
   for (const [oldDef, newDef] of changedViews) {
     const key = definitionKey(newDef)
     if (!queryChanges.has(key) || dropped.has(key)) continue
     const reads = createGraph.get(key)
-    const dropsOnReadTables = droppedColumns.filter((column) => reads?.has(column.table)).map((column) => column.name)
     if (
       [...(reads ?? [])].some((dependency) => unavailable.has(dependency)) ||
-      modifiedTables.some((table) => reads?.has(table) || oldColumnDependents.get(table)?.has(key)) ||
+      [...changedTables].some((table) => reads?.has(table) || dropGraph.get(table)?.has(key)) ||
       hasUnqualifiedReference(oldDef.as) ||
-      hasUnqualifiedReference(newDef.as) ||
-      (dropsOnReadTables.length > 0 && dropsOnReadTables.some(queryMayReadDroppedColumn(newDef.as)))
+      hasUnqualifiedReference(newDef.as)
     ) dropped.add(key)
   }
   // Every old query that switches away from a dropped object must already be
@@ -405,8 +401,9 @@ function diffMaterializedViews(
       pending.push(dependent)
     }
   }
-  return orderByDependencies(changedViews, ([, def]) => definitionKey(def), (key) => createGraph.get(key) ?? [])
-    .flatMap(([oldDef, newDef]) => diffMaterializedView(oldDef, newDef, dropped.has(definitionKey(newDef))))
+  return changedViews.flatMap(([oldDef, newDef]) =>
+    diffMaterializedView(oldDef, newDef, dropped.has(definitionKey(newDef)))
+  )
 }
 
 // `chkit pull` writes ClickHouse's own introspection placeholder
@@ -740,7 +737,11 @@ export function planDiff(
   const oldMap = createMap(oldCanonical)
   const newMap = createMap(newCanonical)
   const createGraph = buildDependencyGraph(newCanonical)
-  const dropGraph = invertDependencyGraph(buildDependencyGraph(oldCanonical))
+  const dropGraph = invertDependencyGraph(buildDependencyGraph(oldCanonical, options.previousTableAliases))
+  const changedTables = new Set([
+    ...(options.previousTableAliases?.values() ?? []),
+    ...(options.columnRenames ?? []).map((rename) => `table:${rename.database}.${rename.table}`),
+  ])
   const operations: MigrationOperation[] = []
   const renameSuggestions: ColumnRenameSuggestion[] = []
   const databasesToCreate = new Set<string>()
@@ -758,6 +759,9 @@ export function planDiff(
 
     if (newDef.kind === 'table' && oldDef.kind === 'table') {
       const diffResult = diffTables(oldDef, newDef)
+      if (diffResult.operations.some((op) => isColumnStatement(op) && op.type !== 'alter_table_modify_ttl')) {
+        changedTables.add(key)
+      }
       operations.push(...diffResult.operations)
       renameSuggestions.push(...diffResult.renameSuggestions)
       continue
@@ -802,24 +806,7 @@ export function planDiff(
   }
 
   if (changedViews.length) {
-    const modifiedTables = [
-      ...modifiedStatementTables(operations, { previous: oldCanonical, next: newCanonical }),
-      ...(options.columnRenames ?? []).map((rename) => `table:${rename.database}.${rename.table}`),
-    ]
-    // Generate diffs remapped tables, but an old query can still name the
-    // table by its original name. Use those names for the column-change guard.
-    const oldColumnDependents = modifiedTables.length && options.previousTableAliases?.size
-      ? invertDependencyGraph(buildDependencyGraph(oldCanonical, options.previousTableAliases))
-      : dropGraph
-    operations.push(...diffMaterializedViews(
-      changedViews,
-      operations,
-      createGraph,
-      dropGraph,
-      oldColumnDependents,
-      droppedStatementColumns(operations, oldCanonical),
-      modifiedTables
-    ))
+    operations.push(...diffMaterializedViews(changedViews, operations, createGraph, dropGraph, changedTables))
   }
 
   for (const database of [...databasesToCreate].sort((a, b) => compareCodePoints(a, b))) {
@@ -827,7 +814,7 @@ export function planDiff(
   }
 
   const ordered = orderOperations(operations.sort(compareOperations), {
-    drop: dropGraph,
+    drop: invertDependencyGraph(buildDependencyGraph(oldCanonical)),
     create: createGraph,
     previous: oldCanonical,
     next: newCanonical,
@@ -884,9 +871,7 @@ function alterRank(op: MigrationOperation): number {
  * Reorders the drop and create segments of a (rank, key)-sorted plan by object
  * dependencies (#231): drops run dependents first, creates run dependencies
  * first. Alters and create_database keep their place, except that the column
- * statements of a table are ordered by the columns they read and remove, and a
- * materialized view's MODIFY QUERY runs between column adds and drops on
- * the tables its new and old queries depend on, respectively.
+ * statements of a table are ordered by the columns they read and remove.
  */
 function orderOperations(
   sorted: MigrationOperation[],

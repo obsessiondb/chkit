@@ -2,4 +2,4 @@
 "chkit": patch
 ---
 
-`generate` changes a materialized view's query with `ALTER TABLE ... MODIFY QUERY` when its `TO` target stays the same, so the view keeps feeding its target during `migrate` instead of missing the rows inserted between a `DROP` and `CREATE` (#760).
+`generate` can change an ordinary materialized view's query in place with `ALTER TABLE ... MODIFY QUERY`, so the view keeps feeding its target during `migrate` (#760). Changes to the target or referenced objects can still require drop and recreate.

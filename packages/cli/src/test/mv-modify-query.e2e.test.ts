@@ -90,7 +90,7 @@ describe('materialized view query change e2e (#760)', () => {
   )
 
   test(
-    'a new query that reads an added column and stops reading a dropped one migrates in place',
+    'recreates the view when its query switches from a dropped column to an added column',
     async () => {
       const fixture = await createFixture('mvq_cols')
       const executor = createLiveExecutor(env)
@@ -110,9 +110,10 @@ describe('materialized view query change e2e (#760)', () => {
           `materializedView(${JSON.stringify(countsView(database, `SELECT kind, count() AS events FROM ${database}.events WHERE kind != 'heartbeat' GROUP BY kind`))})`,
         ])
         expect(planTypes(fixture)).toEqual([
+          'drop_materialized_view',
           'alter_table_add_column',
-          'alter_materialized_view_modify_query',
           'alter_table_drop_column',
+          'create_materialized_view',
         ])
         await generateAndMigrate(fixture, 'switch', ['--allow-destructive'])
         await executor.command(`INSERT INTO ${quoteIdent(database)}.events VALUES (now(), 'view'), (now(), 'heartbeat')`)

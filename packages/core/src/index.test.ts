@@ -913,9 +913,9 @@ describe('@chkit/core planner v1', () => {
         ...(comment ? { comment } : {}),
       })
     const plan = planDiff([mv('SELECT id FROM app.users')], [mv('SELECT id FROM app.users WHERE id > 0', 'positive ids')])
-    expect(plan.operations.map((op) => op.type).sort()).toEqual([
-      'alter_materialized_view_modify_query',
+    expect(plan.operations.map((op) => op.type)).toEqual([
       'alter_table_modify_comment',
+      'alter_materialized_view_modify_query',
     ])
     expect(plan.riskSummary).toEqual({ safe: 1, caution: 1, danger: 0 })
   })
