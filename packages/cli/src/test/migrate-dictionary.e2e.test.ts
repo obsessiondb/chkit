@@ -189,9 +189,8 @@ describe('@chkit/cli migrate dictionary e2e', () => {
         await waitForDictionary(executor, database, dictName)
         expect(await pollUntil(reloadAndLookup, (name) => name === 'Alice')).toBe('Alice')
 
-        // 3. drift is clean immediately after apply; existence-drift (the MV
-        // precedent — dictionaries are not deep-shape-compared) is detected
-        // once the dictionary is hand-dropped out from under chkit.
+        // 3. drift is clean immediately after apply, and reports the dictionary
+        // missing once it is hand-dropped out from under chkit.
         const driftClean = runCli(dir, ['drift', '--config', configPath, '--json'], cliEnv)
         expect(driftClean.exitCode).toBe(0)
         const driftCleanPayload = JSON.parse(driftClean.stdout) as { drifted: boolean }

@@ -1,0 +1,7 @@
+SCHEMA >
+    `user_id` UInt64,
+    `ts` DateTime
+
+ENGINE "MergeTree"
+ENGINE_SORTING_KEY "intHash32(user_id), ts"
+ENGINE_SAMPLING_KEY "intHash32(user_id)"

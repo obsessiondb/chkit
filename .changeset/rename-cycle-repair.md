@@ -1,0 +1,5 @@
+---
+"chkit": patch
+---
+
+`generate` also reorders the column statements of a table with a column rename in the same migration, so a temporary default cycle that a rename used to leave in place no longer fails `migrate` with `Cyclic alias detected`. A table with a rename from or to a keyword or literal name (such as `true` or `not`) or a dotted name keeps the previous order.

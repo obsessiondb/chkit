@@ -1,0 +1,9 @@
+NODE endpoint
+SQL >
+    %
+    SELECT __key AS key, count() AS messages
+    FROM kafka_events
+    WHERE __partition >= {{ Int16(partition, 0) }}
+    GROUP BY key
+
+TYPE endpoint

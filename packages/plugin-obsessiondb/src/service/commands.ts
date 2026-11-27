@@ -1,3 +1,5 @@
+import { compareCodePoints } from '@chkit/core'
+
 import { loadCredentials, resolveBaseUrl } from '../auth/index.js'
 import { errorEnvelope, serviceListEnvelope } from '../json-envelope.js'
 import { listServiceOrganizations, listServices } from './api.js'
@@ -63,6 +65,8 @@ async function runServiceSelect(
 	return 0
 }
 
+// chkit before #624 passed the command name in args on `chkit obsessiondb service ...`;
+// dropping it keeps this plugin working with those CLIs.
 function serviceArgs(args: string[]): string[] {
 	return args[0] === 'service' ? args.slice(1) : args
 }
@@ -84,14 +88,15 @@ export const SERVICE_COMMAND: PluginCommand = {
 		const print = (msg: string) => context.print(msg)
 		const [action] = serviceArgs(context.args)
 
-		if (
-			!action ||
-			action === 'help' ||
-			action === '--help' ||
-			action === '-h'
-		) {
+		if (!action) {
+			// One line, so `--json` prints one message, as in chkit-py (#781).
+			print('Usage: chkit plugin obsessiondb service <list|select|claim|alias> [args]')
+			return 1
+		}
+
+		if (action === 'help' || action === '--help' || action === '-h') {
 			printServiceUsage(print)
-			return action ? 0 : 1
+			return 0
 		}
 
 		if (action === 'list' || action === 'ls') {
@@ -158,8 +163,8 @@ export const SERVICE_COMMAND: PluginCommand = {
 			return runServiceAlias(context)
 		}
 
-		print(`Unknown service action: ${action}`)
-		printServiceUsage(print)
+		// One line, so `--json` prints one message, as in chkit-py (#776).
+		print(`Unknown service subcommand "${action}".`)
 		return 1
 	},
 }
@@ -198,7 +203,7 @@ async function runServiceAlias(context: PluginCommandContext): Promise<number> {
 	if (action === 'list' || action === 'ls') {
 		const aliases = await loadServiceAliases(context.configPath)
 		const entries = Object.entries(aliases).sort(([a], [b]) =>
-			a.localeCompare(b),
+			compareCodePoints(a, b),
 		)
 		if (entries.length === 0) {
 			print('No service aliases defined.')

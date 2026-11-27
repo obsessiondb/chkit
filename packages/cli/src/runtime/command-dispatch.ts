@@ -60,16 +60,14 @@ function splitQueryArgs(
 	const byName = new Map<string, FlagDef>()
 	for (const def of flagDefs) byName.set(def.name, def)
 
-	const tokens = expandShortFlags(argv, flagDefs)
+	// Split at the first `--` before scanning, so a value flag never takes it
+	// as its value and nothing after it is read as a flag (#614).
+	const { flagArgs: tokens, rest } = splitAtEndOfFlags(expandShortFlags(argv, flagDefs))
 	const flagArgs: string[] = []
 	const positionals: string[] = []
 	for (let i = 0; i < tokens.length; i += 1) {
 		const token = tokens[i]
 		if (token === undefined) continue
-		if (token === '--') {
-			positionals.push(...tokens.slice(i + 1))
-			break
-		}
 
 		const eqIdx = token.startsWith('--') ? token.indexOf('=') : -1
 		const name = eqIdx === -1 ? token : token.slice(0, eqIdx)
@@ -91,18 +89,26 @@ function splitQueryArgs(
 		}
 	}
 
-	return { flagArgs, positionals }
+	return { flagArgs, positionals: [...positionals, ...rest] }
 }
 
 /**
- * Splits a plugin command's arguments at the first `--`. A flag never takes
+ * Splits a command's arguments at the first `--`. A flag never takes
  * `--` as its value, so that one ends the flags: every token after it is a
- * positional as is, even when it starts with `-` (#568).
+ * positional as is, even when it starts with `-` (#568, #614).
  */
 function splitAtEndOfFlags(argv: string[]): { flagArgs: string[]; rest: string[] } {
 	const end = argv.indexOf('--')
 	if (end === -1) return { flagArgs: argv, rest: [] }
 	return { flagArgs: argv.slice(0, end), rest: argv.slice(end + 1) }
+}
+
+/** A stray argument given to a command that takes none, in click's words as chkit-py reports it (#612). */
+export class UnexpectedArgumentsError extends Error {
+	constructor(args: readonly string[]) {
+		super(`Got unexpected extra argument(s) (${args.join(' ')})`)
+		this.name = 'UnexpectedArgumentsError'
+	}
 }
 
 /**
@@ -134,11 +140,16 @@ function looksLikeFlag(token: string): boolean {
 	return !/\s/.test(name)
 }
 
+/**
+ * Parses a command's arguments. `--` ends the flags of every command: what
+ * follows it is a positional (#568, #614). A command that does not take
+ * arguments rejects those with click's message, as chkit-py does.
+ */
 export function parseCommandArgs(
 	commandName: string,
 	argv: string[],
 	flagDefs: readonly FlagDef[],
-	{ endOfFlags = false }: { endOfFlags?: boolean } = {},
+	{ rejectPositionals = false }: { rejectPositionals?: boolean } = {},
 ): { flags: ParsedFlags; positionals: string[] } | null {
 	if (commandName === 'query') {
 		const { flagArgs, positionals } = splitQueryArgs(argv, flagDefs)
@@ -147,20 +158,58 @@ export function parseCommandArgs(
 		return { flags, positionals }
 	}
 
-	const { flagArgs, rest } = endOfFlags
-		? splitAtEndOfFlags(argv)
-		: { flagArgs: argv, rest: [] }
+	const { flagArgs, rest } = splitAtEndOfFlags(argv)
 	const flags = parseFlagsOrReport(commandName, flagArgs, flagDefs)
 	if (!flags) return null
-	return {
-		flags,
-		positionals: [...extractPositionals(flagArgs, flagDefs), ...rest],
+	const positionals = [...extractPositionals(flagArgs, flagDefs), ...rest]
+	if (rejectPositionals && positionals.length > 0) {
+		// Reported after any flag error, as click does in chkit-py (#612). JSON
+		// mode comes only from the flags: a --json after `--` is an argument (#614).
+		reportCommandUsageError(
+			commandName,
+			new UnexpectedArgumentsError(positionals).message,
+			flags['--json'] === true,
+		)
+		return null
 	}
+	return { flags, positionals }
 }
 
-/** Core commands keep rejecting `--`; plugin commands read it as the end of their flags. */
-function isPluginCommand(resolved: RegisteredCommand): boolean {
-	return resolved.pluginName !== undefined && resolved.pluginName !== 'core'
+/** The core commands that read positionals: the SQL, the snapshot subcommand, the forwarded plugin command. */
+const CORE_COMMANDS_WITH_POSITIONALS = new Set(['query', 'snapshot', 'plugin'])
+
+/**
+ * Every other core command takes none, so a stray argument, before or after
+ * `--`, is a usage error instead of being ignored (#612, #614). A plugin
+ * command gets them in `args`, unless it sets `takesArgs: false` (#659).
+ */
+function commandArgsOptions(commandName: string, resolved: RegisteredCommand) {
+	const isCore = resolved.pluginName === undefined || resolved.pluginName === 'core'
+	return { rejectPositionals: isCore && !CORE_COMMANDS_WITH_POSITIONALS.has(commandName) }
+}
+
+/** Reports a stray argument as parseCommandArgs does for a core command. */
+export function reportStrayArgs(commandName: string, args: string[], jsonMode: boolean): void {
+	reportCommandUsageError(commandName, new UnexpectedArgumentsError(args).message, jsonMode)
+}
+
+/**
+ * Reports the arguments of a plugin command that takes none (`takesArgs:
+ * false`) as a core command's, before the command runs (#659). Returns
+ * whether it did.
+ */
+function reportsStrayPluginArgs(
+	commandName: string,
+	resolved: RegisteredCommand,
+	subcommandName: string | undefined,
+	parsed: { flags: ParsedFlags; positionals: string[] },
+): boolean {
+	const target = resolved.subcommands?.find((s) => s.name === subcommandName) ?? resolved
+	if (target.takesArgs !== false) return false
+	const args = withoutSubcommandName(parsed.positionals, subcommandName)
+	if (args.length === 0) return false
+	reportStrayArgs(commandName, args, parsed.flags['--json'] === true)
+	return true
 }
 
 /**
@@ -173,6 +222,8 @@ export function parseInitFlags(input: {
 	resolved: RegisteredCommand
 	registry: CommandRegistry
 	plugins: PluginRuntime['plugins']
+	/** Read the subcommand name as `chkit plugin` reads the command name. */
+	forwardsCommandName?: boolean
 }): ParsedFlags | null {
 	const argsAfterCommand = input.argv.slice(1)
 	if (input.commandName === 'plugin') {
@@ -182,6 +233,7 @@ export function parseInitFlags(input: {
 		argsAfterCommand,
 		input.resolved,
 		input.registry.globalFlags,
+		input.forwardsCommandName,
 	)
 	// runResolvedCommand prints help or the unknown subcommand error after onInit.
 	if (!subcommand.ok) return {}
@@ -189,9 +241,13 @@ export function parseInitFlags(input: {
 		input.commandName,
 		argsAfterCommand,
 		input.registry.resolveFlags(input.commandName, subcommand.name),
-		{ endOfFlags: isPluginCommand(input.resolved) },
+		commandArgsOptions(input.commandName, input.resolved),
 	)
-	return parsed ? parsed.flags : null
+	if (!parsed) return null
+	if (reportsStrayPluginArgs(input.commandName, input.resolved, subcommand.name, parsed)) {
+		return null
+	}
+	return parsed.flags
 }
 
 /**
@@ -208,10 +264,18 @@ export function forwardedCommandFlags(
 			const targets = Array.isArray(extension.command)
 				? extension.command
 				: [extension.command]
-			return targets.includes(pluginName) ? [...extension.flags] : []
+			return targets.some((target) => findForwardedPlugin(plugins, target)?.plugin.manifest.name === pluginName)
+				? [...extension.flags]
+				: []
 		}),
 	)
 	return [...(command.flags ?? []), ...extensionFlags]
+}
+
+export function findForwardedPlugin(plugins: PluginRuntime['plugins'], name: string | undefined) {
+	const byName = (namespace: string | undefined) =>
+		plugins.find((entry) => !entry.internal && entry.plugin.manifest.name === namespace)
+	return byName(name) ?? (name === 'sync' ? byName('ingest') : undefined)
 }
 
 /**
@@ -243,13 +307,18 @@ function parseForwardedInitFlags(
 ): ParsedFlags | null {
 	const { flags, rest } = forwarderFlags(argsAfterCommand)
 	const { pluginName, commandName, commandArgs } = routeForwardedArgs(rest)
-	const command = plugins
-		.find((entry) => entry.plugin.manifest.name === pluginName)
-		?.plugin.commands?.find((cmd) => cmd.name === commandName)
-	if (!pluginName || !command) return flags
-	const defs = forwardedCommandFlags(plugins, pluginName, command)
+	const plugin = findForwardedPlugin(plugins, pluginName)?.plugin
+	const command = plugin?.commands?.find((cmd) => cmd.name === commandName)
+	if (!plugin || !command) return flags
+	const defs = forwardedCommandFlags(plugins, plugin.manifest.name, command)
 	try {
-		return { ...flags, ...parsePluginCommandArgs(commandArgs, defs).flags }
+		const parsed = parsePluginCommandArgs(commandArgs, defs)
+		// As in `cmdPlugin`, a command that takes no arguments rejects them (#659).
+		if (command.takesArgs === false && parsed.positionals.length > 0) {
+			reportStrayArgs('plugin', parsed.positionals, flags['--json'] === true)
+			return null
+		}
+		return { ...flags, ...parsed.flags }
 	} catch (error) {
 		// Report a flag error before any hook runs, as `chkit <plugin> <command>`
 		// does, in the format the plugin command uses for it.
@@ -269,6 +338,11 @@ function parseForwardedInitFlags(
 	}
 }
 
+/** The plugin that `chkit plugin <name> ...` names, as `cmdPlugin` reads it. */
+export function forwardedPluginName(argsAfterCommand: string[]): string | undefined {
+	return routeForwardedArgs(forwarderFlags(argsAfterCommand).rest).pluginName
+}
+
 function forwarderFlags(argsAfterCommand: string[]): {
 	flags: ParsedFlags
 	rest: string[]
@@ -283,17 +357,22 @@ function matchSubcommand(
 	argsAfterCommand: string[],
 	resolved: RegisteredCommand,
 	globalFlags: readonly FlagDef[],
+	forwardsCommandName = false,
 ):
 	| { ok: true; name: string | undefined }
 	| { ok: false; token: string | undefined } {
 	if (!resolved.subcommands) return { ok: true, name: undefined }
 	// A subcommand may declare --table, so its value is never the subcommand name;
 	// the subcommand's own flag parsing then accepts or rejects it (#565).
-	const commandToken = extractPositionals(argsAfterCommand, [
-		...globalFlags,
-		TABLE_FLAG,
-		...resolved.flags,
-	])[0]
+	// A forwarder takes the first token that is not --json or --config, any
+	// other flag included, as `chkit plugin` takes the command name (#771).
+	const commandToken = forwardsCommandName
+		? routeForwardedArgs(stripGlobalFlags(argsAfterCommand).rest).pluginName
+		: extractPositionals(argsAfterCommand, [
+				...globalFlags,
+				TABLE_FLAG,
+				...resolved.flags,
+			])[0]
 	const matchedSub = resolved.subcommands.find((s) => s.name === commandToken)
 	if (matchedSub) return { ok: true, name: matchedSub.name }
 	if (resolved.subcommands.length === 1) {
@@ -361,15 +440,21 @@ export function parseFlagsOrReport(
 			error instanceof UnknownFlagError ||
 			error instanceof MissingFlagValueError
 		) {
-			console.error(error.message)
-			if (args.includes('--json')) {
-				emitJsonError(commandName, { code: 'usage', message: error.message })
-			}
-			process.exitCode = 1
+			reportCommandUsageError(commandName, error.message, args.includes('--json'))
 			return null
 		}
 		throw error
 	}
+}
+
+function reportCommandUsageError(
+	commandName: string,
+	message: string,
+	jsonMode: boolean,
+): void {
+	console.error(message)
+	if (jsonMode) emitJsonError(commandName, { code: 'usage', message })
+	process.exitCode = 1
 }
 
 async function resolvePluginTableScope(input: {
@@ -391,6 +476,22 @@ async function resolvePluginTableScope(input: {
 	}
 }
 
+/**
+ * `chkit <plugin> <command> x` gives the command the args that
+ * `chkit plugin <plugin> <command> x` gives it: the positionals after its
+ * name (#624). The name is the first positional when the user typed it; the
+ * only subcommand of a plugin also runs without it, and then nothing is dropped.
+ */
+function withoutSubcommandName(
+	positionals: string[],
+	subcommandName: string | undefined,
+): string[] {
+	if (subcommandName === undefined || positionals[0] !== subcommandName) {
+		return positionals
+	}
+	return positionals.slice(1)
+}
+
 export async function runResolvedCommand(input: {
 	argv: string[]
 	commandName: string
@@ -399,6 +500,8 @@ export async function runResolvedCommand(input: {
 	config: Parameters<PluginRuntime['runOnConfigLoaded']>[0]['config']
 	configPath: string
 	pluginRuntime: PluginRuntime
+	/** Read the subcommand name as `chkit plugin` reads the command name. */
+	forwardsCommandName?: boolean
 	/** Called with the unmatched subcommand token, or `undefined` when none was given. */
 	onAmbiguousPluginSubcommand?: (token: string | undefined) => void
 }): Promise<void> {
@@ -408,6 +511,7 @@ export async function runResolvedCommand(input: {
 		argsAfterCommand,
 		input.resolved,
 		input.registry.globalFlags,
+		input.forwardsCommandName,
 	)
 	if (!subcommand.ok) {
 		input.onAmbiguousPluginSubcommand?.(subcommand.token)
@@ -435,11 +539,14 @@ export async function runResolvedCommand(input: {
 			input.commandName,
 			argsAfterCommand,
 			allFlags,
-			{ endOfFlags: isPluginCommand(input.resolved) },
+			commandArgsOptions(input.commandName, input.resolved),
 		)
 		if (!parsed) return
+		if (reportsStrayPluginArgs(input.commandName, input.resolved, subcommandName, parsed)) {
+			return
+		}
 		flags = parsed.flags
-		positionals = parsed.positionals
+		positionals = withoutSubcommandName(parsed.positionals, subcommandName)
 	}
 
 	const gf = typedFlags(flags, [...GLOBAL_FLAGS, TABLE_FLAG] as const)

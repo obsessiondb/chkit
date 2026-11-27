@@ -27,6 +27,7 @@ import {
   parseSourceFromCreateDictionaryQuery,
   parseTTLFromCreateTableQuery,
   parseUniqueKeyFromCreateTableQuery,
+  replaceSourceInCreateDictionaryQuery,
 } from './index'
 
 type InsertCall = {
@@ -35,6 +36,86 @@ type InsertCall = {
   values: Array<Record<string, unknown>>
   columns?: string[]
 }
+
+describe('tracked command physical attempts (#732)', () => {
+  test('control sends its own query id and receipt settings without command routing', async () => {
+    const requests: URL[] = []
+    const server = Bun.serve({ port: 0, fetch(request) {
+      requests.push(new URL(request.url))
+      if (requests.length === 1) {
+        expect(request.headers.get('X-DDL')).toBeNull()
+        expect(request.headers.get('Connection')?.toLowerCase()).toBe('close')
+      }
+      return new Response('{}\n')
+    } })
+    const db = createStatelessClickHouseExecutor({ url: server.url.toString(), username: 'default', password: '', database: 'default', secure: false })
+    try {
+      if (!db.queryControl) throw new Error('Missing control capability')
+      await db.queryControl('KILL QUERY WHERE 0 SYNC', 1000, { queryId: 'receipt-control', settings: { log_queries: 1, query_id: 'ignored', result_overflow_mode: 'break', max_result_rows: 1, use_query_cache: 1, enable_reads_from_query_cache: 1, enable_writes_to_query_cache: 1 } })
+      expect(requests).toHaveLength(1)
+      expect(requests[0]?.searchParams.get('query_id')).toBe('receipt-control')
+      expect(requests[0]?.searchParams.get('log_queries')).toBe('1')
+      for (const name of ['result_overflow_mode', 'group_by_overflow_mode', 'set_overflow_mode', 'timeout_overflow_mode', 'read_overflow_mode']) expect(requests[0]?.searchParams.get(name)).toBe('throw')
+      expect(requests[0]?.searchParams.get('max_result_rows')).toBe('1')
+      const cacheSettings = { use_query_cache: 1, enable_reads_from_query_cache: 1, enable_writes_to_query_cache: 1 } as const
+      for (const name of Object.keys(cacheSettings)) expect(requests[0]?.searchParams.get(name)).toBe('0')
+      await db.query('SELECT 1', cacheSettings)
+      for (const name of Object.keys(cacheSettings)) expect(requests.at(-1)?.searchParams.get(name)).toBe('1')
+    } finally { await db.close(); server.stop(true) }
+  })
+  test('control deadline closes a stalled response body and permits executor close', async () => {
+    const server = Bun.serve({ port: 0, fetch() {
+      return new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode('{"partial":1}\n')) } }))
+    } })
+    const config = { url: server.url.toString(), username: 'default', password: '', database: 'default', secure: false }
+    const db = createStatelessClickHouseExecutor(config)
+    const started = performance.now()
+    try {
+      await expect(db.queryControl!('SELECT 1', 50)).rejects.toThrow()
+      await db.close()
+      expect(performance.now() - started).toBeLessThan(1500)
+    } finally { server.stop(true) }
+  })
+  for (const loseLock of [false, true]) {
+    test(`records a distinct id before each guarded fallback (lost: ${loseLock})`, async () => {
+      const sent: string[] = []
+      const server = Bun.serve({ port: 0, async fetch(request) {
+        const params = new URL(request.url).searchParams
+        sent.push(params.get('query_id') ?? '')
+        expect(params.get('async_insert')).toBe('0')
+        expect(params.get('max_threads')).toBe('1')
+        return new Response('')
+      } })
+      const config = { url: server.url.toString(), username: 'default', password: '', database: 'missing', secure: false }
+      const client = createStatelessClickHouseClient(config)
+      let held = true
+      const primary = spyOn(client, 'command').mockImplementation(async (params) => {
+        sent.push(params.query_id ?? '')
+        held = !loseLock
+        throw Object.assign(new Error('UNKNOWN_DATABASE'), { code: '81' })
+      })
+      const db = createExecutorWithClient(config, client)
+      const recorded: string[] = []
+      try {
+        const run = db.commandTracked!('INSERT INTO app.events SELECT 1', () => {
+          if (!held) throw new Error('ownership lost')
+        }, async () => {
+          const id = `physical-${recorded.length + 1}`
+          recorded.push(id)
+          return id
+        }, { max_threads: 1 })
+        if (loseLock) await expect(run).rejects.toThrow('ownership lost')
+        else await run
+        expect(primary).toHaveBeenCalledTimes(1)
+        expect(recorded).toEqual(loseLock ? ['physical-1'] : ['physical-1', 'physical-2'])
+        expect(sent).toEqual(recorded)
+      } finally {
+        await db.close()
+        server.stop(true)
+      }
+    })
+  }
+})
 
 type MockClientOptions = {
   commandHeaders?: Record<string, string>
@@ -345,8 +426,33 @@ SETTINGS index_granularity = 8192;`
       ['query', read],
       ['query', readWithSettings],
       ['queryJson', read],
-      ['command', { async_insert: 0, ...progress, max_threads: 1 }],
-      ['insert', { async_insert: 0, ...progress }],
+      ['command', { async_insert: 0, wait_for_async_insert: 1, ...progress, max_threads: 1 }],
+      ['insert', { async_insert: 0, wait_for_async_insert: 1, ...progress }],
+    ])
+    await executor.close()
+  })
+
+  // #790: async_insert and wait_for_async_insert are defaults a caller may
+  // override, sent after the caller's other settings: the server applies a
+  // request's settings in order, so a settings profile would change them.
+  test('a write sends the durable insert settings last, the caller\'s value as written', async () => {
+    const sent: unknown[] = []
+    const client = {
+      async command(params: { clickhouse_settings?: unknown }) {
+        sent.push(params.clickhouse_settings)
+        return { query_id: 'q', response_headers: {} }
+      },
+      async close() {},
+    } as unknown as ReturnType<typeof createStatelessClickHouseClient>
+    const executor = createExecutorWithClient(
+      { url: 'http://localhost:8123', username: 'default', password: '', database: 'default', secure: false },
+      client,
+    )
+    await executor.command('INSERT INTO t VALUES (1)', { async_insert: 'TRUE' as unknown as 1, profile: 'bulk' })
+    await executor.command('INSERT INTO t VALUES (2)', { profile: 'bulk' })
+    expect(sent.map((settings) => Object.entries(settings as object))).toEqual([
+      [...Object.entries(progress), ['profile', 'bulk'], ['async_insert', 'TRUE'], ['wait_for_async_insert', 1]],
+      [...Object.entries(progress), ['profile', 'bulk'], ['async_insert', 0], ['wait_for_async_insert', 1]],
     ])
     await executor.close()
   })
@@ -764,6 +870,13 @@ COMMENT 'User lookup dictionary'`
     expect(parseLifetimeFromCreateDictionaryQuery(query)).toBe('MIN 0 MAX 300')
   })
 
+  test('parses a source whose string ends in an escaped backslash', () => {
+    const backslashQuery =
+      "CREATE DICTIONARY default.files (`id` UInt64) PRIMARY KEY id SOURCE(FILE(PATH '/data/C:\\\\' FORMAT 'TSV')) LIFETIME(MIN 0 MAX 300) LAYOUT(FLAT())"
+    expect(parseSourceFromCreateDictionaryQuery(backslashQuery)).toBe("FILE(PATH '/data/C:\\\\' FORMAT 'TSV')")
+    expect(parseLayoutFromCreateDictionaryQuery(backslashQuery)).toBe('FLAT()')
+  })
+
   test('returns empty results for undefined query', () => {
     expect(parseDictionaryAttributesFromCreateDictionaryQuery(undefined)).toEqual([])
     expect(parseDictionaryPrimaryKeyFromCreateDictionaryQuery(undefined)).toEqual([])
@@ -859,6 +972,41 @@ RANGE(MIN start_date MAX end_date)`
     expect(parseSourceFromCreateDictionaryQuery(shadowedRangeQuery)).toBe(
       "HTTP(url 'http://example.com/rates' format 'TSV')"
     )
+  })
+
+  describe('finds the dictionary-level SOURCE only outside names, strings, comments and other clauses', () => {
+    const realSource = "HTTP(URL 'https://user:fake-password@host/data?token=fake-token' FORMAT 'TSV')"
+    const tail = `SOURCE(${realSource}) LIFETIME(MIN 0 MAX 0) LAYOUT(FLAT())`
+    const cases: Array<[string, string]> = [
+      ['a quoted name', `CREATE DICTIONARY app.d (\`SOURCE(x)\` UInt64) PRIMARY KEY \`SOURCE(x)\` ${tail}`],
+      ['a quoted name with a closing paren', `CREATE DICTIONARY app.d (\`a) SOURCE(x\` UInt64) PRIMARY KEY \`a) SOURCE(x\` ${tail}`],
+      ['a block comment', `CREATE DICTIONARY app.d (\`id\` UInt64) PRIMARY KEY id /* SOURCE(x) */ ${tail}`],
+      ['a line comment', `CREATE DICTIONARY app.d (\`id\` UInt64) PRIMARY KEY id -- SOURCE(x)\n${tail}`],
+      ['a string literal', `CREATE DICTIONARY app.d (\`id\` UInt64) PRIMARY KEY id SETTINGS(format_csv_delimiter = 'SOURCE(x)') ${tail}`],
+      ['another clause', `CREATE DICTIONARY app.d (\`id\` UInt64) PRIMARY KEY id LAYOUT(SOURCE(x)) ${tail}`],
+    ]
+    for (const [name, query] of cases) {
+      test(name, () => {
+        expect(parseSourceFromCreateDictionaryQuery(query)).toBe(realSource)
+        const masked = replaceSourceInCreateDictionaryQuery(query, 'NULL()') ?? ''
+        expect(masked).toContain('SOURCE(NULL())')
+        for (const marker of ['fake-password', 'fake-token', 'user:']) expect(masked).not.toContain(marker)
+      })
+    }
+
+    test('a quoted primary key name stays whole', () => {
+      expect(parseDictionaryPrimaryKeyFromCreateDictionaryQuery(cases[0]?.[1])).toEqual(['SOURCE(x)'])
+    })
+
+    test('a statement with no single top-level SOURCE is not masked', () => {
+      const twice = `CREATE DICTIONARY app.d (\`id\` UInt64) PRIMARY KEY id SOURCE(NULL()) ${tail}`
+      const unterminated = `CREATE DICTIONARY app.d (\`id\` UInt64) PRIMARY KEY id ${tail} COMMENT 'open`
+      const unbalanced = `CREATE DICTIONARY app.d (\`id\` UInt64) PRIMARY KEY id SOURCE(${realSource}`
+      for (const query of [twice, unterminated, unbalanced]) {
+        expect(replaceSourceInCreateDictionaryQuery(query, 'NULL()')).toBeUndefined()
+        expect(parseSourceFromCreateDictionaryQuery(query)).toBeUndefined()
+      }
+    })
   })
 })
 
@@ -1084,6 +1232,9 @@ function createStatusCapturingClient(
         response_headers: {},
         async text() {
           return text
+        },
+        async json() {
+          return { data: text.split('\n').filter((line) => line.trim()).map((line) => JSON.parse(line)) }
         },
       }
     },

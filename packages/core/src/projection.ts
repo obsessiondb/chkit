@@ -1,7 +1,8 @@
 import type { IndexProjectionDefinition, ProjectionDefinition } from './model-types.js'
 import { splitTopLevelComma } from './key-clause.js'
 import { normalizeSQLFragment } from './sql-normalizer.js'
-import { findQuoteEnd, isQuoteChar, stripWrappingParens } from './sql-scan.js'
+import { sqlTokens } from './sql-lexer.js'
+import { stripWrappingParens } from './sql-scan.js'
 
 export function isIndexProjection(
   projection: ProjectionDefinition
@@ -9,25 +10,21 @@ export function isIndexProjection(
   return 'index' in projection
 }
 
-/** ClickHouse prints one space after every argument separator. */
+/**
+ * ClickHouse prints one space after every argument separator. The input is
+ * read with the SQL lexer, so a comma in a string, quoted name or heredoc
+ * (`$$a,b$$`) is text and keeps its literal (#596).
+ */
 function spaceAfterCommas(input: string): string {
   let out = ''
-  for (let i = 0; i < input.length; i += 1) {
-    const char = input[i] ?? ''
-    if (isQuoteChar(char)) {
-      const end = findQuoteEnd(input, i, char)
-      out += input.slice(i, end + 1)
-      i = end
-      continue
-    }
+  let afterComma = false
+  for (const token of sqlTokens(input)) {
     // Whitespace is already collapsed to single spaces by normalizeSQLFragment,
     // so a comma is followed by at most one space.
-    if (char === ',') {
-      out += ', '
-      if (input[i + 1] === ' ') i += 1
-      continue
-    }
-    out += char
+    const dropSpace = afterComma && token.kind === 'whitespace' && token.text.startsWith(' ')
+    const text = dropSpace ? token.text.slice(1) : token.text
+    afterComma = token.kind === 'punctuation' && token.text === ','
+    out += afterComma ? ', ' : text
   }
   return out
 }

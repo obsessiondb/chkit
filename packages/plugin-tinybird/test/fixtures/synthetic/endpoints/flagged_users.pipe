@@ -1,0 +1,7 @@
+NODE endpoint
+SQL >
+    SELECT user_id, argMax(flag, set_at) AS flag
+    FROM user_flags
+    GROUP BY user_id
+
+TYPE endpoint

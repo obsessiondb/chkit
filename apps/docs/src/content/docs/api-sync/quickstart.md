@@ -7,7 +7,7 @@ Use [chkit Sync (beta)](/sync/) to load the small [JSONPlaceholder posts dataset
 
 ## Prerequisites
 
-Use a TypeScript project, Bun, a direct ClickHouse connection, and a chkit release that includes `@chkit/plugin-ingest`. This example uses native JSON; use ClickHouse 25.3+ for production support of that type. See [compatibility](/guides/clickhouse-compatibility/).
+Use a TypeScript project, Bun, a direct ClickHouse connection, and a chkit release that includes `@chkit/plugin-sync`. This example uses native JSON; use ClickHouse 25.3+ for production support of that type. See [compatibility](/guides/clickhouse-compatibility/).
 
 Destination tables use chkit Schema's generate, review, and migrate workflow. Read the [first schema tutorial](/tutorials/first-schema/) for an introduction; this quickstart includes the destination definitions and migration commands needed for the example.
 
@@ -20,18 +20,18 @@ JSONPlaceholder is a public demonstration API with a small dataset, so use a ful
 Install the `beta` release. Keep the CLI, core, and plugin versions aligned:
 
 ```sh
-bun add -d chkit@beta @chkit/core@beta @chkit/plugin-ingest@beta
+bun add -d chkit@beta @chkit/core@beta @chkit/plugin-sync@beta
 ```
 
 Create `clickhouse.config.ts`:
 
 ```ts
 import { defineConfig } from '@chkit/core'
-import { ingest } from '@chkit/plugin-ingest'
+import { sync } from '@chkit/plugin-sync'
 
 export default defineConfig({
   entry: './src/chkit.ts',
-  plugins: [ingest()],
+  plugins: [sync()],
   clickhouse: {
     url: process.env.CLICKHOUSE_URL ?? 'http://localhost:8123',
     username: process.env.CLICKHOUSE_USER ?? 'default',
@@ -49,7 +49,7 @@ Create `src/chkit.ts`:
 
 ```ts
 import { view } from '@chkit/core'
-import { definePipeline, defineStream, rawRows, rawTable } from '@chkit/plugin-ingest'
+import { definePipeline, defineStream, rawRows, rawTable } from '@chkit/plugin-sync'
 
 type Post = { id: number; userId: number; title: string; body: string }
 
@@ -80,7 +80,7 @@ export const demo = definePipeline({ id: 'demo', streams: [postStream] })
 ## Create tables and run
 
 ```sh
-bunx chkit ingest list
+bunx chkit sync list
 bunx chkit generate --name add-posts-ingestion
 bunx chkit migrate --json
 ```
@@ -89,16 +89,16 @@ Review the generated migration, then apply it to the intended development databa
 
 ```sh
 bunx chkit migrate --apply
-bunx chkit ingest run --tag stream:jsonplaceholder.posts
+bunx chkit sync run --tag stream:jsonplaceholder.posts
 bunx chkit query "SELECT count() FROM default.posts"
 bunx chkit query "SELECT id, title FROM default.posts LIMIT 5"
 ```
 
-The demonstration dataset contains 100 posts. Run ingestion again and query the view: it should still return 100 logical posts. Physical rows can contain multiple versions until ClickHouse merges them. A full sync has no incremental bookmark, so `ingest status` can show no checkpoint after a successful run.
+The demonstration dataset contains 100 posts. Run ingestion again and query the view: it should still return 100 logical posts. Physical rows can contain multiple versions until ClickHouse merges them. A full sync has no incremental bookmark, so `chkit sync status` can show no checkpoint after a successful run.
 
 ## Existing projects
 
-Keep the current connection and plugin registrations; add `ingest()` to them. With `schema` globs, add the provider's entry module to the existing schema paths so its pipeline and table exports are loaded. With `entry`, re-export the new tables and pipelines from that entry. If switching from `schema` to `entry`, remove `schema` and re-export **all existing schema definitions** to preserve the schema input to migration generation.
+Keep the current connection and plugin registrations; add `sync()` to them. With `schema` globs, add the provider's entry module to the existing schema paths so its pipeline and table exports are loaded. With `entry`, re-export the new tables and pipelines from that entry. If switching from `schema` to `entry`, remove `schema` and re-export **all existing schema definitions** to preserve the schema input to migration generation.
 
 Only exported pipelines are active. Importing a source module for side effects does not activate it, and a table referenced by a stream must still be exported to participate in schema migrations. Inspect the generated SQL for unintended removals before applying it.
 

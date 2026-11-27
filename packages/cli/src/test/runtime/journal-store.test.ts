@@ -1,8 +1,9 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
 
-import { createJournalStore, type MigrationRowState } from '../../runtime/journal-store.js'
+import { ATTEMPT_RECORD_MARKER } from '../../commands/migrate/async-apply.js'
+import { type CopyRow, createJournalStore, everyCopyRead, type MigrationRowState, type OperationState } from '../../runtime/journal-store.js'
 import { CLI_VERSION } from '../../runtime/version.js'
 
 interface ScriptedExecutor {
@@ -230,6 +231,7 @@ describe('createJournalStore', () => {
           startedAt: '2026-05-26 12:00:00.000',
           finishedAt: null,
           lastError: '',
+          fingerprint: '',
         },
       ],
     })
@@ -263,6 +265,44 @@ describe('createJournalStore', () => {
     expect(commandCalls.filter((sql) => sql.startsWith('INSERT INTO'))).toEqual([])
   })
 
+  test('retries a journal CREATE that reached a replica without the database yet (#493)', async () => {
+    // The probe found the database; the first CREATE reached a replica that
+    // has not applied CREATE DATABASE yet.
+    const commandCalls: string[] = []
+    let createAttempts = 0
+    const db = {
+      async command(sql: string) {
+        if (sql.startsWith('CREATE TABLE')) {
+          createAttempts += 1
+          if (createAttempts === 1) throw Object.assign(new Error('Database app does not exist'), { code: '81' })
+        }
+        commandCalls.push(sql)
+      },
+      async query<T>(sql: string): Promise<T[]> {
+        if (sql.startsWith('SELECT currentDatabase()')) return [{ database: 'app' }] as T[]
+        if (/SELECT name, migration_completed, operations FROM .* LIMIT 0/.test(sql) && createAttempts < 2) {
+          throw Object.assign(new Error('Table app._chkit_migrations does not exist. (UNKNOWN_TABLE)'), { code: '60' })
+        }
+        return []
+      },
+    } as unknown as ClickHouseExecutor
+
+    const store = createJournalStore(db)
+    await store.writeMigrationState({
+      name: 'bootstrap.sql',
+      appliedAt: '2026-05-26 12:00:00.000',
+      checksum: 'cs',
+      chkitVersion: 'v',
+      migrationCompleted: true,
+      operations: [],
+    })
+
+    expect(store.databaseMissing).toBe(false)
+    expect(createAttempts).toBe(2)
+    expect(commandCalls[0]).toStartWith('CREATE TABLE IF NOT EXISTS `app`._chkit_migrations')
+    expect(commandCalls.some((sql) => sql.startsWith('INSERT INTO `app`._chkit_migrations'))).toBe(true)
+  })
+
   test('writeMigrationState escapes single quotes inside lastError so SQL stays valid', async () => {
     const { db, commandCalls } = createScriptedExecutor(
       new Map<string | RegExp, unknown[]>([
@@ -287,6 +327,7 @@ describe('createJournalStore', () => {
           startedAt: '2026-05-26 12:00:00.000',
           finishedAt: '2026-05-26 12:01:00.000',
           lastError: "It's broken: 'unterminated",
+          fingerprint: '',
         },
       ],
     })
@@ -358,6 +399,7 @@ describe('createJournalStore', () => {
             startedAt: '2026-10-09T12:00:00.000',
             finishedAt: '2026-10-09T12:00:00.200',
             lastError: '',
+            fingerprint: '',
           },
         ],
       }
@@ -387,6 +429,41 @@ describe('createJournalStore', () => {
 
       const state = await store.readMigrationState('m.sql')
       expect(state?.operations.map((op) => op.status)).toEqual(['started'])
+    })
+
+    // #672: ReplacingMergeTree keeps the newest applied_at, so a write stamped
+    // by a clock that stalls, steps back or runs behind the writer of the row
+    // it read must still carry a newer version.
+    test('each write carries a newer version than the last write, also on a stalled clock', async () => {
+      const { db, commandCalls } = createScriptedExecutor(
+        new Map<string | RegExp, unknown[]>([
+          [/SELECT name, migration_completed, operations FROM .* LIMIT 0/, []],
+        ]),
+      )
+      const store = createJournalStore(db)
+      await store.writeMigrationState(writtenState('2026-10-09T12:00:00.200'))
+      await store.writeMigrationState(writtenState('2026-10-09T12:00:00.200'))
+      await store.writeMigrationState(writtenState('2026-10-09T12:00:00.150'))
+
+      const versions = commandCalls
+        .filter((sql) => sql.startsWith('INSERT INTO'))
+        .map((sql) => /VALUES \('m\.sql', '([^']+)'/.exec(sql)?.[1])
+      expect(versions).toEqual(['2026-10-09T12:00:00.200', '2026-10-09T12:00:00.201', '2026-10-09T12:00:00.202'])
+    })
+
+    test('a write carries a newer version than the row it read, also when its clock is behind', async () => {
+      const { db, commandCalls } = createScriptedExecutor(
+        new Map<string | RegExp, unknown[]>([
+          [/SELECT name, migration_completed, operations FROM .* LIMIT 0/, []],
+          [/FROM .* FINAL WHERE name = /, [staleRow('2026-10-09 12:00:00.300')]],
+        ]),
+      )
+      const store = createJournalStore(db)
+      await store.readMigrationState('m.sql')
+      await store.writeMigrationState(writtenState('2026-10-09T12:00:00.200'))
+
+      const insert = commandCalls.find((sql) => sql.startsWith('INSERT INTO'))
+      expect(insert).toContain("VALUES ('m.sql', '2026-10-09T12:00:00.301'")
     })
 
     test('returns the last write when the replica has no row yet', async () => {
@@ -451,6 +528,8 @@ describe('createJournalStore', () => {
           journalPolls += 1
           return [{ replicas: seen }] as T[]
         }
+        // Every replica has the fingerprint column.
+        if (sql.includes('system.columns') && sql.includes('AS replicas')) return [{ replicas }] as T[]
         return scripted<T>(sql)
       }
       const queries: string[] = []
@@ -469,7 +548,9 @@ describe('createJournalStore', () => {
 
       const read = queries.find((sql) => sql.includes("name = 'm.sql'"))
       expect(read).toContain("clusterAllReplicas('default', currentDatabase(), '_chkit_migrations')")
-      expect(read).toContain('argMax(tuple(applied_at, checksum, chkit_version, migration_completed, toJSONString(operations)), applied_at)')
+      expect(read).toContain(
+        "argMax(tuple(applied_at, checksum, chkit_version, migration_completed, toJSONString(CAST(operations, 'Array(Tuple(operation_index Int32, operation_key String, operation_type String, query_id String, status String, started_at String, finished_at Nullable(String), last_error String))')), toJSONString(operation_fingerprints)), applied_at)",
+      )
       expect(read).not.toContain('FINAL')
     })
 
@@ -569,8 +650,8 @@ describe('createJournalStore', () => {
         operations: [],
       })
 
-      expect(commands[0]).toStartWith('CREATE TABLE IF NOT EXISTS _chkit_migrations')
-      expect(commands.some((sql) => sql.startsWith('INSERT INTO _chkit_migrations'))).toBe(true)
+      expect(commands[0]).toStartWith('CREATE TABLE IF NOT EXISTS `default`._chkit_migrations')
+      expect(commands.some((sql) => sql.startsWith('INSERT INTO `default`._chkit_migrations'))).toBe(true)
     })
 
     test('an up-to-date journal is read without ALTER', async () => {
@@ -587,7 +668,9 @@ describe('createJournalStore', () => {
 
       await store.readJournal()
 
-      expect(commands.filter((sql) => sql.startsWith('ALTER TABLE'))).toHaveLength(2)
+      const alters = commands.filter((sql) => sql.startsWith('ALTER TABLE'))
+      expect(alters).toHaveLength(3)
+      expect(alters[2]).toContain('ADD COLUMN IF NOT EXISTS operation_fingerprints Array(String) DEFAULT []')
     })
 
     test('a read fails on an error other than a missing journal', async () => {
@@ -607,5 +690,778 @@ describe('createJournalStore', () => {
       expect(reads).toHaveLength(2)
       expect(reads[1]).not.toContain('SETTINGS')
     })
+  })
+
+  // Fingerprints live in a column of their own, which older releases never
+  // name: their writes leave it [] (#599).
+  describe('statement fingerprints (#599)', () => {
+    const FINGERPRINT_PROBE = /^SELECT operation_fingerprints FROM _chkit_migrations LIMIT 0$/
+
+    function clickHouseError(code: string, type: string): Error {
+      return Object.assign(new Error(`${type} error`), { code, type })
+    }
+
+    function storeWith(input: {
+      rows?: unknown[]
+      queryError?: (sql: string) => Error | undefined
+      commandError?: (sql: string) => Error | undefined
+    }) {
+      const commands: string[] = []
+      const queries: string[] = []
+      const db = {
+        async command(sql: string) {
+          commands.push(sql)
+          const error = input.commandError?.(sql)
+          if (error) throw error
+        },
+        async query<T>(sql: string): Promise<T[]> {
+          queries.push(sql)
+          const error = input.queryError?.(sql)
+          if (error) throw error
+          if (!sql.includes("WHERE name = 'm.sql'")) return []
+          // A read that does not select the column does not get it.
+          const rows = (input.rows ?? []) as Array<Record<string, unknown>>
+          return (sql.includes('operation_fingerprints')
+            ? rows
+            : rows.map(({ operation_fingerprints: _, ...rest }) => rest)) as T[]
+        },
+      } as unknown as ClickHouseExecutor
+      return { store: createJournalStore(db), commands, queries }
+    }
+
+    function row(operations: unknown[], fingerprints: unknown) {
+      return {
+        name: 'm.sql',
+        applied_at: '2026-11-09 12:00:00.000',
+        checksum: 'abc',
+        chkit_version: '0.0.0',
+        migration_completed: false,
+        operations: JSON.stringify(operations),
+        operation_fingerprints: JSON.stringify(fingerprints),
+      }
+    }
+
+    const tuple = (index: number) => ({
+      operation_index: index,
+      operation_key: `statement:${index}`,
+      operation_type: 'sql_statement',
+      query_id: '',
+      status: 'completed',
+      started_at: '2026-11-09 12:00:00.000',
+      finished_at: '2026-11-09 12:00:00.000',
+      last_error: '',
+    })
+
+    function state(fingerprints: string[]): MigrationRowState {
+      return {
+        name: 'm.sql',
+        appliedAt: '2026-11-09T12:00:01.000',
+        checksum: 'abc',
+        chkitVersion: '0.0.0',
+        migrationCompleted: false,
+        operations: fingerprints.map((fingerprint, index) => ({
+          operationIndex: index,
+          operationKey: `statement:${index}`,
+          operationType: 'sql_statement',
+          queryId: '',
+          status: 'completed',
+          startedAt: '2026-11-09T12:00:00.000',
+          finishedAt: '2026-11-09T12:00:00.000',
+          lastError: '',
+          fingerprint,
+        })),
+      }
+    }
+
+    test('reads one fingerprint per operation, in order', async () => {
+      const { store, queries } = storeWith({ rows: [row([tuple(0), tuple(1)], ['v1:a', 'v1:b'])] })
+
+      const read = await store.readMigrationState('m.sql')
+
+      expect(read?.operations.map((op) => op.fingerprint)).toEqual(['v1:a', 'v1:b'])
+      expect(queries.find((sql) => sql.includes("name = 'm.sql'"))).toContain(
+        'toJSONString(operation_fingerprints) AS operation_fingerprints',
+      )
+    })
+
+    test('a row an older release wrote has no fingerprints', async () => {
+      const { store } = storeWith({ rows: [row([tuple(0), tuple(1)], [])] })
+
+      const read = await store.readMigrationState('m.sql')
+
+      expect(read?.operations.map((op) => op.fingerprint)).toEqual(['', ''])
+    })
+
+    test('writes the fingerprints next to the operations', async () => {
+      const { store, commands } = storeWith({})
+
+      await store.writeMigrationState(state(['v1:a', "v1:'b"]))
+
+      const insert = commands.find((sql) => sql.startsWith('INSERT INTO'))
+      // Never an asynchronous insert, on any transport (#767).
+      expect(insert).toContain('migration_completed, operations, operation_fingerprints) SETTINGS async_insert = 0 VALUES')
+      expect(insert).toEndWith(", ['v1:a','v1:\\'b'])")
+      expect(commands.some((sql) => sql.startsWith('ALTER TABLE'))).toBe(false)
+    })
+
+    // #767: a fenced started record stores its fingerprint with a prefix, so
+    // releases from #599 on stop at it. Only the write that sets the fence
+    // stores it; any other write of the record stores it as it was read.
+    describe('attempt fence (#767)', () => {
+      const started = (overrides: Partial<OperationState> = {}): MigrationRowState => ({
+        ...state(['v1:a']),
+        operations: [{ ...state(['v1:a']).operations[0], queryId: 'q-1', status: 'started', finishedAt: null, lastError: ATTEMPT_RECORD_MARKER, ...overrides } as OperationState],
+      })
+      const insertOf = (commands: string[]) => commands.find((sql) => sql.startsWith('INSERT INTO')) ?? ''
+
+      test('a fenced started record is stored with the prefix and read back fenced', async () => {
+        const { store, commands } = storeWith({ rows: [row([{ ...tuple(0), status: 'started', query_id: 'q-1', finished_at: null }], ['fenced-attempt;v1:a'])] })
+
+        await store.writeMigrationState(started({ attemptFenced: true }))
+        const read = await store.readMigrationState('m.sql')
+
+        expect(insertOf(commands)).toEndWith(", ['fenced-attempt;v1:a'])")
+        expect(read?.operations[0]).toMatchObject({ fingerprint: 'v1:a', attemptFenced: true })
+      })
+
+      // 770b, 770c, 770d: a rewrite of a record read without the fence (a
+      // --retry re-key, an abandon) never adds it, whatever its lastError says.
+      test('a started record with the marker but without the fence is stored without it', async () => {
+        const { store, commands } = storeWith({})
+
+        await store.writeMigrationState(started())
+
+        expect(insertOf(commands)).toEndWith(", ['v1:a'])")
+      })
+
+      // A failed record keeps the fence (the server recorded its failure); a
+      // completed one never has it, so every release skips it as before.
+      for (const [status, stored] of [['completed', 'v1:a'], ['failed', 'fenced-attempt;v1:a']] as const) {
+        test(`a ${status} copy of a fenced record is stored as ${stored}`, async () => {
+          const { store, commands } = storeWith({})
+
+          await store.writeMigrationState(started({ attemptFenced: true, status, finishedAt: '2026-11-09T12:00:02.000' }))
+
+          expect(insertOf(commands)).toEndWith(`, ['${stored}'])`)
+        })
+      }
+
+      test('a row without the prefix is read without the fence', async () => {
+        const { store } = storeWith({ rows: [row([{ ...tuple(0), status: 'started', query_id: 'q-1', finished_at: null }], ['v1:a'])] })
+
+        const read = await store.readMigrationState('m.sql')
+
+        expect(read?.operations[0]?.attemptFenced).toBeUndefined()
+      })
+
+      // #767 (round 2): an async submit requires the server's record, not
+      // this process's last write.
+      test('readStoredOperation returns the server row only, never the last write', async () => {
+        const { store } = storeWith({})
+
+        await store.writeMigrationState(started({ attemptFenced: true }))
+
+        expect((await store.readMigrationState('m.sql'))?.operations[0]?.queryId).toBe('q-1')
+        expect(await store.readStoredOperation('m.sql', 0)).toBeUndefined()
+      })
+
+      test('readStoredOperation returns the fenced record the server has', async () => {
+        const { store } = storeWith({ rows: [row([{ ...tuple(0), status: 'started', query_id: 'q-1', finished_at: null }], ['fenced-attempt;v1:a'])] })
+
+        expect(await store.readStoredOperation('m.sql', 0)).toMatchObject({ queryId: 'q-1', fingerprint: 'v1:a', attemptFenced: true })
+      })
+
+      test('a journal without the column stores no fence, and the cached write has none either', async () => {
+        const { store, commands } = storeWith({
+          queryError: (sql) => (FINGERPRINT_PROBE.test(sql) ? clickHouseError('47', 'UNKNOWN_IDENTIFIER') : undefined),
+          commandError: (sql) => (sql.startsWith('ALTER TABLE') ? clickHouseError('497', 'ACCESS_DENIED') : undefined),
+        })
+
+        await store.writeMigrationState(started({ attemptFenced: true }))
+        // The server returns no row, so the read returns the last write.
+        const read = await store.readMigrationState('m.sql')
+
+        expect(insertOf(commands)).not.toContain('operation_fingerprints')
+        expect(read?.operations[0]?.queryId).toBe('q-1')
+        expect(read?.operations[0]?.attemptFenced).toBeUndefined()
+      })
+    })
+
+    test('a journal without the column is read without fingerprints and never altered by a read', async () => {
+      const { store, commands, queries } = storeWith({
+        rows: [row([tuple(0)], ['v1:a'])],
+        queryError: (sql) => (FINGERPRINT_PROBE.test(sql) ? clickHouseError('47', 'UNKNOWN_IDENTIFIER') : undefined),
+      })
+
+      const read = await store.readMigrationState('m.sql')
+
+      expect(read?.operations.map((op) => op.fingerprint)).toEqual([''])
+      expect(queries.find((sql) => sql.includes("name = 'm.sql'"))).not.toContain('operation_fingerprints')
+      expect(commands.filter((sql) => !sql.startsWith('SYSTEM SYNC REPLICA'))).toEqual([])
+    })
+
+    test('the first write adds the column to a journal an older release created', async () => {
+      const { store, commands } = storeWith({
+        queryError: (sql) =>
+          FINGERPRINT_PROBE.test(sql) && !commands.some((command) => command.startsWith('ALTER TABLE'))
+            ? clickHouseError('47', 'UNKNOWN_IDENTIFIER')
+            : undefined,
+      })
+      await store.readJournal()
+
+      await store.writeMigrationState(state(['v1:a']))
+
+      const writes = commands.filter((sql) => !sql.startsWith('SYSTEM SYNC REPLICA'))
+      expect(writes[0]).toBe(
+        'ALTER TABLE `default`._chkit_migrations ADD COLUMN IF NOT EXISTS operation_fingerprints Array(String) DEFAULT []',
+      )
+      expect(writes[1]).toContain(", ['v1:a'])")
+    })
+
+    test('a user that cannot alter the journal still writes, without fingerprints', async () => {
+      const { store, commands } = storeWith({
+        queryError: (sql) => (FINGERPRINT_PROBE.test(sql) ? clickHouseError('47', 'UNKNOWN_IDENTIFIER') : undefined),
+        commandError: (sql) => (sql.startsWith('ALTER TABLE') ? clickHouseError('497', 'ACCESS_DENIED') : undefined),
+      })
+
+      await store.writeMigrationState(state(['v1:a']))
+      await store.writeMigrationState(state(['v1:a']))
+
+      const inserts = commands.filter((sql) => sql.startsWith('INSERT INTO'))
+      expect(inserts).toHaveLength(2)
+      expect(inserts.every((sql) => !sql.includes('operation_fingerprints'))).toBe(true)
+      // The ALTER is tried once per run.
+      expect(commands.filter((sql) => sql.startsWith('ALTER TABLE'))).toHaveLength(1)
+    })
+
+    describe('a run that cannot add the column', () => {
+      let stderr: ReturnType<typeof spyOn<Console, 'error'>>
+      beforeEach(() => {
+        stderr = spyOn(console, 'error').mockImplementation(() => {})
+      })
+      afterEach(() => stderr.mockRestore())
+
+      test('says once on stderr that it records no fingerprints', async () => {
+        const denied = Object.assign(
+          new Error(
+            "u: Not enough privileges. To execute this query, it's necessary to have the grant ALTER ADD COLUMN(operation_fingerprints) ON db._chkit_migrations. ",
+          ),
+          { code: '497' },
+        )
+        const { store } = storeWith({
+          queryError: (sql) => (FINGERPRINT_PROBE.test(sql) ? clickHouseError('47', 'UNKNOWN_IDENTIFIER') : undefined),
+          commandError: (sql) => (sql.startsWith('ALTER TABLE') ? denied : undefined),
+        })
+
+        await store.writeMigrationState(state(['v1:a']))
+        await store.writeMigrationState(state(['v1:a']))
+
+        expect(stderr.mock.calls).toEqual([[
+          "⚠ Could not add the operation_fingerprints column to _chkit_migrations (u: Not enough privileges. To execute this query, it's necessary to have the grant ALTER ADD COLUMN(operation_fingerprints) ON db._chkit_migrations), so this run records no statement fingerprints: " +
+            'a later --retry or resume checks the statements it completes by position and "-- operation:" marker only, not by their SQL. ' +
+            'The next migration applied by a user that can ALTER _chkit_migrations adds the column.',
+        ]])
+      })
+
+      test('says nothing when the journal has the column', async () => {
+        const { store } = storeWith({
+          commandError: (sql) => (sql.startsWith('ALTER TABLE') ? clickHouseError('497', 'ACCESS_DENIED') : undefined),
+        })
+
+        await store.writeMigrationState(state(['v1:a']))
+
+        expect(stderr).not.toHaveBeenCalled()
+      })
+    })
+
+    // Fingerprints that were recorded are never read as missing (#599): only a
+    // server that says the column is missing switches to the old format.
+    test('a probe that fails for another reason stops the read', async () => {
+      const { store } = storeWith({
+        rows: [row([tuple(0)], ['v1:a'])],
+        queryError: (sql) => (FINGERPRINT_PROBE.test(sql) ? new Error('HTTP 503 Service Unavailable') : undefined),
+      })
+
+      await expect(store.readMigrationState('m.sql')).rejects.toThrow('HTTP 503')
+    })
+
+    test('a read that fails on the column is not retried without it', async () => {
+      const { store } = storeWith({
+        rows: [row([tuple(0)], ['v1:a'])],
+        queryError: (sql) =>
+          sql.includes("name = 'm.sql'") && sql.includes('operation_fingerprints')
+            ? clickHouseError('47', 'UNKNOWN_IDENTIFIER')
+            : undefined,
+      })
+
+      await expect(store.readMigrationState('m.sql')).rejects.toThrow('UNKNOWN_IDENTIFIER')
+    })
+
+    test('an INSERT that fails on the column is not written again without it', async () => {
+      const { store, commands } = storeWith({
+        commandError: (sql) =>
+          sql.includes('operation_fingerprints) SETTINGS async_insert = 0 VALUES') ? clickHouseError('16', 'NO_SUCH_COLUMN_IN_TABLE') : undefined,
+      })
+
+      await expect(store.writeMigrationState(state(['v1:a']))).rejects.toThrow('NO_SUCH_COLUMN_IN_TABLE')
+      expect(commands.filter((sql) => sql.startsWith('INSERT INTO'))).toHaveLength(1)
+    })
+
+    describe('on several replicas', () => {
+      function replicatedStore(replicasWithColumn: number[]) {
+        let polls = 0
+        const queries: string[] = []
+        const db = {
+          async command() {},
+          async query<T>(sql: string): Promise<T[]> {
+            queries.push(sql)
+            if (sql.includes('system.one')) return [{ replicas: 2 }] as T[]
+            if (sql.includes('currentDatabase() AS database')) return [{ database: 'default' }] as T[]
+            if (sql.includes('system.tables') && sql.includes('AS replicas')) return [{ replicas: 2 }] as T[]
+            if (sql.includes('system.columns') && sql.includes('AS replicas')) {
+              const seen = replicasWithColumn[Math.min(polls, replicasWithColumn.length - 1)]
+              polls += 1
+              return [{ replicas: seen }] as T[]
+            }
+            return []
+          },
+        } as unknown as ClickHouseExecutor
+        return { store: createJournalStore(db), queries }
+      }
+
+      test('a column one replica has is waited for on every replica, then read', async () => {
+        const { store, queries } = replicatedStore([1, 1, 2])
+
+        await store.readMigrationState('m.sql')
+
+        const read = queries.find((sql) => sql.includes("name = 'm.sql'"))
+        expect(read).toContain('toJSONString(operation_fingerprints)')
+        expect(queries.filter((sql) => sql.includes('system.columns'))).toHaveLength(3)
+      })
+
+      test('a column no replica has is read as missing', async () => {
+        const { store, queries } = replicatedStore([0])
+
+        await store.readMigrationState('m.sql')
+
+        const read = queries.find((sql) => sql.includes("name = 'm.sql'"))
+        expect(read).not.toContain('operation_fingerprints')
+      })
+
+      // A user without SHOW COLUMNS on system.columns (#402) reads the column
+      // from each replica's CREATE statement in system.tables.
+      describe('for a user that cannot read system.columns', () => {
+        const TABLES_PROBE = /^SELECT hostName\(\) AS replica, create_table_query FROM clusterAllReplicas\('default', system\.tables\)/
+        const definition = (fingerprints: boolean) =>
+          `CREATE TABLE default._chkit_migrations (\`name\` String, \`operations\` Array(Tuple(operation_index Int32)) DEFAULT []${fingerprints ? ', `operation_fingerprints` Array(String) DEFAULT []' : ''}) ENGINE = ReplacingMergeTree(applied_at) ORDER BY name`
+
+        // `withColumn[n]` replicas define the column on the nth probe; `listed` list the journal.
+        function deniedStore(withColumn: number[], listed = 2, render = definition) {
+          let probes = 0
+          const queries: string[] = []
+          const commands: string[] = []
+          const db = {
+            async command(sql: string) {
+              commands.push(sql)
+            },
+            async query<T>(sql: string): Promise<T[]> {
+              queries.push(sql)
+              if (sql.includes('system.one')) return [{ replicas: 2 }] as T[]
+              if (sql.includes('currentDatabase() AS database')) return [{ database: 'default' }] as T[]
+              if (TABLES_PROBE.test(sql)) {
+                const seen = withColumn[Math.min(probes, withColumn.length - 1)]
+                probes += 1
+                return Array.from({ length: listed }, (_, index) => ({
+                  replica: `replica-${index}`,
+                  create_table_query: render(index < (seen ?? 0)),
+                })) as T[]
+              }
+              if (sql.includes('system.tables') && sql.includes('AS replicas')) return [{ replicas: 2 }] as T[]
+              if (sql.includes('system.columns')) {
+                throw Object.assign(
+                  new Error("u: Not enough privileges. To execute this query, it's necessary to have the grant SHOW COLUMNS ON system.columns. "),
+                  { code: '497' },
+                )
+              }
+              if (sql.includes("WHERE name = 'm.sql'")) {
+                return [{ ...row([tuple(0)], ['v1:a']), ...(sql.includes('operation_fingerprints') ? {} : { operation_fingerprints: undefined }) }] as T[]
+              }
+              return []
+            },
+          } as unknown as ClickHouseExecutor
+          return { store: createJournalStore(db), queries, commands }
+        }
+
+        test('a column every replica has is read', async () => {
+          const { store, queries } = deniedStore([2])
+
+          const read = await store.readMigrationState('m.sql')
+
+          expect(read?.operations.map((op) => op.fingerprint)).toEqual(['v1:a'])
+          expect(queries.filter((sql) => TABLES_PROBE.test(sql))).toHaveLength(2)
+        })
+
+        test('a column is read whatever identifier quoting the settings choose', async () => {
+          const doubleQuotes = (fingerprints: boolean) =>
+            `CREATE TABLE "default"."_chkit_migrations" ("name" String${fingerprints ? ', "operation_fingerprints" Array(String) DEFAULT []' : ''}) ENGINE = ReplacingMergeTree(applied_at) ORDER BY "name"`
+          const bare = (fingerprints: boolean) =>
+            `CREATE TABLE default._chkit_migrations (\`name\` String${fingerprints ? ', operation_fingerprints Array(String) DEFAULT []' : ''}) ENGINE = ReplacingMergeTree(applied_at) ORDER BY \`name\``
+          for (const render of [doubleQuotes, bare]) {
+            const { store, commands } = deniedStore([2], 2, render)
+
+            const read = await store.readMigrationState('m.sql')
+            await store.writeMigrationState(state(['v1:a']))
+
+            expect(read?.operations.map((op) => op.fingerprint)).toEqual(['v1:a'])
+            expect(commands.find((sql) => sql.startsWith('INSERT INTO'))).toContain(", ['v1:a'])")
+          }
+        })
+
+        test('a comment that mentions the column does not define it', async () => {
+          const { store } = deniedStore([2], 2, () =>
+            "CREATE TABLE default._chkit_migrations (`name` String COMMENT '`operation_fingerprints` Array(String)') ENGINE = ReplacingMergeTree(applied_at) ORDER BY name",
+          )
+
+          const read = await store.readMigrationState('m.sql')
+
+          expect(read?.operations.map((op) => op.fingerprint)).toEqual([''])
+        })
+
+        test('a definition chkit cannot read stops the read', async () => {
+          const { store } = deniedStore([2], 2, () => '')
+
+          await expect(store.readMigrationState('m.sql')).rejects.toThrow(
+            'Cannot tell whether the journal table _chkit_migrations has the operation_fingerprints column: cannot read its definition on replica replica-0.',
+          )
+        })
+
+        test('a column a lagging replica lacks is waited for, never read as missing', async () => {
+          const { store, queries } = deniedStore([1, 1, 2])
+
+          const read = await store.readMigrationState('m.sql')
+
+          expect(read?.operations.map((op) => op.fingerprint)).toEqual(['v1:a'])
+          expect(queries.filter((sql) => TABLES_PROBE.test(sql))).toHaveLength(3)
+        })
+
+        test('the writes of a run that waited keep recording fingerprints', async () => {
+          const { store, commands } = deniedStore([1, 2])
+
+          await store.writeMigrationState(state(['v1:a']))
+
+          expect(commands.some((sql) => sql.startsWith('ALTER TABLE'))).toBe(false)
+          expect(commands.find((sql) => sql.startsWith('INSERT INTO'))).toContain(", ['v1:a'])")
+        })
+
+        test('a column no replica has is read as missing', async () => {
+          const { store, queries } = deniedStore([0])
+
+          const read = await store.readMigrationState('m.sql')
+
+          expect(read?.operations.map((op) => op.fingerprint)).toEqual([''])
+          expect(queries.find((sql) => sql.includes("name = 'm.sql'"))).not.toContain('operation_fingerprints')
+        })
+
+        test('a replica that does not list the journal stops the read', async () => {
+          const { store } = deniedStore([0], 1)
+
+          await expect(store.readMigrationState('m.sql')).rejects.toThrow(
+            'Cannot tell whether the journal table _chkit_migrations has the operation_fingerprints column: 1 of 2 replicas list it.',
+          )
+        })
+
+        test('the column this run adds is waited for through system.tables', async () => {
+          const { store, queries, commands } = deniedStore([0, 1, 2])
+          await store.readJournal()
+
+          await store.writeMigrationState(state(['v1:a']))
+
+          expect(commands.some((sql) => sql.startsWith('ALTER TABLE'))).toBe(true)
+          expect(commands.find((sql) => sql.startsWith('INSERT INTO'))).toContain(", ['v1:a'])")
+          expect(queries.filter((sql) => TABLES_PROBE.test(sql))).toHaveLength(3)
+          expect(queries.filter((sql) => sql.includes('system.columns'))).toHaveLength(1)
+        })
+      })
+
+      test('a system.columns probe that fails for another reason stops the read', async () => {
+        const db = {
+          async command() {},
+          async query<T>(sql: string): Promise<T[]> {
+            if (sql.includes('system.one')) return [{ replicas: 2 }] as T[]
+            if (sql.includes('system.tables') && sql.includes('AS replicas')) return [{ replicas: 2 }] as T[]
+            if (sql.includes('system.columns')) throw new Error('HTTP 503 Service Unavailable')
+            return []
+          },
+        } as unknown as ClickHouseExecutor
+
+        await expect(createJournalStore(db).readMigrationState('m.sql')).rejects.toThrow('HTTP 503')
+      })
+    })
+  })
+
+  // A journal INSERT or ALTER that reaches a replica without the database is
+  // retried by the executor without it, so it must name the database and run
+  // only once every replica has the journal (#700).
+  describe('journal writes on a multi-replica target (#700)', () => {
+    function clickHouseError(code: string, message: string): Error {
+      return Object.assign(new Error(message), { code })
+    }
+
+    const UNKNOWN_DATABASE = () => clickHouseError('81', 'Database app does not exist. (UNKNOWN_DATABASE)')
+
+    /**
+     * A target whose replica probe answers `probe` in turn (an Error throws,
+     * a number is the replica count, the last one repeats). `legacy` makes it
+     * a journal an older release created, without the per-operation columns.
+     */
+    function target(options: { probe: Array<Error | number>; legacy?: boolean }) {
+      const calls: string[] = []
+      let probes = 0
+      let upgraded = !options.legacy
+      const db = {
+        async command(sql: string) {
+          calls.push(sql)
+          if (sql.includes('ADD COLUMN IF NOT EXISTS operations ')) upgraded = true
+        },
+        async query<T>(sql: string): Promise<T[]> {
+          calls.push(sql)
+          if (sql.includes('system.one')) {
+            const answer = options.probe[Math.min(probes, options.probe.length - 1)]
+            probes += 1
+            if (answer instanceof Error) throw answer
+            return [{ replicas: answer }] as T[]
+          }
+          if (sql.startsWith('SELECT name, migration_completed, operations FROM') && !upgraded) {
+            throw clickHouseError('47', 'Unknown expression identifier `operations`. (UNKNOWN_IDENTIFIER)')
+          }
+          if (sql.startsWith('SELECT currentDatabase()')) return [{ database: 'app' }] as T[]
+          if (sql.includes('AS replicas')) return [{ replicas: 2 }] as T[]
+          return []
+        },
+      } as unknown as ClickHouseExecutor
+      return { db, calls }
+    }
+
+    const state: MigrationRowState = {
+      name: 'm.sql',
+      appliedAt: '2026-11-10 12:00:00.000',
+      checksum: 'cs',
+      chkitVersion: 'v',
+      migrationCompleted: true,
+      operations: [],
+    }
+
+    const isJournalPoll = (sql: string) => sql.includes("clusterAllReplicas('default', system.tables)")
+    const isWrite = (sql: string) => sql.startsWith('INSERT INTO') || sql.startsWith('ALTER TABLE')
+
+    test('a replica probe that fails is not taken for a single replica', async () => {
+      // The probe reached a replica without the new database yet.
+      const { db, calls } = target({ probe: [UNKNOWN_DATABASE(), 2] })
+
+      await createJournalStore(db).writeMigrationState(state)
+
+      const poll = calls.findIndex(isJournalPoll)
+      expect(poll).toBeGreaterThanOrEqual(0)
+      expect(poll).toBeLessThan(calls.findIndex((sql) => sql.startsWith('INSERT INTO')))
+    })
+
+    test('retries a replica probe that the console API reports without a code', async () => {
+      // The ObsessionDB console API sends only the message.
+      const { db, calls } = target({
+        probe: [new Error('Code: 81. DB::Exception: Database app does not exist. (UNKNOWN_DATABASE)'), 2],
+      })
+
+      await createJournalStore(db).writeMigrationState(state)
+
+      // The journal exists: the probe is retried, not taken for a missing journal.
+      expect(calls.some((sql) => sql.startsWith('CREATE TABLE'))).toBe(false)
+      const poll = calls.findIndex(isJournalPoll)
+      expect(poll).toBeGreaterThanOrEqual(0)
+      expect(poll).toBeLessThan(calls.findIndex((sql) => sql.startsWith('INSERT INTO')))
+    })
+
+    test('a replica probe that keeps failing stops the write', async () => {
+      const { db, calls } = target({ probe: [clickHouseError('159', 'Timeout exceeded. (TIMEOUT_EXCEEDED)')] })
+
+      await expect(createJournalStore(db).writeMigrationState(state)).rejects.toThrow('TIMEOUT_EXCEEDED')
+      expect(calls.filter(isWrite)).toEqual([])
+    })
+
+    test.each([
+      ['a single node without the cluster', clickHouseError('701', "Requested cluster 'default' not found. (CLUSTER_DOESNT_EXIST)")],
+      ['a user that cannot query the cluster', clickHouseError('497', 'Not enough privileges. (ACCESS_DENIED)')],
+    ])('%s keeps the single-replica path', async (_label, error) => {
+      const { db, calls } = target({ probe: [error] })
+
+      await createJournalStore(db).writeMigrationState(state)
+
+      expect(calls.some(isJournalPoll)).toBe(false)
+      expect(calls.filter((sql) => sql.startsWith('INSERT INTO'))).toHaveLength(1)
+    })
+
+    test('waits for every replica before upgrading an older journal', async () => {
+      const { db, calls } = target({ probe: [2], legacy: true })
+
+      await createJournalStore(db).writeMigrationState(state)
+
+      const poll = calls.findIndex(isJournalPoll)
+      expect(poll).toBeGreaterThanOrEqual(0)
+      expect(poll).toBeLessThan(calls.findIndex((sql) => sql.startsWith('ALTER TABLE')))
+    })
+
+    test('every journal INSERT and ALTER names the database', async () => {
+      const { db, calls } = target({ probe: [2], legacy: true })
+
+      await createJournalStore(db).writeMigrationState(state)
+
+      const writes = calls.filter(isWrite)
+      expect(writes.length).toBeGreaterThan(1)
+      for (const sql of writes) expect(sql).toMatch(/^(INSERT INTO|ALTER TABLE) `app`\._chkit_migrations /)
+    })
+  })
+})
+
+// #767 (round 5): a read of a replicated journal counts as a read of every
+// copy only when every member of the table's replica set answered it, by the
+// replica name the set records; the newest version across them is the record.
+describe('everyCopyRead', () => {
+  const row = (replica: string, appliedAt: string, members = ['r1', 'r2']): CopyRow => ({
+    replica,
+    members: JSON.stringify(members),
+    present: 1,
+    applied_at: appliedAt,
+    operations: appliedAt,
+    operation_fingerprints: '[]',
+  })
+  const findOp = (operations: unknown) => ({ lastError: String(operations) }) as OperationState
+
+  test('every member answered: the newest version is the record', () => {
+    expect(everyCopyRead([row('r1', '2026-11-18 10:00:00.000'), row('r2', '2026-11-18 10:00:01.000')], findOp)).toEqual({
+      covered: true,
+      op: { lastError: '2026-11-18 10:00:01.000' } as OperationState,
+    })
+  })
+
+  test('two servers with one name, and a member the read did not reach: not covered', () => {
+    // The cluster lists r1 twice (a shared hostname) and never r2.
+    expect(everyCopyRead([row('r1', '2026-11-18 10:00:00.000'), row('r1', '2026-11-18 10:00:00.000')], findOp)).toEqual({ covered: false })
+  })
+
+  test('a duplicate reply covering every member: not covered', () => {
+    expect(everyCopyRead([row('r1', 'a'), row('r2', 'b'), row('r2', 'b')], findOp)).toEqual({ covered: false })
+  })
+
+  test('a replica set that is not a JSON array of names: not covered', () => {
+    expect(everyCopyRead([{ ...row('r1', 'a'), members: 'r1' }], findOp)).toEqual({ covered: false })
+    expect(everyCopyRead([{ ...row('r1', 'a'), members: '[""]' }], findOp)).toEqual({ covered: false })
+  })
+
+  test('a server that cannot name its replica, or no answer at all: not covered', () => {
+    expect(everyCopyRead([row('r1', 'a'), row('', 'b')], findOp)).toEqual({ covered: false })
+    expect(everyCopyRead([], findOp)).toEqual({ covered: false })
+    expect(everyCopyRead([row('r1', 'a', [])], findOp)).toEqual({ covered: false })
+  })
+
+  test('no copy holds the record: covered, without one', () => {
+    expect(everyCopyRead([{ ...row('r1', ''), present: '0' }, { ...row('r2', ''), present: '0' }], findOp)).toEqual({ covered: true, op: undefined })
+  })
+})
+
+// #767 (round 6): the topology of an every-copy read is read fresh, in the
+// same query, and only positive evidence of a single server counts a journal
+// that is not replicated as one copy.
+describe('readOperationOnEveryCopy topology', () => {
+  const UUID_A = '2dea4dea-c7d6-439c-b8ef-5eaa1d275f14'
+  const UUID_B = '6f1c2a9e-0b7d-4f3e-9a51-3c8d2e7b4a10'
+  const prepared = JSON.stringify([{ operation_index: 0, operation_key: 'k', operation_type: 'load_table_data', query_id: 'qid', status: 'started', started_at: '2026-11-18 10:00:00.000', finished_at: null, last_error: 'prepared under its own query id; not submitted yet' }])
+  // As the Workbench API returns it: every cell a string.
+  const copy = (replica: string) => ({ replica, members: JSON.stringify([replica]), present: '1', applied_at: '2026-11-18 10:00:00.000', operations: prepared, operation_fingerprints: '[]' })
+  // A journal that is not replicated is read as one copy only on a declared cluster (#802).
+  function storeAnswering(engine: string, everyCopy: () => unknown[], { cluster }: { cluster?: string } = { cluster: engine.startsWith('Replicated') ? undefined : 'c' }) {
+    const reads: Array<{ sql: string; settings: unknown }> = []
+    const db = {
+      async command() {},
+      async query<T>(sql: string, settings?: unknown): Promise<T[]> {
+        if (sql.includes('SELECT engine FROM system.tables')) return [{ engine }] as T[]
+        if (sql.includes('currentDatabase() AS database')) return [{ database: 'db' }] as T[]
+        if (sql.includes('view(')) {
+          reads.push({ sql, settings })
+          return everyCopy() as T[]
+        }
+        return []
+      },
+    } as unknown as ClickHouseExecutor
+    return { store: createJournalStore(db, cluster), reads }
+  }
+
+  test('one server answers, every cell a string: covered, with its prepared record', async () => {
+    const { store, reads } = storeAnswering('ReplacingMergeTree', () => [copy(UUID_A)])
+    const read = await store.readOperationOnEveryCopy('m.sql', 0)
+    expect(read).toMatchObject({ covered: true, op: { queryId: 'qid', status: 'started', lastError: 'prepared under its own query id; not submitted yet' } })
+    expect(reads[0]?.sql).toContain("clusterAllReplicas('c', view(SELECT toString(serverUUID())")
+    // An unavailable server fails the read; no limit cuts the reply short.
+    expect(reads[0]?.settings).toMatchObject({ skip_unavailable_shards: 0, result_overflow_mode: 'throw', read_overflow_mode: 'throw' })
+  })
+
+  // #802: behind a load balancer over independent servers, each lists only
+  // itself in its own clusters, so the one that answers proves nothing about
+  // the copies on the others.
+  test('a journal that is not replicated, without a declared cluster: not covered, and nothing is read', async () => {
+    const { store, reads } = storeAnswering('ReplacingMergeTree', () => [copy(UUID_A)], {})
+    expect(await store.readOperationOnEveryCopy('m.sql', 0)).toEqual({ covered: false })
+    expect(reads).toHaveLength(0)
+  })
+
+  test('a declared cluster is read as declared, even when empty', async () => {
+    const reads: string[] = []
+    const db = {
+      async command() {},
+      async query<T>(sql: string): Promise<T[]> {
+        if (sql.includes('SELECT engine FROM system.tables')) return [{ engine: 'ReplacingMergeTree' }] as T[]
+        if (sql.includes('currentDatabase() AS database')) return [{ database: 'db' }] as T[]
+        if (sql.includes('view(')) reads.push(sql)
+        return (sql.includes('view(') ? [copy(UUID_A)] : []) as T[]
+      },
+    } as unknown as ClickHouseExecutor
+    await createJournalStore(db, undefined, { cluster: '', replicas: 1 }).readOperationOnEveryCopy('m.sql', 0)
+    expect(reads[0]).toContain("clusterAllReplicas('', view(")
+  })
+
+  test('a replicated journal read whose cells are strings: covered, with its record', async () => {
+    const { store } = storeAnswering('ReplicatedReplacingMergeTree', () => [
+      { ...copy('ch1'), members: '["ch1","ch2"]' },
+      { ...copy('ch2'), members: '["ch1","ch2"]' },
+    ])
+    expect(await store.readOperationOnEveryCopy('m.sql', 0)).toMatchObject({ covered: true, op: { queryId: 'qid' } })
+  })
+
+  test('one server replying twice, or a reply without a server UUID: not covered', async () => {
+    expect(await storeAnswering('ReplacingMergeTree', () => [copy(UUID_A), copy(UUID_A)]).store.readOperationOnEveryCopy('m.sql', 0)).toEqual({ covered: false })
+    expect(await storeAnswering('ReplacingMergeTree', () => [copy('uuid-a')]).store.readOperationOnEveryCopy('m.sql', 0)).toEqual({ covered: false })
+  })
+
+  test('a cluster the user may not read, or that does not exist, fails the read', async () => {
+    const denied = storeAnswering('ReplacingMergeTree', () => {
+      throw Object.assign(new Error('Not enough privileges. (ACCESS_DENIED)'), { code: '497' })
+    })
+    await expect(denied.store.readOperationOnEveryCopy('m.sql', 0)).rejects.toThrow('ACCESS_DENIED')
+    const missing = storeAnswering('ReplacingMergeTree', () => {
+      throw Object.assign(new Error("Requested cluster 'default' not found"), { code: '701' })
+    })
+    await expect(missing.store.readOperationOnEveryCopy('m.sql', 0)).rejects.toThrow('not found')
+  })
+
+  test('two servers behind one hostname: not covered', async () => {
+    const { store } = storeAnswering('ReplacingMergeTree', () => [copy(UUID_A), copy(UUID_B)])
+    expect(await store.readOperationOnEveryCopy('m.sql', 0)).toEqual({ covered: false })
+  })
+
+  test('a server added after the first read: the next read is not covered', async () => {
+    let servers = [copy(UUID_A)]
+    const { store, reads } = storeAnswering('ReplacingMergeTree', () => servers)
+    expect((await store.readOperationOnEveryCopy('m.sql', 0)).covered).toBe(true)
+    servers = [copy(UUID_A), copy(UUID_B)]
+    expect(await store.readOperationOnEveryCopy('m.sql', 0)).toEqual({ covered: false })
+    expect(reads).toHaveLength(2)
   })
 })

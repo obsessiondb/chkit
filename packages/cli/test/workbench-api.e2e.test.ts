@@ -7,7 +7,7 @@ import type { ClickHouseExecutor } from '@chkit/clickhouse'
 import { executeBackfill, type BackfillChunkState } from '../../plugin-backfill/src/async-backfill.js'
 import { loadCredentials } from '../../plugin-obsessiondb/src/auth/credentials.js'
 import { createRemoteExecutor } from '../../plugin-obsessiondb/src/query/remote-executor.js'
-import { applyAsyncStatement, makeDeterministicQueryId } from '../src/commands/migrate/async-apply.js'
+import { applyAsyncStatement, ATTEMPT_RECORD_MARKER } from '../src/commands/migrate/async-apply.js'
 import type { JournalStore, MigrationRowState } from '../src/runtime/journal-store.js'
 import { createPrefix, pollUntil, waitForTable } from '../src/test/e2e-testkit.js'
 
@@ -28,6 +28,16 @@ const SLOW_ROWS = 20
 const MIGRATION_CHECKSUM = 'c1'
 
 describe('async migrate through the real ObsessionDB workbench API', () => {
+  // Every write sends async_insert = 0 and wait_for_async_insert = 1 in the
+  // request's settings (#804), so the API must hand them to ClickHouse. Two
+  // values, so a profile default can't pass.
+  test('the API forwards query settings to ClickHouse', async () => {
+    const remote = await connect()
+    const read = async (value: number) =>
+      (await remote.query<{ v: string }>("SELECT toString(toUInt8(getSetting('async_insert'))) AS v", { async_insert: value }))[0]?.v
+    expect([await read(0), await read(1)]).toEqual(['0', '1'])
+  }, TIMEOUT_MS)
+
   test('a submission keeps its query id and reads as running on every replica until it finishes', async () => {
     const remote = await connect()
     const queryId = `chkit-e2e-${randomUUID()}`
@@ -75,7 +85,7 @@ describe('async migrate through the real ObsessionDB workbench API', () => {
     const table = `\`${database}\`.\`${tableName}\``
     const operationKey = `table:${database}.${tableName}`
     const migrationName = `20990101000000_${tableName}.sql`
-    const queryId = makeDeterministicQueryId(database, '_chkit_migrations', migrationName, 0)
+    const queryId = crypto.randomUUID()
     let attempt: Promise<string> | undefined
     try {
       await remote.command(`CREATE TABLE ${table} (n UInt64) ENGINE = MergeTree ORDER BY n`)
@@ -221,6 +231,12 @@ function createMemoryJournal(initial: MigrationRowState | null) {
     async readMigrationState() {
       return state
     },
+    async readStoredOperation(_name: string, index: number) {
+      return state?.operations.find((op) => op.operationIndex === index)
+    },
+    async readOperationOnEveryCopy(name: string, index: number) {
+      return { covered: true as const, op: await this.readStoredOperation(name, index) }
+    },
     async writeMigrationState(next) {
       writes.push(next)
       state = next
@@ -247,7 +263,11 @@ function startedState(migrationName: string, queryId: string, operationKey: stri
         status: 'started',
         startedAt: '2026-10-02 00:00:00.000',
         finishedAt: null,
-        lastError: '',
+        // A record this release wrote before the submit: fenced, under an id of
+        // its own (#767). A record of an earlier release would stop the run.
+        lastError: ATTEMPT_RECORD_MARKER,
+        fingerprint: '',
+        attemptFenced: true,
       },
     ],
   }

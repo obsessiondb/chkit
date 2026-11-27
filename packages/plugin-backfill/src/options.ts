@@ -72,6 +72,10 @@ function normalizePlanId(raw: string): string {
 
 // ───── Plugin config schema (what backfill({...}) accepts) ─────
 
+// Extra ClickHouse settings for every chunk INSERT (e.g. max_insert_threads).
+// Plugin-level only, as in chkit-py: no command takes them.
+const InsertSettingsSchema = z.record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
+
 export const PluginConfigSchema = z.object({
   maxChunkBytes: z.number().positive().optional(),
   maxRetriesPerChunk: z.number().int().positive().optional(),
@@ -87,9 +91,31 @@ export const PluginConfigSchema = z.object({
   maxWindowHours: z.number().positive().optional(),
   minChunkMinutes: z.number().positive().optional(),
   stateDir: z.string().min(1).optional(),
+  insertSettings: InsertSettingsSchema.optional(),
 })
 
 export type PluginConfig = z.input<typeof PluginConfigSchema>
+
+/**
+ * The plugin-level `insertSettings`, from the backfill plugin's options
+ * schema applied to its factory and registration options. An invalid option
+ * stops the command instead of being dropped, as chkit-py's backfill({...})
+ * refuses it.
+ */
+export function insertSettingsFromOptions(
+  result:
+    | { success: true; data: unknown }
+    | { success: false; error: { issues: Array<{ path: PropertyKey[]; message: string }> } },
+): z.infer<typeof InsertSettingsSchema> | undefined {
+  if (!result.success) {
+    const issue = result.error.issues[0]
+    throw new BackfillConfigError(
+      `Invalid backfill options: ${issue ? `${issue.path.map(String).join('.')}: ${issue.message}` : 'unknown error'}.`,
+    )
+  }
+  const data = typeof result.data === 'object' && result.data !== null ? result.data : {}
+  return InsertSettingsSchema.optional().parse('insertSettings' in data ? data.insertSettings : undefined)
+}
 
 // ───── Per-command schemas ─────
 
@@ -137,6 +163,7 @@ export type RunOptions = z.infer<typeof RunSchema>
 
 export const ResumeSchema = RunSchema.extend({
   replayFailed: z.boolean().default(false),
+  acceptUnknown: z.boolean().default(false),
 })
 export type ResumeOptions = z.infer<typeof ResumeSchema>
 
@@ -185,6 +212,7 @@ export const RESUME_FLAGS = defineFlags([
   { name: '--concurrency', type: 'string', description: 'Max concurrent async queries', placeholder: '<n>' },
   { name: '--poll-interval', type: 'string', description: 'Polling interval in ms', placeholder: '<ms>' },
   { name: '--replay-failed', type: 'boolean', description: 'Re-execute failed chunks' },
+  { name: '--accept-unknown', type: 'boolean', description: 'Replay chunks whose last attempt has an unknown outcome (can write their rows twice)' },
 ] as const)
 
 export const PLAN_ID_FLAGS = defineFlags([
@@ -233,6 +261,7 @@ export const RESUME_FLAG_MAP: FlagMapping = {
   '--concurrency': { key: 'concurrency', coerce: (v) => coercePositiveInt(v, '--concurrency') },
   '--poll-interval': { key: 'pollIntervalMs', coerce: (v) => coercePositiveInt(v, '--poll-interval') },
   '--replay-failed': { key: 'replayFailed' },
+  '--accept-unknown': { key: 'acceptUnknown' },
 }
 
 export const PLAN_ID_FLAG_MAP: FlagMapping = {

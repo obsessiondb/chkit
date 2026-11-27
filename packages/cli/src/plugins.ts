@@ -75,7 +75,8 @@ export interface PluginRuntime {
     },
     plan: MigrationPlan,
   ): Promise<MigrationPlan>
-  runOnBeforeApply(context: ChxOnBeforeApplyContext): Promise<string[]>
+  /** `signal` aborted (Ctrl-C) starts no further hook. */
+  runOnBeforeApply(context: ChxOnBeforeApplyContext, signal?: AbortSignal): Promise<string[]>
   runOnAfterApply(context: ChxOnAfterApplyContext): Promise<void>
   runOnCheck(
     context: Omit<ChxOnCheckContext, 'options' | 'tableScope'> & {
@@ -248,6 +249,12 @@ export interface ChxPluginCommand<TOptions = Record<string, unknown>> {
   flags?: readonly FlagDef[]
   optionsSchema?: SafeParseable<TOptions>
   flagMapping?: FlagMapping
+  /**
+   * `false` when the command takes no positional arguments: the CLI then
+   * rejects any, before or after `--`, as it does for its own commands, and
+   * the command does not run (#659). Unset, the command gets them in `args`.
+   */
+  takesArgs?: boolean
   run: (
     context: ChxPluginCommandContext<TOptions>,
   ) => undefined | number | Promise<undefined | number>

@@ -3,6 +3,7 @@ import { Readable } from 'node:stream'
 import {
 	AUTO_MINMAX_INDEX_PREFIX,
 	type ChxConfig,
+	compareCodePoints,
 	type ColumnDefinition,
 	isSyntheticEphemeralDefault,
 	normalizeSQLFragment,
@@ -20,6 +21,16 @@ import { type ClickHouseSettings, ClickHouseLogLevel, createClient } from '@clic
 import { getLogger } from '@logtape/logtape'
 import { parseJsonResult } from './exact-json.js'
 import { allReplicas, resolveReplicaFanout } from './replicas.js'
+import {
+	acquireSendSlot,
+	createAdmissionAgent,
+	createSendQueue,
+	isSendNotAdmitted,
+	recordingAdmission,
+	sendNotAdmittedError,
+	urlConnectionOptions,
+	type SubmitAdmission,
+} from './send-admission.js'
 import {
 	parseConstraintsFromCreateTableQuery,
 	parseEngineFromCreateTableQuery,
@@ -46,12 +57,28 @@ export interface QueryStatus {
 	elapsedMs?: number
 	durationMs?: number
 	error?: string
+	/** A failure the server logged before the query started (ExceptionBeforeStart). */
+	beforeStart?: boolean
 }
 
 export interface QueryStatusOptions {
 	afterTime?: string
 	everyReplica?: boolean
 	runningOnly?: boolean
+	/**
+	 * Count an ExceptionBeforeStart entry (a statement the server rejected) as
+	 * the query's failure. Only for an id that names one attempt alone (#767):
+	 * a reused id can find an earlier attempt's entry.
+	 */
+	includeBeforeStart?: boolean
+}
+
+export interface SubmitOptions {
+	/** Aborts the request, also one not sent yet (#767). */
+	signal?: AbortSignal
+	/** Asked as the request is created, so a stopped caller knows no send of it starts
+	 *  afterwards (#765). Only honoured by an executor with `submitSendsOnce`. */
+	admission?: SubmitAdmission
 }
 
 export type { ClickHouseSettings }
@@ -88,8 +115,93 @@ export interface ClickHouseJsonQueryResult<
 
 export type ObservableSystemTable = 'processes' | 'query_log'
 
+/** Control proofs require fresh, complete results rather than cached or truncated data. */
+/** One `system.query_log` entry of a query id, newest first. */
+export interface QueryLogRow {
+	type: string
+	written_rows: number | string
+	written_bytes: number | string
+	query_duration_ms: number | string
+	exception: string
+	exception_code?: number | string
+	/** The server that logged it: a fan-out that lists a node twice returns its entries twice. */
+	server?: string
+	event_at?: string
+}
+
+// QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING: a second delivery of the id, rejected
+// while the first runs. It says nothing about that first one.
+const SAME_ID_RUNNING = 216
+
+/**
+ * The outcome query_log records for a query id, from its entries newest
+ * first (#767). A QueryFinish, then an ExceptionWhileProcessing, outranks an
+ * ExceptionBeforeStart, which a rejected duplicate delivery logs early; and
+ * that rejection is never the query's own failure. Two terminal entries (a
+ * redelivered request that ran twice) leave the outcome unknown: one of them
+ * may have applied part of its writes.
+ */
+export function queryLogOutcome(rows: readonly QueryLogRow[]): QueryStatus {
+	// Each entry once per server: one node the cluster lists twice is not a
+	// second run.
+	const entries = new Set(rows.filter((row) => !isSameIdRunning(row)).map((row) => `${row.server}|${row.type}|${row.event_at}|${row.exception}`))
+	if (entries.size > 1) return { status: 'unknown' }
+	const finished = rows.find((row) => row.type === 'QueryFinish')
+	if (finished) {
+		return {
+			status: 'finished',
+			writtenRows: Number(finished.written_rows),
+			writtenBytes: Number(finished.written_bytes),
+			durationMs: Number(finished.query_duration_ms),
+		}
+	}
+	const failed =
+		rows.find((row) => row.type === 'ExceptionWhileProcessing') ??
+		rows.find((row) => row.type === 'ExceptionBeforeStart' && !isSameIdRunning(row))
+	if (!failed) return { status: 'unknown' }
+	return {
+		status: 'failed',
+		durationMs: Number(failed.query_duration_ms),
+		error: failed.exception,
+		...(failed.type === 'ExceptionBeforeStart' ? { beforeStart: true } : {}),
+	}
+}
+
+function isSameIdRunning(row: QueryLogRow): boolean {
+	return Number(row.exception_code) === SAME_ID_RUNNING || /QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING/.test(row.exception)
+}
+
+export const STRICT_CONTROL_SETTINGS: ClickHouseSettings = {
+	use_query_cache: 0,
+	enable_reads_from_query_cache: 0,
+	enable_writes_to_query_cache: 0,
+	read_overflow_mode: 'throw',
+	read_overflow_mode_leaf: 'throw',
+	group_by_overflow_mode: 'throw',
+	sort_overflow_mode: 'throw',
+	result_overflow_mode: 'throw',
+	timeout_overflow_mode: 'throw',
+	timeout_overflow_mode_leaf: 'throw',
+	set_overflow_mode: 'throw',
+	transfer_overflow_mode: 'throw',
+	distinct_overflow_mode: 'throw',
+}
+
+export interface QueryControlOptions {
+	queryId?: string
+	settings?: ClickHouseSettings
+}
+
 export interface ClickHouseExecutor {
 	command(sql: string, settings?: ClickHouseSettings): Promise<void>
+	/** Optional capability: check before each command attempt, including an internal retry. */
+	commandGuarded?(sql: string, check: () => void, settings?: ClickHouseSettings): Promise<void>
+	/** Native capability: durably assign a fresh id before each physical command attempt. */
+	commandTracked?(sql: string, check: () => void, beforeAttempt: () => Promise<string>, settings?: ClickHouseSettings): Promise<void>
+	/** Native control connection with a bounded request, including response consumption. */
+	queryControl?<T>(sql: string, timeoutMs: number, options?: QueryControlOptions): Promise<T[]>
+	/** Declared cluster used for strict cancellation coverage; never inferred from failed discovery. */
+	readonly queryControlCluster?: string
 	/** Rows as JSON objects. A number a double cannot hold exactly (an integer
 	 *  beyond 2^53, a Decimal with more than 15 digits) arrives as a string of
 	 *  its digits; the ObsessionDB console API returns every value as a string. */
@@ -112,8 +224,15 @@ export interface ClickHouseExecutor {
 	 *  @param sql - The SQL to execute
 	 *  @param queryId - Optional deterministic query_id (useful for resumability). Auto-generated if omitted.
 	 *  @param settings - Optional ClickHouse settings sent with the query.
+	 *  @param options - `signal` aborts the request (#767); `admission` is asked as the request is
+	 *    created (see `SubmitAdmission`), only honoured by an executor with `submitSendsOnce`.
 	 *  @returns The query_id assigned to this query. */
-	submit(sql: string, queryId?: string, settings?: ClickHouseSettings): Promise<string>
+	submit(sql: string, queryId?: string, settings?: ClickHouseSettings, options?: SubmitOptions): Promise<string>
+
+	/** Set when `submit` sends its request once, never resending it under the same query id,
+	 *  and asks `options.admission` as the request is created (#765). Backfill proves a failure only
+	 *  for an attempt sent this way. */
+	readonly submitSendsOnce?: boolean
 
 	/** Check the status of a previously submitted query.
 	 *  Checks system.processes first (running?), then system.query_log (finished/failed?).
@@ -137,6 +256,12 @@ export interface ClickHouseExecutor {
 	/** Optional capability: whether the user may change settings, which a readonly = 1
 	 *  user may not. Native executors look it up once, with their first read. */
 	canChangeSettings?(): Promise<boolean>
+
+	/** Optional capability: a new executor to the same target without an HTTP session,
+	 *  for requests sent while one of this executor's requests is in flight (ClickHouse
+	 *  runs one query at a time per session). The caller closes it. Executors without
+	 *  a session omit it and take concurrent requests themselves. */
+	openConcurrent?(): ClickHouseExecutor
 
 	close(): Promise<void>
 }
@@ -210,6 +335,8 @@ export interface IntrospectedTable {
 type ClickHouseClient = ReturnType<typeof createClient>
 type ClickHouseConfig = NonNullable<ChxConfig['clickhouse']>
 type ClickHouseClientOptions = {
+	keepAlive?: boolean
+	httpAgent?: import('node:http').Agent
 	compression?: {
 		request?: boolean
 		response?: boolean
@@ -229,7 +356,9 @@ export {
 } from './create-table-parser.js'
 export { canonicalizeSqlFragments } from './canonicalize.js'
 export { listViewDetails, parseMaterializedViewTarget, type IntrospectedView } from './view-details.js'
+export { listDictionaryDetails, type IntrospectedDictionary } from './dictionary-details.js'
 export {
+	parseAttributeListTextFromCreateDictionaryQuery,
 	parseDictionaryAttributesFromCreateDictionaryQuery,
 	parseDictionaryPrimaryKeyFromCreateDictionaryQuery,
 	parseDictionaryRangeFromCreateDictionaryQuery,
@@ -237,6 +366,7 @@ export {
 	parseLayoutFromCreateDictionaryQuery,
 	parseLifetimeFromCreateDictionaryQuery,
 	parseSourceFromCreateDictionaryQuery,
+	replaceSourceInCreateDictionaryQuery,
 	type ParsedDictionaryAttribute,
 } from './create-dictionary-parser.js'
 
@@ -435,9 +565,9 @@ export function buildIntrospectedTables(
 			}
 		})
 		.sort((a, b) => {
-			const dbOrder = a.database.localeCompare(b.database)
+			const dbOrder = compareCodePoints(a.database, b.database)
 			if (dbOrder !== 0) return dbOrder
-			return a.name.localeCompare(b.name)
+			return compareCodePoints(a.name, b.name)
 		})
 }
 
@@ -543,6 +673,40 @@ export function wrapConnectionError(error: unknown, url: string, username?: stri
 	throw error
 }
 
+/**
+ * A submit that provably never sent its request (#800): its TCP connect was
+ * refused, or its host name did not resolve. The server never saw the query.
+ */
+export class SubmitNotSentError extends Error {
+	readonly submitNotSent = true
+	constructor(message: string, options?: ErrorOptions) {
+		super(message, options)
+		this.name = 'SubmitNotSentError'
+	}
+}
+
+export function isSubmitNotSentError(error: unknown): boolean {
+	return error instanceof Error && (error as { submitNotSent?: unknown }).submitNotSent === true
+}
+
+/**
+ * Whether a request failed before it wrote a byte (#800). Only the socket's
+ * own connect failing with ECONNREFUSED, or the host lookup failing, shows
+ * that: a request is written only once its socket connected, and a socket
+ * reused from the pool neither looks up nor connects. A reset, a timeout or
+ * an HTTP response may follow a request the server read.
+ */
+export function failedBeforeSending(error: unknown): boolean {
+	if (!(error instanceof Error)) return false
+	// Node's connect to every address of a host (autoSelectFamily).
+	if (error instanceof AggregateError) {
+		return error.errors.length > 0 && error.errors.every(failedBeforeSending)
+	}
+	const { code, syscall } = error as NodeJS.ErrnoException
+	if (syscall === 'getaddrinfo') return true
+	return code === 'ECONNREFUSED' && syscall === 'connect'
+}
+
 export function isUnknownDatabaseError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false
 	if (!('code' in error)) return false
@@ -619,7 +783,9 @@ export {
 	waitForTableAbsent,
 	waitForView,
 } from './ddl-propagation.js'
-export { allReplicas, resolveReplicaFanout, type ReplicaFanout } from './replicas.js'
+export { isSendNotAdmitted, SEND_CONNECT_TIMEOUT_MS, sendNotAdmittedError, type SubmitAdmission } from './send-admission.js'
+export { STRICT_READ_SETTINGS } from './replicas.js'
+export { allReplicas, probeReplicaAccess, resolveReplicaFanout, resolveReplicaFanoutOrThrow, stringLiteral, type ReplicaAccess, type ReplicaFanout } from './replicas.js'
 export { type AsyncInsertGuardOptions, type QualifiedTable, assertNoFireAndForgetAsyncInserts } from './async-insert-guard.js'
 export { type InsertBarrierOptions, waitForInsertBarrier } from './insert-barrier.js'
 export { assertServerIndexGranularity } from './index-granularity.js'
@@ -689,11 +855,21 @@ const PROGRESS_SETTINGS: ClickHouseSettings = {
 	http_headers_progress_interval_ms: '30000',
 }
 
-// Sent with writes only (command and insert): no asynchronous INSERTs, and
-// progress headers that keep a long migration's connection alive.
-const WRITE_SETTINGS: ClickHouseSettings = {
-	async_insert: 0,
-	...PROGRESS_SETTINGS,
+// A write is stored when it returns: no asynchronous INSERT, and one that a
+// table's own async_insert setting still makes asynchronous waits for its
+// flush (#790). These are defaults: a caller's own value of either is sent as
+// written. They go after the caller's other settings, since the server
+// applies a request's settings in order and a settings profile among them
+// would otherwise change them.
+function withDurableInsertSettings(settings: ClickHouseSettings | undefined): ClickHouseSettings {
+	const { async_insert, wait_for_async_insert, ...rest } = settings ?? {}
+	return { ...rest, async_insert: async_insert ?? 0, wait_for_async_insert: wait_for_async_insert ?? 1 }
+}
+
+// Sent with writes only (command and insert): stored writes, and progress
+// headers that keep a long migration's connection alive.
+function writeSettings(settings: ClickHouseSettings | undefined): ClickHouseSettings {
+	return withDurableInsertSettings({ ...PROGRESS_SETTINGS, ...settings })
 }
 
 // A readonly = 1 user cannot change any setting: ClickHouse rejects a query
@@ -746,6 +922,8 @@ export function createStatelessClickHouseClient(
 		clickhouse_settings: clickhouseSettings,
 		log: SILENT_CLIENT_LOG,
 		...(options.compression ? { compression: options.compression } : {}),
+		...(options.keepAlive !== undefined ? { keep_alive: { enabled: options.keepAlive } } : {}),
+		...(options.httpAgent ? { http_agent: options.httpAgent, set_basic_auth_header: true } : {}),
 	})
 }
 
@@ -771,20 +949,28 @@ export function createSessionClickHouseClient(
 		clickhouse_settings: clickhouseSettings,
 		log: SILENT_CLIENT_LOG,
 		...(options.compression ? { compression: options.compression } : {}),
+		...(options.keepAlive !== undefined ? { keep_alive: { enabled: options.keepAlive } } : {}),
 	})
 }
 
 export function createExecutorWithClient(
 	config: ClickHouseConfig,
 	client: ClickHouseClient,
-	options: { createCompressedClient?: () => ClickHouseClient } = {},
+	options: { createCompressedClient?: () => ClickHouseClient; sendConnectTimeoutMs?: number } = {},
 ): ClickHouseExecutor {
 	const profiler = getLogger(['chkit', 'profiling'])
 
 	const fireAndForgetClient = createStatelessClickHouseClient(config, {
 		wait_end_of_query: 0,
 	})
+	// Submits with an admission go through their own client, whose agent asks
+	// the admission as each request is created.
+	const admissions = new Map<string, SubmitAdmission>()
+	let admissionClient: ClickHouseClient | undefined
+	let sendQueue: ReturnType<typeof createSendQueue> | undefined
+	const admittedIds = new Set<string>()
 	let compressedClient: ClickHouseClient | undefined
+	let controlClient: ClickHouseClient | undefined
 
 	// Reads add the progress settings unless the user cannot change settings,
 	// looked up once per executor. A failed lookup is not cached: the database
@@ -803,55 +989,123 @@ export function createExecutorWithClient(
 		return (await settingsChangeableOnce()) ? { ...PROGRESS_SETTINGS, ...settings } : settings
 	}
 
-	return {
-		async command(sql: string, settings?: ClickHouseSettings): Promise<void> {
-			try {
-				const result = await client.command({
-					query: sql,
-					http_headers: { 'X-DDL': '1' },
-					clickhouse_settings: { ...WRITE_SETTINGS, ...settings },
-				})
-				assertStreamedQuerySucceeded({
-					response_headers: result.response_headers,
-					query_id: result.query_id,
-					sql,
-				})
-				logProfiling(profiler, sql, result.query_id, result.summary)
-			} catch (error) {
-				if (isUnknownDatabaseError(error)) {
-					const fallback = createClient({
-						url: config.url,
-						...credentialOptions(config),
-						application: CHKIT_APPLICATION_ID,
-						request_timeout: NO_REQUEST_TIMEOUT,
-						clickhouse_settings: { wait_end_of_query: 1, async_insert: 0 },
-						log: SILENT_CLIENT_LOG,
-					})
-					try {
-						const fallbackResult = await fallback.command({
-							query: sql,
-							http_headers: { 'X-DDL': '1' },
-							clickhouse_settings: { ...WRITE_SETTINGS, ...settings },
-						})
-						assertStreamedQuerySucceeded({
-							response_headers: fallbackResult.response_headers,
-							query_id: fallbackResult.query_id,
-							sql,
-						})
-					} finally {
-						await fallback.close()
-					}
-					return
+	async function command(sql: string, settings?: ClickHouseSettings, check?: () => void, beforeAttempt?: () => Promise<string>): Promise<void> {
+		const { query_id: _ignored, ...trackedSettings } = settings ?? {}
+		const commandSettings = writeSettings(beforeAttempt ? trackedSettings : settings)
+		check?.()
+		let queryId: string | undefined
+		if (beforeAttempt) {
+			queryId = await beforeAttempt()
+			check?.()
+		}
+		try {
+			const result = await client.command({
+				query: sql,
+				...(queryId ? { query_id: queryId } : {}),
+				http_headers: { 'X-DDL': '1' },
+				clickhouse_settings: commandSettings,
+			})
+			assertStreamedQuerySucceeded({
+				response_headers: result.response_headers,
+				query_id: result.query_id,
+				sql,
+			})
+			logProfiling(profiler, sql, result.query_id, result.summary)
+		} catch (error) {
+			if (isUnknownDatabaseError(error)) {
+				check?.()
+				let fallbackId: string | undefined
+				if (beforeAttempt) {
+					fallbackId = await beforeAttempt()
+					check?.()
 				}
-				wrapConnectionError(error, config.url, config.username)
+				const fallback = createClient({
+					url: config.url,
+					...credentialOptions(config),
+					application: CHKIT_APPLICATION_ID,
+					request_timeout: NO_REQUEST_TIMEOUT,
+					// The command's own settings carry the durable insert settings,
+					// last; a client default would put them before a profile (#790).
+					clickhouse_settings: { wait_end_of_query: 1 },
+					log: SILENT_CLIENT_LOG,
+				})
+				try {
+					const fallbackResult = await fallback.command({
+						query: sql,
+						...(fallbackId ? { query_id: fallbackId } : {}),
+						http_headers: { 'X-DDL': '1' },
+						clickhouse_settings: commandSettings,
+					})
+					assertStreamedQuerySucceeded({
+						response_headers: fallbackResult.response_headers,
+						query_id: fallbackResult.query_id,
+						sql,
+					})
+				} finally {
+					await fallback.close()
+				}
+				return
 			}
+			wrapConnectionError(error, config.url, config.username)
+		}
+	}
+
+	return {
+		command,
+		...(config.cluster ? { queryControlCluster: config.cluster } : {}),
+		commandGuarded: (sql, check, settings) => command(sql, settings, check),
+		commandTracked: (sql, check, beforeAttempt, settings) => command(sql, settings, check, beforeAttempt),
+		async queryControl<T>(sql: string, timeoutMs: number, options?: QueryControlOptions): Promise<T[]> {
+			if (!Number.isFinite(timeoutMs) || !(timeoutMs > 0)) throw new Error('Cancellation deadline expired')
+			// Disable the driver pool: a header override is ignored by the client,
+			// and a pinned socket cannot collect KILL receipts from other members.
+			controlClient ??= createStatelessClickHouseClient(config, DEFAULT_CLICKHOUSE_SETTINGS, { keepAlive: false })
+			const activeClient = controlClient
+			const controller = new AbortController()
+			let result: { close(): void } | undefined
+			let expired = false
+			let consumed = false
+			let timer: ReturnType<typeof setTimeout> | undefined
+			const deadline = new Promise<never>((_, reject) => {
+				timer = setTimeout(() => {
+					expired = true
+					result?.close()
+					controller.abort()
+					reject(new Error('Cancellation deadline expired'))
+				}, Math.ceil(timeoutMs))
+			})
+			try {
+				return await Promise.race([deadline, (async () => {
+					const settings = { ...options?.settings, ...STRICT_CONTROL_SETTINGS }
+					delete settings.query_id
+					if (/^INSERT\b/i.test(sql.trimStart()) || /^KILL\b[\s\S]*\bASYNC\s*;?$/i.test(sql.trimStart())) {
+						const written = await activeClient.command({ query: sql, abort_signal: controller.signal,
+							...(options?.queryId ? { query_id: options.queryId } : {}), clickhouse_settings: settings })
+						assertStreamedQuerySucceeded({ response_headers: written.response_headers, query_id: written.query_id, sql })
+						return []
+					}
+					const response = await activeClient.query({
+						query: sql, format: 'JSONStrings', abort_signal: controller.signal,
+						...(options?.queryId ? { query_id: options.queryId } : {}),
+						clickhouse_settings: settings,
+					})
+					result = response
+					if (expired) { response.close(); throw new Error('Cancellation deadline expired') }
+					assertStreamedQuerySucceeded({ response_headers: response.response_headers, query_id: response.query_id, sql })
+					const { data: rows } = await response.json<T>()
+					consumed = true
+					return rows
+				})()])
+			} finally { clearTimeout(timer); controller.abort(); if (!consumed) result?.close() }
 		},
 		async query<T>(sql: string, settings?: ClickHouseSettings): Promise<T[]> {
 			try {
-				const clickhouseSettings = await readSettings(settings)
+				const { default_format, ...querySettings } = settings ?? {}
+				const framed = default_format === 'JSONStrings'
+				const clickhouseSettings = await readSettings(framed ? querySettings : settings)
 				const result = await client.query({
 					query: sql,
-					format: 'JSONEachRow',
+					format: framed ? 'JSONStrings' : 'JSONEachRow',
 					http_headers: { 'X-DDL': '1' },
 					...(clickhouseSettings ? { clickhouse_settings: clickhouseSettings } : {}),
 				})
@@ -868,7 +1122,7 @@ export function createExecutorWithClient(
 				// The client's JSONEachRow decoder drops the final row when the
 				// response ends without a newline. Decode every nonempty line,
 				// without rounding 64-bit integers and Decimals (#415).
-				const rows = parseJsonEachRow<T>(await result.text())
+				const rows = framed ? (await result.json<T>() as { data: T[] }).data : parseJsonEachRow<T>(await result.text())
 				logProfiling(
 					profiler,
 					sql,
@@ -973,7 +1227,7 @@ export function createExecutorWithClient(
 					values: params.stream ? Readable.from(params.values) : params.values,
 					format: 'JSONEachRow',
 					...(isNonEmpty(params.columns) ? { columns: params.columns } : {}),
-					clickhouse_settings: { ...WRITE_SETTINGS, ...params.settings },
+					clickhouse_settings: writeSettings(params.settings),
 				})
 				assertStreamedQuerySucceeded({
 					response_headers: result.response_headers,
@@ -990,19 +1244,69 @@ export function createExecutorWithClient(
 				wrapConnectionError(error, config.url, config.username)
 			}
 		},
-		async submit(sql: string, queryId?: string, settings?: ClickHouseSettings): Promise<string> {
+		submitSendsOnce: true,
+		async submit(sql: string, queryId?: string, settings?: ClickHouseSettings, submitOptions?: SubmitOptions): Promise<string> {
+			const admission = submitOptions?.admission
 			const id = queryId ?? crypto.randomUUID()
 			// A query_id in the settings would put a second query_id on the URL, and
 			// the server could run the query under an id queryStatus() never sees (#353).
 			const { query_id: _ignored, ...clickhouseSettings } = settings ?? {}
+			let target = fireAndForgetClient
+			const recorded = admission ? recordingAdmission(admission) : undefined
+			let releaseSlot: (() => void) | undefined
+			// One admission per in-flight query id, from the queue on: a second
+			// submit of the same id would share the first one's record.
+			if (recorded && admittedIds.has(id)) {
+				throw new Error(`A submit with query id ${id} is already in flight on this executor.`)
+			}
+			if (recorded) admittedIds.add(id)
+			if (recorded && admission) {
+				admissionClient ??= createStatelessClickHouseClient(
+					config,
+					{ wait_end_of_query: 0 },
+					{ httpAgent: createAdmissionAgent(config.url, admissions, options.sendConnectTimeoutMs) },
+				)
+				sendQueue ??= createSendQueue(urlConnectionOptions(config.url).maxOpenConnections)
+				target = admissionClient
+				// Waits for a connection slot here, not in the agent: a stop
+				// refuses a waiting submit before it reaches the agent.
+				try {
+					releaseSlot = await acquireSendSlot(sendQueue, admission.signal)
+				} catch (error) {
+					admittedIds.delete(id)
+					throw error
+				}
+				admissions.set(id, recorded.admission)
+			}
 			try {
-				await fireAndForgetClient.command({
+				// The slot was granted a turn ago: a stop since then refuses the
+				// submit here, in the turn that would call the driver.
+				if (admission?.signal?.aborted) throw sendNotAdmittedError()
+				await target.command({
 					query: sql,
 					query_id: id,
-					...(settings ? { clickhouse_settings: clickhouseSettings } : {}),
+					// Stored when it finishes, as a command is: an asynchronous INSERT
+					// would finish while its rows are still buffered (#790).
+					clickhouse_settings: withDurableInsertSettings(clickhouseSettings),
+					...(submitOptions?.signal ? { abort_signal: submitOptions.signal } : {}),
 				})
 			} catch (error) {
+				// A refused request was never written, whatever the driver says.
+				if (recorded?.refused() || isSendNotAdmitted(error)) throw sendNotAdmittedError()
+				// The client sends each request once (#767), so a failure before
+				// its first byte proves the query was never sent (#800). A submit
+				// with an admission has its own proof (#765), as chkit-py's
+				// submit_once does: it is left as it was.
+				if (!admission && failedBeforeSending(error)) {
+					throw new SubmitNotSentError(formatConnectionError(error, config.url, config.username) ?? String(error), { cause: error })
+				}
 				wrapConnectionError(error, config.url, config.username)
+			} finally {
+				if (admission) {
+					admissions.delete(id)
+					admittedIds.delete(id)
+				}
+				releaseSlot?.()
 			}
 			return id
 		},
@@ -1016,6 +1320,7 @@ export function createExecutorWithClient(
 			return `system.${table}`
 		},
 		canChangeSettings: settingsChangeableOnce,
+		openConcurrent: () => createStatelessClickHouseExecutor(config),
 		async queryStatus(queryId: string, options?: QueryStatusOptions): Promise<QueryStatus> {
 			// Without clickhouse.cluster, a multi-replica ObsessionDB service still
 			// runs the query on one replica only (#246).
@@ -1028,18 +1333,16 @@ export function createExecutorWithClient(
 				const running = await client.query({
 					query: `SELECT read_rows, read_bytes, written_rows, written_bytes, elapsed FROM ${processesFrom} WHERE user = currentUser() AND query_id = {qid:String} SETTINGS skip_unavailable_shards = ${skipUnavailable}`,
 					query_params: { qid: queryId },
-					format: 'JSONEachRow',
+					format: 'JSONStrings',
 				})
-				// Decoded as executor.query() does (#436). A UInt64 count arrives as a
-				// number, or as a string of its digits beyond 2^53 or when the
-				// profile sets output_format_json_quote_64bit_integers.
-				const runningRows = parseJsonEachRow<{
+
+				const { data: runningRows } = await running.json<{
 					read_rows: number | string
 					read_bytes: number | string
 					written_rows: number | string
 					written_bytes: number | string
 					elapsed: number
-				}>(await running.text())
+				}>()
 				const [proc] = runningRows
 				if (proc) {
 					return {
@@ -1054,51 +1357,36 @@ export function createExecutorWithClient(
 				if (options?.runningOnly) return { status: 'unknown' }
 
 				const afterTime = options?.afterTime ?? '1970-01-01T00:00:00Z'
+				// event_date prunes query_log's partitions: the entry is logged no earlier
+				// than the query started. A day of slack covers a session time zone other
+				// than the server's; toDate32, as a Date before 1970 wraps around.
+				// A query the server rejected before it started (a syntax error, an
+				// unknown table) is logged as ExceptionBeforeStart: its failure, as
+				// the server recorded it under the id, for a caller whose id names
+				// one attempt alone (#767).
+				const types = options?.includeBeforeStart
+					? "'QueryFinish', 'ExceptionWhileProcessing', 'ExceptionBeforeStart'"
+					: "'QueryFinish', 'ExceptionWhileProcessing'"
 				const queryLogFrom = from('query_log')
+				// With ExceptionBeforeStart, every entry of the id is read: a
+				// rejected duplicate delivery logs one early, which must not hide
+				// the QueryFinish of the attempt that ran (#767).
 				const log = await client.query({
-					query: `SELECT type, written_rows, written_bytes, query_duration_ms, exception
+					query: `SELECT type, written_rows, written_bytes, query_duration_ms, exception, exception_code, toString(serverUUID()) AS server, toString(event_time_microseconds) AS event_at
 FROM ${queryLogFrom}
 WHERE user = currentUser()
   AND query_id = {qid:String}
-  AND type IN ('QueryFinish', 'ExceptionWhileProcessing')
+  AND type IN (${types})
   AND is_initial_query = 1
   AND query_start_time >= parseDateTimeBestEffort({after:String})
+  AND event_date >= toDate32(parseDateTimeBestEffort({after:String})) - 1
 ORDER BY event_time DESC
-LIMIT 1
+${options?.includeBeforeStart ? '' : 'LIMIT 1'}
 SETTINGS skip_unavailable_shards = ${skipUnavailable}`,
 					query_params: { qid: queryId, after: afterTime },
-					format: 'JSONEachRow',
+					format: 'JSONStrings',
 				})
-				const logRows = parseJsonEachRow<{
-					type: string
-					written_rows: number | string
-					written_bytes: number | string
-					query_duration_ms: number | string
-					exception: string
-				}>(await log.text())
-
-				if (logRows.length === 0) {
-					return { status: 'unknown' }
-				}
-
-				const [row] = logRows
-				if (!row) {
-					return { status: 'unknown' }
-				}
-				if (row.type === 'QueryFinish') {
-					return {
-						status: 'finished',
-						writtenRows: Number(row.written_rows),
-						writtenBytes: Number(row.written_bytes),
-						durationMs: Number(row.query_duration_ms),
-					}
-				}
-
-				return {
-					status: 'failed',
-					durationMs: Number(row.query_duration_ms),
-					error: row.exception,
-				}
+				return queryLogOutcome((await log.json<QueryLogRow>()).data)
 			} catch (error) {
 				wrapConnectionError(error, config.url, config.username)
 			}
@@ -1107,7 +1395,9 @@ SETTINGS skip_unavailable_shards = ${skipUnavailable}`,
 			await Promise.all([
 				client.close(),
 				fireAndForgetClient.close(),
+				admissionClient?.close(),
 				compressedClient?.close(),
+				controlClient?.close(),
 			])
 		},
 		async listSchemaObjects(): Promise<SchemaObjectRef[]> {
@@ -1116,7 +1406,13 @@ SETTINGS skip_unavailable_shards = ${skipUnavailable}`,
 FROM system.tables
 WHERE is_temporary = 0
   AND database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA')
-  AND NOT startsWith(name, '_chkit_')`,
+  AND NOT startsWith(name, '_chkit_')
+  AND (database, name) NOT IN (
+    SELECT database, arrayJoin([
+      concat('.inner_id.', toString(uuid)),
+      concat('.tmp.inner_id.', toString(uuid))
+    ]) FROM system.tables WHERE engine = 'MaterializedView'
+  )`,
 			)
 
 			const out: SchemaObjectRef[] = []
@@ -1187,11 +1483,13 @@ export function createClickHouseExecutor(
 
 export function createStatelessClickHouseExecutor(
 	config: ClickHouseConfig,
+	options: { sendConnectTimeoutMs?: number } = {},
 ): ClickHouseExecutor {
 	return createExecutorWithClient(
 		config,
 		createStatelessClickHouseClient(config),
 		{
+			...options,
 			createCompressedClient: () =>
 				createStatelessClickHouseClient(config, DEFAULT_CLICKHOUSE_SETTINGS, {
 					compression: { request: true },

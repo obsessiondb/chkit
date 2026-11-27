@@ -5,6 +5,12 @@ import micromatch from 'micromatch'
 import * as ts from 'typescript'
 
 import { assertProjectPath } from './files.js'
+import { SYNC_PLUGIN_PACKAGES, type SyncPluginPackage } from './model.js'
+
+const pluginFactories = {
+  '@chkit/plugin-sync': 'sync',
+  '@chkit/plugin-ingest': 'ingest',
+} as const satisfies Record<SyncPluginPackage, 'sync' | 'ingest'>
 
 interface ProjectConfigInput {
   cwd: string
@@ -12,6 +18,7 @@ interface ProjectConfigInput {
   providerEntry: string
   providerFiles?: readonly string[]
   exportNames: readonly string[]
+  pluginPackage: SyncPluginPackage
 }
 
 interface PlannedFile {
@@ -35,17 +42,18 @@ export async function planProjectConfig(input: ProjectConfigInput): Promise<{
   const providerEntry = resolve(input.providerEntry)
   const providerPath = relativePath(input.cwd, providerEntry)
   const names = [...new Set(input.exportNames)]
+  const { pluginPackage } = input
   if (names.length === 0 || names.some((name) => !/^[A-Za-z_$][\w$]*$/.test(name) || name === 'default')) {
     throw new Error('Registry entry exports must be nonempty, named JavaScript identifiers.')
   }
   const content = await readOptional(configPath)
   if (content === undefined) {
-    return { configPath, files: [{ path: configPath, content: newConfig(providerPath) }] }
+    return { configPath, files: [{ path: configPath, content: newConfig(providerPath, pluginPackage) }] }
   }
 
   const source = parseSource(configPath, content)
   const fail: (reason: string) => never = (reason) => {
-    throw configError(configPath, providerPath, reason)
+    throw configError(configPath, providerPath, pluginPackage, reason)
   }
   const object = configObject(source, fail)
   const properties = configProperties(object, fail)
@@ -89,7 +97,7 @@ export async function planProjectConfig(input: ProjectConfigInput): Promise<{
     additions.push(`entry: ${quote(providerPath)}`)
   }
 
-  registerIngest(source, properties.get('plugins'), edits, additions, fail)
+  registerSync(source, properties.get('plugins'), pluginPackage, edits, additions, fail)
   appendList(edits, object.properties, object.end - 1, additions)
   const updated = applyEdits(content, edits)
   if (updated !== content) files.unshift({ path: configPath, content: updated })
@@ -150,41 +158,45 @@ function configProperties(object: ts.ObjectLiteralExpression, fail: (reason: str
   return properties
 }
 
-function registerIngest(
+function registerSync(
   source: ts.SourceFile,
   plugins: ts.PropertyAssignment | undefined,
+  pluginPackage: SyncPluginPackage,
   edits: Edit[],
   additions: string[],
   fail: (reason: string) => never,
 ): void {
-  const aliases = importedNames(source, '@chkit/plugin-ingest', 'ingest')
+  const factory = pluginFactories[pluginPackage]
+  const aliases = SYNC_PLUGIN_PACKAGES.flatMap((name) =>
+    Object.values(pluginFactories).flatMap((factoryName) => importedNames(source, name, factoryName)),
+  )
   let list: ts.ArrayLiteralExpression | undefined
   if (plugins) {
     const value = unwrap(plugins.initializer)
-    if (!ts.isArrayLiteralExpression(value)) fail('plugins must be a literal array; preserve its existing registrations when adding ingest().')
+    if (!ts.isArrayLiteralExpression(value)) fail(`plugins must be a literal array; preserve its existing registrations when adding ${factory}().`)
     list = value
     let registrations = 0
     for (const element of list.elements) {
       const registration = unwrap(element)
       if (!ts.isCallExpression(registration) || !ts.isIdentifier(registration.expression)) {
-        fail('Plugin registrations must be direct factory calls; inspect computed/inline registrations before adding ingest().')
+        fail(`Plugin registrations must be direct factory calls; inspect computed/inline registrations before adding ${factory}().`)
       }
       if (aliases.includes(registration.expression.text)) registrations += 1
       else if (!isOtherPluginFactory(source, registration.expression.text)) {
-        fail(`Cannot identify plugin factory ${registration.expression.text}; automatic wiring supports direct named imports from @chkit/plugin-* packages. Add ingest() manually when using custom wrappers.`)
+        fail(`Cannot identify plugin factory ${registration.expression.text}; automatic wiring supports direct named imports from @chkit/plugin-* packages. Add ${factory}() manually when using custom wrappers.`)
       }
     }
-    if (registrations > 1) fail('The ingestion plugin is registered more than once.')
+    if (registrations > 1) fail('The Sync plugin is registered more than once.')
     if (registrations === 1) return
   }
-  let name = aliases[0]
+  let name = importedNames(source, pluginPackage, factory)[0]
   if (name === undefined) {
-    name = unusedIdentifier(source, 'ingest')
-    const binding = name === 'ingest' ? 'ingest' : `ingest as ${name}`
+    name = unusedIdentifier(source, factory)
+    const binding = name === factory ? factory : `${factory} as ${name}`
     // Inserting after the last import preserves shebangs and directive prologues.
     const imports = source.statements.filter(ts.isImportDeclaration)
     const position = imports.at(-1)?.end ?? directiveEnd(source)
-    edits.push({ start: position, end: position, text: `\nimport { ${binding} } from '@chkit/plugin-ingest'\n` })
+    edits.push({ start: position, end: position, text: `\nimport { ${binding} } from '${pluginPackage}'\n` })
   }
   if (list) appendList(edits, list.elements, list.end - 1, [`${name}()`])
   else additions.push(`plugins: [${name}()]`)
@@ -245,9 +257,8 @@ function importedNames(source: ts.SourceFile, moduleName: string, imported: stri
 function isOtherPluginFactory(source: ts.SourceFile, name: string): boolean {
   return source.statements.some((statement) => {
     if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)) return false
-    // Local/third-party wrappers may themselves register ingestion. Do not add
-    // another registration unless the existing official factory is identified.
-    if (!/^@chkit\/plugin-[a-z0-9-]+$/.test(statement.moduleSpecifier.text) || statement.moduleSpecifier.text === '@chkit/plugin-ingest') return false
+    const moduleName = statement.moduleSpecifier.text
+    if (!/^@chkit\/plugin-[a-z0-9-]+$/.test(moduleName) || SYNC_PLUGIN_PACKAGES.some((name) => name === moduleName)) return false
     const clause = statement.importClause
     if (!clause || clause.isTypeOnly) return false
     return clause.namedBindings && ts.isNamedImports(clause.namedBindings)
@@ -289,16 +300,17 @@ function literalString(expression: ts.Expression): string | undefined {
   return ts.isStringLiteral(value) || ts.isNoSubstitutionTemplateLiteral(value) ? value.text : undefined
 }
 
-function unusedIdentifier(source: ts.SourceFile, preferred: string): string {
+function unusedIdentifier(source: ts.SourceFile, preferred: 'sync' | 'ingest'): string {
   const identifiers = new Set<string>()
   function visit(node: ts.Node): void {
     if (ts.isIdentifier(node)) identifiers.add(node.text)
     ts.forEachChild(node, visit)
   }
   visit(source)
-  let candidate = preferred
+  let candidate: string = preferred
   let suffix = 1
-  while (identifiers.has(candidate)) candidate = `chkitIngest${suffix++}`
+  const prefix = preferred === 'sync' ? 'chkitSync' : 'chkitIngest'
+  while (identifiers.has(candidate)) candidate = `${prefix}${suffix++}`
   return candidate
 }
 
@@ -338,10 +350,11 @@ async function readOptional(path: string): Promise<string | undefined> {
   })
 }
 
-function configError(path: string, providerPath: string, reason: string): Error {
-  return new Error(`Cannot safely update ${path}: ${reason}\nNo files were written. Add ingestion while preserving existing plugins:\nimport { ingest as chkitIngest } from '@chkit/plugin-ingest'\n// Add chkitIngest() to your plugins array.\n// In schema mode, add this exact path to the existing schema paths:\n${quote(providerPath)}\n// In entry mode, explicitly re-export the template's schema and pipeline from the existing entry.`)
+function configError(path: string, providerPath: string, pluginPackage: SyncPluginPackage, reason: string): Error {
+  return new Error(`Cannot safely update ${path}: ${reason}\nNo files were written. To register the Sync plugin if needed, use:\nimport { ${pluginFactories[pluginPackage]} as chkitSync } from '${pluginPackage}'\n// Add chkitSync() to your plugins array.\n// In schema mode, add this exact path to the existing schema paths:\n${quote(providerPath)}\n// In entry mode, explicitly re-export the template's schema and pipeline from the existing entry.`)
 }
 
-function newConfig(providerPath: string): string {
-  return `import { defineConfig } from '@chkit/core'\nimport { ingest } from '@chkit/plugin-ingest'\n\nexport default defineConfig({\n  entry: ${quote(providerPath)},\n  plugins: [ingest()],\n  clickhouse: {\n    url: process.env.CLICKHOUSE_URL ?? 'http://localhost:8123',\n    username: process.env.CLICKHOUSE_USER ?? 'default',\n    password: process.env.CLICKHOUSE_PASSWORD ?? '',\n    database: process.env.CLICKHOUSE_DB ?? 'default',\n  },\n})\n`
+function newConfig(providerPath: string, pluginPackage: SyncPluginPackage): string {
+  const factory = pluginFactories[pluginPackage]
+  return `import { defineConfig } from '@chkit/core'\nimport { ${factory} } from '${pluginPackage}'\n\nexport default defineConfig({\n  entry: ${quote(providerPath)},\n  plugins: [${factory}()],\n  clickhouse: {\n    url: process.env.CLICKHOUSE_URL ?? 'http://localhost:8123',\n    username: process.env.CLICKHOUSE_USER ?? 'default',\n    password: process.env.CLICKHOUSE_PASSWORD ?? '',\n    database: process.env.CLICKHOUSE_DB ?? 'default',\n  },\n})\n`
 }

@@ -259,6 +259,36 @@ def _resolve_service_override(
     raise ValueError(msg)
 
 
+_API_URL_FLAG: dict[str, Any] = {
+    "name": "--api-url",
+    "type": "string",
+    "description": "ObsessionDB API base URL",
+}
+# The TS `signup` flags, in its order and words.
+_SIGNUP_FLAGS: list[dict[str, Any]] = [
+    {
+        "name": "--email",
+        "type": "string",
+        "description": "Email to sign up/log in with (skips the prompt)",
+    },
+    {
+        "name": "--code",
+        "type": "string",
+        "description": "One-time code (skips the prompt; for scripts/tests)",
+    },
+    {
+        "name": "--org-name",
+        "type": "string",
+        "description": "Override the auto-created organization name",
+    },
+    {
+        "name": "--request-only",
+        "type": "boolean",
+        "description": "Only send the code and print the follow-up command (step 1 of 2)",
+    },
+]
+
+
 def _resolve_base_url_from_flags(flags: dict[str, Any]) -> str:
     """``--api-url`` overrides anything else; otherwise fall back to env/stored/default."""
     candidate = flags.get("--api-url") or flags.get("api_url")
@@ -306,34 +336,38 @@ def create_obsessiondb_plugin(
     return ChxPlugin(
         manifest=ChxPluginManifest(name="obsessiondb", api_version=1),
         hooks=_ObsessionDBHooks(),
+        # In the TS order and wording, which `chkit obsessiondb -h` and
+        # `chkit plugin obsessiondb` print and an unknown command's error names.
         commands=[
             ChxPluginCommand(
                 name="login",
-                description="Authenticate with ObsessionDB via device-code flow.",
+                description="Authenticate with ObsessionDB",
                 run=_login_run,
-            ),
-            ChxPluginCommand(
-                name="logout",
-                description="Remove stored ObsessionDB credentials.",
-                run=_logout_run,
-            ),
-            ChxPluginCommand(
-                name="whoami",
-                description="Show the current ObsessionDB user.",
-                run=_whoami_run,
+                flags=[_API_URL_FLAG],
+                takes_args=False,
             ),
             ChxPluginCommand(
                 name="signup",
-                description=(
-                    "Sign up or log in with a one-time email code (passwordless)."
-                ),
+                description="Sign up or log in with a one-time email code (passwordless)",
                 run=_signup_run,
+                flags=[_API_URL_FLAG, *_SIGNUP_FLAGS],
+                takes_args=False,
+            ),
+            ChxPluginCommand(
+                name="logout",
+                description="Remove stored ObsessionDB credentials",
+                run=_logout_run,
+                takes_args=False,
+            ),
+            ChxPluginCommand(
+                name="whoami",
+                description="Show current ObsessionDB user",
+                run=_whoami_run,
+                takes_args=False,
             ),
             ChxPluginCommand(
                 name="service",
-                description=(
-                    "Manage ObsessionDB services: list / select / claim / alias."
-                ),
+                description="Manage ObsessionDB services",
                 run=service_command_run,
             ),
         ],

@@ -9,17 +9,27 @@ from __future__ import annotations
 
 import math
 import re
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from chkit.core.jsnum import parse_js_number
+from chkit_plugin_backfill.chunking.sql import (
+    assert_insert_settings_keep_pinned,
+    effective_insert_settings,
+)
 from chkit_plugin_backfill.chunking.types import QuerySettings
 from chkit_plugin_backfill.options import PlanOptions, PluginConfig, parse_byte_size
+from chkit_plugin_backfill.planner import (
+    assert_pinned_insert_settings_accepted,
+    read_pinned_setting_aliases,
+)
 from chkit_plugin_backfill.sdk import (
     BackfillPlanState,
     build_backfill_plan,
     build_chunk_execution_sql,
+    delivery_override_warning,
     generate_idempotency_token,
     record_backfill_submission,
 )
@@ -221,7 +231,8 @@ def handle_submit(context: SubmitContext) -> int:
         plan = prepared.plan
 
         # Same INSERT settings the local executor applies (backfill({insertSettings})).
-        tasks = build_submit_tasks(plan, plugin_options.insert_settings)
+        insert_settings = _checked_insert_settings(context, plan, plugin_options.insert_settings)
+        tasks = build_submit_tasks(plan, insert_settings)
         job_id = jobs_submit(
             context.credentials,
             service_slug=context.service_slug,
@@ -302,6 +313,39 @@ def handle_submit(context: SubmitContext) -> int:
         return 1
 
 
+def _checked_insert_settings(
+    context: SubmitContext,
+    plan: BackfillPlanState,
+    insert_settings: Mapping[str, str | int | float | bool] | None,
+) -> dict[str, str | int | float | bool]:
+    """``insert_settings`` checked as a local run checks them (TS
+    ``checkedInsertSettings``): refused when they change what chkit writes
+    itself, also through an alias the server lists, normalized to the pinned
+    names, warned about when they override a delivery pin, and preflighted, so
+    the server is known to accept the settings before the job is submitted."""
+    cutover = bool(plan.execution.cutover_key and plan.execution.target_columns)
+    assert_insert_settings_keep_pinned(insert_settings, cutover=cutover)
+    executor = create_remote_executor(context.credentials, service_slug=context.service_slug)
+
+    def query(sql: str, settings: QuerySettings | None) -> list[dict[str, object]]:
+        return executor.query(sql, dict(settings) if settings is not None else None).rows
+
+    aliases = read_pinned_setting_aliases(query)
+    assert_insert_settings_keep_pinned(insert_settings, aliases, cutover=cutover)
+    effective = effective_insert_settings(insert_settings, aliases)
+    warning = delivery_override_warning(effective)
+    if warning is not None:
+        sys.stderr.write(f"{warning}\n")
+    assert_pinned_insert_settings_accepted(
+        plan_id=plan.plan_id,
+        query=query,
+        insert_settings=effective,
+        cutover=cutover,
+        token=plan.execution.require_idempotency_token and not cutover,
+    )
+    return effective
+
+
 @dataclass(frozen=True)
 class _PreparedSubmission:
     plan: BackfillPlanState
@@ -310,7 +354,7 @@ class _PreparedSubmission:
     state_dir: str | None = None
     # The failed or cancelled job that a `--plan-id` re-submission replaces.
     replaced_job: ReplacedJob | None = None
-    # Chunks a re-submission leaves out because they finished in the replaced job.
+    # Chunks a re-submission leaves out because they already finished.
     skipped_chunks: int = 0
 
 
@@ -337,8 +381,10 @@ def _prepare_new_plan(
         config=context.config,
         clickhouse_query=clickhouse_query,
         # ObsessionDB enables parallel replicas by default, which inflates
-        # aggregate results used for chunk sizing. Disable for planning.
-        query_settings={"enable_parallel_replicas": 0},
+        # aggregate results used for chunk sizing. Disable for planning, under
+        # the name every ClickHouse version accepts (enable_parallel_replicas
+        # is only an alias of it from 24.10 on).
+        query_settings={"allow_experimental_parallel_reading_from_replicas": 0},
     )
     return _PreparedSubmission(
         plan=output.plan,

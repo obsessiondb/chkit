@@ -10,6 +10,8 @@ Covers:
 from __future__ import annotations
 
 import json
+import os
+import socket
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -17,8 +19,10 @@ from unittest.mock import MagicMock
 import pytest
 
 from chkit.cli.table_scope import TableScope
+from chkit.clickhouse.client import ClickHouseClient
 from chkit.core.model import (
     ChxResolvedCheckConfig,
+    ChxResolvedClickHouseConfig,
     ChxResolvedConfig,
     ChxResolvedSafetyConfig,
 )
@@ -37,6 +41,7 @@ from chkit_plugin_backfill import (
     ensure_environment_match,
     parse_byte_size,
 )
+from chkit_plugin_backfill import plugin as backfill_plugin_module
 from chkit_plugin_backfill.options import (
     PlanOptions,
     RunOptions,
@@ -396,11 +401,11 @@ def test_read_plan_raises_on_legacy_layout(tmp_path: Path) -> None:
 def test_summarize_run_status_counts_done_and_pending(tmp_path: Path) -> None:
     plan = _make_plan(chunk_ids=["c1", "c2", "c3"])
     run = BackfillRunState(
-        planId="0123456789abcdef",
+        plan_id="0123456789abcdef",
         target="events.actions",
         status="running",
-        startedAt="2026-01-01T00:00:00.000Z",
-        updatedAt="2026-01-01T01:00:00.000Z",
+        started_at="2026-01-01T00:00:00.000Z",
+        updated_at="2026-01-01T01:00:00.000Z",
         progress={
             "c1": {"status": "done", "writtenRows": 100},  # type: ignore[dict-item]
             "c2": {"status": "submitted"},  # type: ignore[dict-item]
@@ -419,11 +424,11 @@ def test_plan_status_for_returns_run_status_verbatim() -> None:
     ``run.status``; chunk-based ``completed`` derivation is the engine's job.
     """
     run = BackfillRunState(
-        planId="x" * 16,
+        plan_id="x" * 16,
         target="t",
         status="running",
-        startedAt="2026-01-01T00:00:00.000Z",
-        updatedAt="2026-01-01T00:01:00.000Z",
+        started_at="2026-01-01T00:00:00.000Z",
+        updated_at="2026-01-01T00:01:00.000Z",
     )
     counters = {"pending": 0, "submitted": 0, "running": 0, "done": 5, "failed": 0}
     # Even with all chunks done, the helper now returns the persisted status —
@@ -453,6 +458,54 @@ def test_backfill_plugin_factory_shape() -> None:
         "doctor",
         "list",
     }
+
+
+def test_plan_turns_parallel_replicas_off_under_the_name_every_version_accepts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # enable_parallel_replicas is only an alias from 24.10 on; older servers reject it
+    # with UNKNOWN_SETTING, so every planning query would fail there.
+    sent: list[Any] = []
+
+    def fake_build_backfill_plan(**kwargs: Any) -> Any:
+        sent.append(kwargs["query_settings"])
+        msg = "stop after capturing the settings"
+        raise BackfillConfigError(msg)
+
+    monkeypatch.setattr(
+        backfill_plugin_module, "build_backfill_plan", fake_build_backfill_plan
+    )
+    # The faked planner sends nothing, so no server is needed.
+    monkeypatch.setattr(
+        ClickHouseClient,
+        "connect",
+        classmethod(lambda _cls, _config: MagicMock()),
+    )
+    config = _cfg(tmp_path).model_copy(
+        update={
+            "clickhouse": ChxResolvedClickHouseConfig(
+                url="http://127.0.0.1:1",
+                username="default",
+                password="",
+                database="app",
+                secure=False,
+            )
+        }
+    )
+    plugin = backfill()
+    assert plugin.commands is not None
+    cmd = next(c for c in plugin.commands if c.name == "plan")
+    msgs: list[Any] = []
+    code = cmd.run(
+        _make_command_context(
+            config=config,
+            tmp_path=tmp_path,
+            flags={"--target": "app.events"},
+            msgs=msgs,
+        )
+    )
+    assert code == 2, msgs
+    assert sent == [{"allow_experimental_parallel_reading_from_replicas": 0}]
 
 
 def test_submit_without_backend_prints_managed_backend_error(tmp_path: Path) -> None:
@@ -587,11 +640,11 @@ def test_status_command_prints_summary_on_existing_run(tmp_path: Path) -> None:
     )
     write_json(paths.plan_path, plan)
     run = BackfillRunState(
-        planId=plan.plan_id,
+        plan_id=plan.plan_id,
         target=plan.target,
         status="running",
-        startedAt="2026-01-01T00:00:00.000Z",
-        updatedAt="2026-01-01T01:00:00.000Z",
+        started_at="2026-01-01T00:00:00.000Z",
+        updated_at="2026-01-01T01:00:00.000Z",
     )
     write_json(paths.run_path, run)
     plugin = backfill()
@@ -622,11 +675,11 @@ def test_cancel_command_marks_run_cancelled(tmp_path: Path) -> None:
     )
     write_json(paths.plan_path, plan)
     run = BackfillRunState(
-        planId=plan.plan_id,
+        plan_id=plan.plan_id,
         target=plan.target,
         status="running",
-        startedAt="2026-01-01T00:00:00.000Z",
-        updatedAt="2026-01-01T01:00:00.000Z",
+        started_at="2026-01-01T00:00:00.000Z",
+        updated_at="2026-01-01T01:00:00.000Z",
     )
     write_json(paths.run_path, run)
     plugin = backfill()
@@ -695,3 +748,84 @@ def test_doctor_reports_plan_missing_run(tmp_path: Path) -> None:
     payload = msgs[0]
     assert payload["issueCodes"] == ["backfill_plan_missing"]
     assert any("backfill run --plan-id" in r for r in payload["recommendations"])
+
+
+# #765: a resume takes the plan's lock before it reads the checkpoint, so a
+# second resume fails at once instead of submitting chunks the first runs.
+def test_resume_fails_at_once_while_another_run_holds_the_plans_lock(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path).model_copy(
+        update={
+            "clickhouse": ChxResolvedClickHouseConfig(
+                url="http://localhost:1",
+                username="default",
+                password="",
+                database="default",
+                secure=False,
+            )
+        }
+    )
+    plan = _make_plan()
+    paths = backfill_paths(
+        compute_backfill_state_dir(cfg, tmp_path / "clickhouse.config.py"), plan.plan_id
+    )
+    write_json(paths.plan_path, plan)
+    lock_path = Path(paths.runs_dir) / f"{plan.plan_id}.lock"
+    # The parent of this test process: alive, on this host.
+    holder = {
+        "pid": os.getppid(),
+        "host": socket.gethostname(),
+        "startedAt": "2026-11-18T10:00:00.000Z",
+        "token": "0123456789abcdef",
+    }
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(json.dumps(holder) + "\n", encoding="utf-8")
+    plugin = backfill()
+    assert plugin.commands is not None
+    cmd = next(c for c in plugin.commands if c.name == "resume")
+
+    def resume() -> tuple[int, list[Any]]:
+        msgs: list[Any] = []
+        code = cmd.run(
+            _make_command_context(
+                config=cfg,
+                tmp_path=tmp_path,
+                flags={"--plan-id": plan.plan_id},
+                json_mode=True,
+                msgs=msgs,
+            )
+        )
+        assert code is not None
+        return code, msgs
+
+    code, msgs = resume()
+    assert code == 2
+    assert any(
+        f"Backfill plan {plan.plan_id} is locked by another run, resume or cancel (pid "
+        f"{os.getppid()} on {socket.gethostname()}, since 2026-11-18T10:00:00.000Z)."
+        in str(m)
+        for m in msgs
+    )
+
+    # Cancel takes the same lock, so it never replaces a checkpoint a run writes.
+    cancel = next(c for c in plugin.commands if c.name == "cancel")
+    cancel_msgs: list[Any] = []
+    cancel_code = cancel.run(
+        _make_command_context(
+            config=cfg,
+            tmp_path=tmp_path,
+            flags={"--plan-id": plan.plan_id},
+            json_mode=True,
+            msgs=cancel_msgs,
+        )
+    )
+    assert cancel_code == 2
+    assert any(
+        f"Backfill plan {plan.plan_id} is locked by another run, resume or cancel" in str(m)
+        for m in cancel_msgs
+    )
+
+    lock_path.unlink()
+    code, msgs = resume()
+    assert code == 2
+    assert any("Run state not found" in str(m) for m in msgs)
+    assert not lock_path.exists()

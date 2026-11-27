@@ -1,8 +1,9 @@
-import type {
-  MigrationOperation,
-  MigrationPlan,
-  SchemaDefinition,
-  TableDefinition,
+import {
+  compareCodePoints,
+  type MigrationOperation,
+  type MigrationPlan,
+  type SchemaDefinition,
+  type TableDefinition,
 } from '@chkit/core'
 
 import type { TableScope } from '../plugins.js'
@@ -32,7 +33,7 @@ function tableKey(database: string, name: string): string {
 }
 
 export function tableKeysFromDefinitions(definitions: SchemaDefinition[]): string[] {
-  return [...new Set(definitions.filter((def): def is TableDefinition => def.kind === 'table').map((def) => tableKey(def.database, def.name)))].sort((a, b) => a.localeCompare(b))
+  return [...new Set(definitions.filter((def): def is TableDefinition => def.kind === 'table').map((def) => tableKey(def.database, def.name)))].sort((a, b) => compareCodePoints(a, b))
 }
 
 export function parseTableSelector(input: string): ParsedTableSelector {
@@ -104,7 +105,7 @@ export function resolveTableScope(selector: string | undefined, availableTables:
   }
 
   const parsed = parseTableSelector(selector)
-  const normalized = [...new Set(availableTables)].sort((a, b) => a.localeCompare(b))
+  const normalized = [...new Set(availableTables)].sort((a, b) => compareCodePoints(a, b))
   const matchedTables = normalized.filter((candidate) => {
     const dot = candidate.indexOf('.')
     if (dot <= 0 || dot === candidate.length - 1) return false

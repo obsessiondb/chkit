@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -21,6 +21,7 @@ from chkit.core.model import (
     ChxResolvedSafetyConfig,
 )
 from chkit.plugins import (
+    ChxGetContextInput,
     ChxOnBeforePluginCommandContext,
     ChxOnBeforePluginCommandHandled,
     ChxOnCheckContext,
@@ -33,6 +34,7 @@ from chkit.plugins import (
     ChxPluginCommandContext,
     ChxPluginManifest,
     LoadedPlugin,
+    PluginContext,
 )
 
 
@@ -362,6 +364,75 @@ def _make_command_ctx(runtime: PluginRuntime) -> Any:
         plugin_runtime=runtime,
         plugin_context=null_plugin_context(),
     )
+
+
+# ---------- get_context ----------
+
+
+class _FakeExecutor:
+    def __init__(self, name: str, events: list[str]) -> None:
+        self.name = name
+        self.events = events
+
+    def close(self) -> None:
+        self.events.append(f"close:{self.name}")
+
+
+class _ContextHook:
+    def __init__(self, name: str, events: list[str], executor: _FakeExecutor | None) -> None:
+        self.name = name
+        self.events = events
+        self.executor = executor
+
+    def get_context(self, ctx: ChxGetContextInput) -> PluginContext:
+        self.events.append(f"get_context:{self.name}")
+        if self.executor is None:
+            raise ValueError("no service")
+        return PluginContext(executor=cast(Any, self.executor), has_executor=True)
+
+
+def _get_context_input() -> ChxGetContextInput:
+    return ChxGetContextInput(
+        config=_config(),
+        config_path="cfg.py",
+        command="migrate",
+        flags={},
+        defaults=null_plugin_context(),
+    )
+
+
+def test_resolve_context_runs_every_hook_and_the_last_executor_wins() -> None:
+    # As TS resolveContext (#686): each plugin executor replaces the one
+    # before it, which is closed.
+    events: list[str] = []
+    first = _FakeExecutor("first", events)
+    second = _FakeExecutor("second", events)
+    runtime = load_plugin_runtime(
+        [
+            _plugin("first", hooks=_ContextHook("first", events, first)),
+            _plugin("second", hooks=_ContextHook("second", events, second)),
+        ]
+    )
+    result = runtime.resolve_context(_get_context_input())
+    assert result is not None
+    assert cast(_FakeExecutor, result.executor).name == "second"
+    assert result.has_executor is True
+    assert events == ["get_context:first", "get_context:second", "close:first"]
+
+
+def test_resolve_context_hook_error_closes_the_current_executor() -> None:
+    events: list[str] = []
+    first = _FakeExecutor("first", events)
+    runtime = load_plugin_runtime(
+        [
+            _plugin("first", hooks=_ContextHook("first", events, first)),
+            _plugin("broken", hooks=_ContextHook("broken", events, None)),
+        ]
+    )
+    with pytest.raises(PluginExecutionError) as excinfo:
+        runtime.resolve_context(_get_context_input())
+    assert str(excinfo.value) == 'Plugin "broken" failed in getContext: no service'
+    assert events == ["get_context:first", "get_context:broken", "close:first"]
 
 
 # ---------- error wrapping ----------

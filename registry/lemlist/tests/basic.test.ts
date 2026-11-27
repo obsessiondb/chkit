@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
-import { runIngestion, selectStreams, type PipelineDefinition } from '@chkit/plugin-ingest'
-import { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-ingest/testing'
+import { runIngestion, selectStreams, type PipelineDefinition } from '@chkit/plugin-sync'
+import { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-sync/testing'
 
 import { lemlistConfig } from '../config.js'
 import { createLemlistPipeline } from '../index.js'

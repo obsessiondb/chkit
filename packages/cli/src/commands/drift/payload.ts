@@ -3,14 +3,17 @@ import { join } from 'node:path'
 import {
   canonicalizeSqlFragments,
   isUnknownDatabaseError,
+  listDictionaryDetails,
   listViewDetails,
   type ClickHouseExecutor,
   type IntrospectedTable,
   type SchemaObjectRef,
 } from '@chkit/clickhouse'
 import {
+  compareCodePoints,
   configuredIndexGranularity,
   type ChxConfig,
+  type DictionaryDefinition,
   type MaterializedViewDefinition,
   type Snapshot,
   type TableDefinition,
@@ -20,8 +23,10 @@ import {
 import { debug } from '../../runtime/debug.js'
 import type { TableScope } from '../../runtime/table-scope.js'
 import {
+  collectDictionarySqlQueries,
   collectTableSqlFragments,
   collectViewSqlQueries,
+  compareDictionaryShape,
   compareObjectComments,
   compareSchemaObjects,
   compareTableShape,
@@ -32,18 +37,20 @@ import {
 } from './compare.js'
 
 /**
- * Build a canonicalizer for every SQL fragment across the compared tables and
- * views, one batched ClickHouse query per kind. Returns undefined when there is nothing to
- * canonicalize or ClickHouse can't format (old server, offline) — the comparer
- * then falls back to plain string normalization.
+ * Build a canonicalizer for every SQL fragment across the compared tables,
+ * views and dictionaries, one batched ClickHouse query per kind. Returns
+ * undefined when there is nothing to canonicalize or ClickHouse can't format
+ * (old server, offline) — the comparer then falls back to plain string
+ * normalization.
  */
 async function buildSqlCanonicalizer(
   db: ClickHouseExecutor,
   pairs: Array<{ expected: TableDefinition; actual: IntrospectedTable }>,
-  viewQueries: string[]
+  objectQueries: string[],
+  storedQueryPairs: Array<readonly [string, string]>
 ): Promise<SqlCanonicalizer | undefined> {
   const expressions: string[] = []
-  const queries: string[] = [...viewQueries]
+  const queries: string[] = [...objectQueries]
   for (const { expected, actual } of pairs) {
     const fragments = collectTableSqlFragments(expected, actual)
     expressions.push(...fragments.expressions)
@@ -52,10 +59,18 @@ async function buildSqlCanonicalizer(
   if (expressions.length === 0 && queries.length === 0) return undefined
 
   try {
+    // Report an unreadable system.functions registry once for both calls:
+    // without it the #729 FLOOR drift would silently come back.
+    let registryWarningLogged = false
+    const onRegistryUnavailable = (error: unknown) => {
+      if (registryWarningLogged) return
+      registryWarningLogged = true
+      debug('drift', `function registry unavailable, keeping function names as written: ${String(error)}`)
+    }
     // One after the other: the CLI's executor is bound to one HTTP session, and
     // ClickHouse rejects a second query while the session is busy.
-    const expressionMap = await canonicalizeSqlFragments(db, expressions, { wrap: true })
-    const queryMap = await canonicalizeSqlFragments(db, queries, { wrap: false })
+    const expressionMap = await canonicalizeSqlFragments(db, expressions, { wrap: true, onRegistryUnavailable })
+    const queryMap = await canonicalizeSqlFragments(db, queries, { wrap: false, storedQueryPairs, onRegistryUnavailable })
     return {
       expression: (fragment) => expressionMap.get(fragment) ?? null,
       query: (fragment) => queryMap.get(fragment) ?? null,
@@ -193,6 +208,17 @@ export async function buildDriftPayload(
     const expected = expectedViewMap.get(`${actual.kind}:${actual.database}.${actual.name}`)
     return expected ? [{ expected, actual }] : []
   })
+  const expectedDictionaryMap = new Map(
+    snapshot.definitions
+      .filter((def): def is DictionaryDefinition => def.kind === 'dictionary')
+      .map((def) => [`${def.database}.${def.name}`, def])
+  )
+  const actualDictionaries =
+    expectedDictionaryMap.size > 0 ? await listDictionaryDetails(db, [...expectedDatabases]) : []
+  const dictionaryPairs = actualDictionaries.flatMap((actual) => {
+    const expected = expectedDictionaryMap.get(`${actual.database}.${actual.name}`)
+    return expected ? [{ expected, queries: collectDictionarySqlQueries(expected, actual) }] : []
+  })
   // Unqualified names in a view's query resolve to the session database.
   const currentDatabase =
     viewPairs.length > 0
@@ -201,18 +227,27 @@ export async function buildDriftPayload(
   const canonicalizer = await buildSqlCanonicalizer(
     db,
     pairs,
-    viewPairs.flatMap(({ expected, actual }) => collectViewSqlQueries(expected, actual))
+    [
+      ...viewPairs.flatMap(({ expected, actual }) => collectViewSqlQueries(expected, actual)),
+      ...dictionaryPairs.flatMap(({ queries }) => (queries ? [queries.expected, queries.actual] : [])),
+    ],
+    viewPairs.flatMap(({ expected, actual }) => {
+      const queries = collectViewSqlQueries(expected, actual)
+      const [left, right] = queries
+      return left && right ? [[left, right] as const] : []
+    })
   )
   const tableDrift = pairs
     .map(({ expected, actual }) => compareTableShape(expected, actual, canonicalizer, configuredIndexGranularity(config)))
     .filter((item): item is NonNullable<typeof item> => item !== null)
-    .sort((a, b) => a.table.localeCompare(b.table))
+    .sort((a, b) => compareCodePoints(a.table, b.table))
   const objectShapeDrift = [
     ...viewPairs.flatMap(({ expected, actual }) =>
       compareViewShape(expected, actual, currentDatabase ?? '', canonicalizer)
     ),
+    ...dictionaryPairs.flatMap(({ expected, queries }) => compareDictionaryShape(expected, queries, canonicalizer)),
     ...compareObjectComments(expectedObjects, actualInScope),
-  ].sort((a, b) => a.object.localeCompare(b.object))
+  ].sort((a, b) => compareCodePoints(a.object, b.object))
   const objectDriftWithViews = [...objectDrift, ...objectShapeDrift]
 
   debug('drift', `comparison: missing=${missing.length}, extra=${extra.length}, kindMismatches=${kindMismatches.length}, objectDrift=${objectDrift.length}, tableDrift=${tableDrift.length}, viewDrift=${objectShapeDrift.length}`)

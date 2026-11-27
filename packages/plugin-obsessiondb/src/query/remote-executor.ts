@@ -1,15 +1,18 @@
 import type {
 	ClickHouseExecutor,
+	QueryControlOptions,
 	ClickHouseInsertParams,
 	ClickHouseJsonQueryResult,
 	ClickHouseSettings,
-	QueryStatus,
 	SchemaObjectRef,
 } from '@chkit/clickhouse'
 import {
+	STRICT_CONTROL_SETTINGS,
 	allReplicas,
 	buildIntrospectedTables,
 	inferSchemaKindFromEngine,
+	queryLogOutcome,
+	type QueryLogRow,
 	resolveReplicaFanout,
 	type SystemColumnRow,
 	type SystemSkippingIndexRow,
@@ -47,6 +50,54 @@ function toApiSettings(
 		// accepts scalar setting values.
 	}
 	return Object.keys(out).length > 0 ? out : undefined
+}
+
+// A write is stored when it returns: no asynchronous INSERT, and one that a
+// table's own async_insert setting still makes asynchronous waits for its flush
+// (#804), as a direct connection sends (#790).
+const DURABLE_INSERT_SETTINGS = { async_insert: 0, wait_for_async_insert: 1 } as const
+
+interface SettingRow {
+	name: string
+	value: string
+	readonly: string
+}
+
+const SETTING_ROWS_SQL =
+	"SELECT name, value, toString(readonly) AS readonly FROM system.settings WHERE name IN ('readonly', 'async_insert', 'wait_for_async_insert')"
+
+/**
+ * The durable-insert settings the user's profile lets a write send. A setting
+ * the user cannot change (a constraint) is left out when it already has that
+ * value, as ClickHouse rejects any change of it, also on DDL. Fixed at another
+ * value, the write is refused. A readonly = 1 user gets the server's own error,
+ * which refuses its writes. chkit-py: `_durable_insert_settings`.
+ */
+function durableInsertSettings(rows: readonly SettingRow[]): ClickHouseSettings {
+	const byName = new Map(rows.map((row) => [row.name, row]))
+	if (byName.get('readonly')?.value === '1') return {}
+	const out: ClickHouseSettings = {}
+	for (const [name, value] of Object.entries(DURABLE_INSERT_SETTINGS)) {
+		const row = byName.get(name)
+		if (!row) continue
+		if (row.readonly === '0') out[name] = value
+		else if (row.value !== String(value)) {
+			throw new Error(
+				`Setting ${name} is fixed at ${row.value} for this ClickHouse user, and chkit writes need ${name} = ${value} to be stored when they return.`,
+			)
+		}
+	}
+	return out
+}
+
+/** `promise`, or the signal's reason once it aborts; the promise itself runs on. */
+function untilAborted<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+	if (!signal) return promise
+	return new Promise<T>((resolve, reject) => {
+		const onAbort = () => reject(signal.reason)
+		signal.addEventListener('abort', onAbort, { once: true })
+		promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
+	})
 }
 
 export function normalizeQueryData<T>(
@@ -112,9 +163,79 @@ export function createRemoteExecutor(deps: {
 	const { credentials, serviceSlug } = deps
 	const client = createApiClient(credentials)
 
+	// The service user's durable-insert settings, looked up once per executor.
+	// A failed lookup is not cached.
+	let settingRows: Promise<SettingRow[]> | undefined
+	function settingRowsOnce(): Promise<SettingRow[]> {
+		settingRows ??= executor.query<SettingRow>(SETTING_ROWS_SQL).catch((error: unknown) => {
+			settingRows = undefined
+			throw error
+		})
+		return settingRows
+	}
+
+	// Sent with writes (command, insert, submit), as a direct connection sends:
+	// defaults a caller's own value replaces, placed after the caller's other
+	// settings so that a settings profile among them cannot change them (#790).
+	async function writeSettings(settings?: ClickHouseSettings): Promise<ClickHouseSettings> {
+		const { async_insert, wait_for_async_insert, ...rest } = settings ?? {}
+		const own = Object.fromEntries(Object.entries({ async_insert, wait_for_async_insert }).filter(([, value]) => value !== undefined))
+		return { ...rest, ...durableInsertSettings(await settingRowsOnce()), ...own }
+	}
+
 	const executor: ClickHouseExecutor = {
+		queryControlCluster: 'default',
+		async commandTracked(sql, check, beforeAttempt, settings?) {
+			// Looked up first: no request may come between the last check and the send.
+			const sent = await writeSettings(settings)
+			check()
+			const queryId = await beforeAttempt()
+			check()
+			const apiSettings = toApiSettings(sent) ?? {}
+			delete apiSettings.query_id
+			const res = await client.workbench.query.execute({
+				serviceSlug,
+				query: sql,
+				queryId,
+				...(Object.keys(apiSettings).length > 0 ? { settings: apiSettings } : {}),
+			})
+			throwIfError(res)
+		},
+
+		async queryControl<T>(sql: string, timeoutMs: number, options?: QueryControlOptions): Promise<T[]> {
+			if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+				throw new Error('Cancellation control deadline expired')
+			}
+			const settings = toApiSettings({ ...options?.settings, ...STRICT_CONTROL_SETTINGS })
+			if (settings) delete settings.query_id
+			const controller = new AbortController()
+			let timer: ReturnType<typeof setTimeout> | undefined
+			const deadline = new Promise<never>((_, reject) => {
+				timer = setTimeout(() => {
+					reject(new Error('Cancellation control deadline expired'))
+					controller.abort()
+				}, timeoutMs)
+			})
+			try {
+				// The race also bounds client-side error enrichment after an HTTP
+				// response. Aborting fetch alone does not bound those extra lookups.
+				const res = await Promise.race([
+					client.workbench.query.execute(
+						{ serviceSlug, query: sql, ...(options?.queryId ? { queryId: options.queryId } : {}), ...(settings ? { settings } : {}) },
+						{ signal: controller.signal },
+					),
+					deadline,
+				])
+				throwIfError(res)
+				if ('truncated' in res && res.truncated === true) throw new Error('Cancellation control result was truncated; complete proof is required')
+				return normalizeQueryData<T>(res)
+			} finally {
+				clearTimeout(timer)
+			}
+		},
+
 		async command(sql, settings?) {
-			const apiSettings = toApiSettings(settings)
+			const apiSettings = toApiSettings(await writeSettings(settings))
 			const res = await client.workbench.query.execute({
 				serviceSlug,
 				query: sql,
@@ -152,7 +273,7 @@ export function createRemoteExecutor(deps: {
 			if (!query) return
 			// Per-insert settings such as insert_deduplication_token must reach
 			// ClickHouse, so this cannot go through command(), which sends none.
-			const apiSettings = toApiSettings(params.settings)
+			const apiSettings = toApiSettings(await writeSettings(params.settings))
 			const res = await client.workbench.query.execute({
 				serviceSlug,
 				query,
@@ -161,16 +282,25 @@ export function createRemoteExecutor(deps: {
 			throwIfError(res)
 		},
 
-		async submit(sql, queryId?, settings?) {
-			const apiSettings = toApiSettings(settings)
-			const res = await client.workbench.query.execute({
-				serviceSlug,
-				query: sql,
-				...(apiSettings ? { settings: apiSettings } : {}),
-				// The API takes the id as a top-level field and ignores a
-				// `query_id` setting, which would leave the query under a random id.
-				...(queryId ? { queryId } : {}),
-			})
+		async submit(sql, queryId?, settings?, options?) {
+			// Never start a request after the caller gave up on it (#767): the
+			// signal also aborts the fetch while it connects. The settings are
+			// resolved first, so no request comes between the last check and the
+			// send, and a stalled lookup doesn't hold up the caller's abort.
+			options?.signal?.throwIfAborted()
+			const apiSettings = toApiSettings(await untilAborted(writeSettings(settings), options?.signal))
+			options?.signal?.throwIfAborted()
+			const res = await client.workbench.query.execute(
+				{
+					serviceSlug,
+					query: sql,
+					...(apiSettings ? { settings: apiSettings } : {}),
+					// The API takes the id as a top-level field and ignores a
+					// `query_id` setting, which would leave the query under a random id.
+					...(queryId ? { queryId } : {}),
+				},
+				options?.signal ? { signal: options.signal } : undefined,
+			)
 			throwIfError(res)
 			return queryId ?? res.query_id ?? 'submitted'
 		},
@@ -180,8 +310,11 @@ export function createRemoteExecutor(deps: {
 			// string compared with a DateTime column may carry neither fractional
 			// seconds nor a zone (TYPE_MISMATCH), so an ISO 8601 bound such as
 			// '2026-10-02T16:22:23.641Z' goes through parseDateTimeBestEffort.
+			// event_date prunes query_log's partitions: the entry is logged no
+			// earlier than the query started. A day of slack covers a session time
+			// zone other than the server's; toDate32, as a Date before 1970 wraps around.
 			const afterFilter = options?.afterTime
-				? `AND query_start_time >= parseDateTimeBestEffort(${quoteString(options.afterTime)})`
+				? `AND query_start_time >= parseDateTimeBestEffort(${quoteString(options.afterTime)}) AND event_date >= toDate32(parseDateTimeBestEffort(${quoteString(options.afterTime)})) - 1`
 				: ''
 
 			// The query runs on the replica that received it, so a multi-replica
@@ -205,41 +338,21 @@ export function createRemoteExecutor(deps: {
 			}
 			if (options?.runningOnly) return { status: 'unknown' as const }
 
-			const log = await executor.query<{
-				type: string
-				written_rows: string
-				written_bytes: string
-				query_duration_ms: string
-				exception: string
-			}>(
-				`SELECT type, written_rows, written_bytes, query_duration_ms, exception
+			// With ExceptionBeforeStart, every entry of the id is read: a rejected
+			// duplicate delivery logs one early, which must not hide the
+			// QueryFinish of the attempt that ran (#767).
+			const log = await executor.query<QueryLogRow>(
+				`SELECT type, written_rows, written_bytes, query_duration_ms, exception, exception_code, toString(serverUUID()) AS server, toString(event_time_microseconds) AS event_at
 FROM ${from('system.query_log')}
 WHERE user = currentUser()
   AND query_id = '${queryId}'
-  AND type IN ('QueryFinish', 'ExceptionWhileProcessing')
+  AND type IN (${options?.includeBeforeStart ? "'QueryFinish', 'ExceptionWhileProcessing', 'ExceptionBeforeStart'" : "'QueryFinish', 'ExceptionWhileProcessing'"})
   ${afterFilter}
 ORDER BY event_time DESC
-LIMIT 1
+${options?.includeBeforeStart ? '' : 'LIMIT 1'}
 ${readSettings}`,
 			)
-
-			const [row] = log
-			if (!row) return { status: 'unknown' as const }
-
-			if (row.type === 'QueryFinish') {
-				return {
-					status: 'finished' as const,
-					writtenRows: Number(row.written_rows),
-					writtenBytes: Number(row.written_bytes),
-					durationMs: Number(row.query_duration_ms),
-				}
-			}
-
-			return {
-				status: 'failed' as const,
-				durationMs: Number(row.query_duration_ms),
-				error: row.exception,
-			} satisfies QueryStatus
+			return queryLogOutcome(log)
 		},
 
 		async listSchemaObjects() {

@@ -1,5 +1,4 @@
-import { access, mkdir, rename, writeFile } from 'node:fs/promises'
-import { constants } from 'node:fs'
+import { lstat, mkdir, rename, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
 import { z } from 'zod'
@@ -12,6 +11,7 @@ import {
 import {
   canonicalizeDefinitions,
   type ChxInlinePluginRegistration,
+  compareCodePoints,
   configuredIndexGranularity,
   type ColumnDefaultValue,
   createPluginRunner,
@@ -45,7 +45,7 @@ import {
 export const PullSchema = z.object({
   outFile: z.string().min(1).default('./src/db/schema/pulled.ts'),
   databases: z.array(z.string()).default([]).transform((arr) =>
-    [...new Set(arr.map((s) => s.trim()).filter((s) => s.length > 0))].sort()
+    [...new Set(arr.map((s) => s.trim()).filter((s) => s.length > 0))].sort(compareCodePoints)
   ),
   overwrite: z.boolean().default(false),
 })
@@ -83,6 +83,7 @@ export interface PullPlugin {
   commands: Array<{
     name: 'schema'
     description: string
+    takesArgs?: boolean
     flags?: ReadonlyArray<{
       name: string
       type: 'boolean' | 'string' | 'string[]'
@@ -200,6 +201,7 @@ export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
       {
         name: 'schema',
         description: 'Pull live ClickHouse table schema and write chkit schema file',
+        takesArgs: false,
         flags: PULL_SCHEMA_FLAGS,
         optionsSchema,
         flagMapping: PULL_FLAG_MAP,
@@ -360,7 +362,7 @@ async function pullSchema(input: {
   if (db && (!customIntrospector || selectedDatabases.length === 0)) {
     objects = (await db.listSchemaObjects()).filter(isPulledObject)
     if (selectedDatabases.length === 0) {
-      selectedDatabases = [...new Set(objects.map((item) => item.database))].sort()
+      selectedDatabases = [...new Set(objects.map((item) => item.database))].sort(compareCodePoints)
     }
   }
 
@@ -526,7 +528,7 @@ function summarizeSkippedObjects(
   }
   return [...counts.entries()]
     .map(([kind, count]) => ({ kind, count }))
-    .sort((a, b) => a.kind.localeCompare(b.kind))
+    .sort((a, b) => compareCodePoints(a.kind, b.kind))
 }
 
 function splitTopLevelCommaSeparated(input: string | undefined): string[] {
@@ -577,9 +579,10 @@ async function writeSchemaFile(input: {
   await rename(tempPath, input.outFile)
 }
 
+// lstat, not access: a dangling symlink is an existing entry that rename would replace (#702).
 async function pathExists(path: string): Promise<boolean> {
   try {
-    await access(path, constants.F_OK)
+    await lstat(path)
     return true
   } catch {
     return false

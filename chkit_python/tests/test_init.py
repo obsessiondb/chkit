@@ -240,7 +240,7 @@ def test_try_import_returns_module_when_stub_present() -> None:
     captured: dict[str, Any] = {}
     _install_stub_plugin(captured=captured)
     module = _try_import_obsessiondb()
-    assert module is not None
+    assert isinstance(module, ModuleType)
     assert module.__name__ == OBSESSIONDB_PLUGIN_MODULE
 
 
@@ -251,7 +251,7 @@ def test_try_import_propagates_unrelated_module_not_found() -> None:
     def trigger() -> None:
         raise ModuleNotFoundError("No module named 'something_else'", name="something_else")
 
-    broken.__getattr__ = lambda _name: trigger()  # type: ignore[attr-defined,method-assign]
+    vars(broken)["__getattr__"] = lambda _name: trigger()
     sys.modules[OBSESSIONDB_PLUGIN_MODULE] = broken
     # _try_import_obsessiondb should succeed; the inner error surfaces only on use.
     module = _try_import_obsessiondb()

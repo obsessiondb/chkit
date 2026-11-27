@@ -165,35 +165,27 @@ def _print_next_steps() -> None:
 def run(
     yes: Annotated[
         bool,
-        typer.Option(
-            "--yes",
-            "-y",
-            help="Skip interactive onboarding (silent file-writer mode for CI/scripts).",
-        ),
+        typer.Option("--yes", "-y", help="Skip interactive onboarding"),
     ] = False,
     connect: Annotated[
         ConnectChoice | None,
         typer.Option(
             "--connect",
-            help="Pre-select the ObsessionDB connect choice (claim, account, clickhouse, later).",
+            metavar="<choice>",
+            help="claim, account, clickhouse, or later",
         ),
     ] = None,
     email: Annotated[
         str | None,
-        typer.Option("--email", help="Email for the ObsessionDB OTP signup flow."),
+        typer.Option("--email", metavar="<email>", help="Email for account onboarding"),
     ] = None,
     code: Annotated[
         str | None,
-        typer.Option(
-            "--code",
-            help="OTP verification code for ObsessionDB signup (scriptable).",
-        ),
+        typer.Option("--code", metavar="<code>", help="Verification code"),
     ] = None,
     org_name: Annotated[
         str | None,
-        typer.Option(
-            "--org-name", help="Override the auto-derived ObsessionDB organization name."
-        ),
+        typer.Option("--org-name", metavar="<name>", help="Organization name"),
     ] = None,
 ) -> None:
     cwd = Path.cwd()

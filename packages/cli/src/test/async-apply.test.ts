@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import type { ClickHouseExecutor, QueryStatus } from '@chkit/clickhouse'
 
-import { applyAsyncStatement, makeDeterministicQueryId } from '../commands/migrate/async-apply'
+import { applyAsyncStatement } from '../commands/migrate/async-apply'
 import type { JournalStore, MigrationRowState } from '../runtime/journal-store'
 
 /** Minimal in-memory journal store: applyAsyncStatement only reads/writes migration state. */
@@ -11,6 +11,12 @@ function makeJournalStore(): JournalStore {
   return {
     async readMigrationState() {
       return state
+    },
+    async readStoredOperation(_name: string, index: number) {
+      return state?.operations.find((op) => op.operationIndex === index)
+    },
+    async readOperationOnEveryCopy(name: string, index: number) {
+      return { covered: true as const, op: await this.readStoredOperation(name, index) }
     },
     async writeMigrationState(next: MigrationRowState) {
       state = next
@@ -67,23 +73,24 @@ describe('applyAsyncStatement — transient poll errors', () => {
     expect(result.kind).toBe('completed')
   })
 
-  test('gives up after the budget with a re-run/re-attach hint, not a silent abort', async () => {
+  test('gives up after the budget with async_outcome_unknown, not a silent abort', async () => {
     const db = makeDb([{ status: 'unknown' }, 'throw524']) // unknown once, then 524 forever
 
     await expect(
       applyAsyncStatement({ ...base, db, journalStore: makeJournalStore() }),
-    ).rejects.toThrow('re-attach')
+    ).rejects.toMatchObject({ code: 'async_outcome_unknown' })
   })
 
   test('the give-up message says "polling failed 21×", matching chkit-py', async () => {
     const db = makeDb([{ status: 'unknown' }, 'throw524'])
 
-    const queryId = makeDeterministicQueryId('default', '_chkit_migrations', '20260101_load', 1)
-
     await expect(
       applyAsyncStatement({ ...base, db, journalStore: makeJournalStore() }),
     ).rejects.toMatchObject({
-      message: `Async migration step load_table_data (query_id ${queryId}): polling failed 21× (ClickHouse request failed: error code: 524). The load may still be running server-side — re-run \`chkit migrate --apply\` to re-attach.`,
+      // The attempt's id is random (#767).
+      message: expect.stringMatching(
+        /^Async migration step load_table_data \(statement 2 of 20260101_load, query_id [0-9a-f-]{36}\): the journal records an attempt of it and no replica runs it, but chkit cannot tell whether it finished: polling failed 21× in a row \(ClickHouse request failed: error code: 524\)\. Nothing was submitted/,
+      ),
     })
   })
 })

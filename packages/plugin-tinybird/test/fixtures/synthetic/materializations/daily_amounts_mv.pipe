@@ -1,0 +1,13 @@
+NODE daily_amounts_node
+SQL >
+    SELECT
+        toDate(event_time) AS day,
+        event_type,
+        sum(amount) AS amount,
+        count() AS events
+    FROM events
+    WHERE event_type != 'test'
+    GROUP BY day, event_type
+
+TYPE materialized
+DATASOURCE daily_amounts

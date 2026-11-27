@@ -21,4 +21,4 @@ Splitting `packages/plugin-codegen/src/generators.ts` (574 lines) into three foc
 
 ## Analysis
 
-The agent defaulted to a conservative refactoring pattern — preserving the original file as a barrel to avoid changing import sites. This is a "backwards compatibility" instinct that makes sense for public API boundaries but is wrong for internal module reorganization within a package. The CLAUDE.md and typescript-standards skill both discourage unnecessary abstractions and indirection. A barrel file with no logic is exactly the kind of bloat proxy that should be avoided.
+The agent defaulted to a conservative refactoring pattern — preserving the original file as a barrel to avoid changing import sites. This is a "backwards compatibility" instinct that makes sense for public API boundaries but is wrong for internal module reorganization within a package. The AGENTS.md and typescript-standards skill both discourage unnecessary abstractions and indirection. A barrel file with no logic is exactly the kind of bloat proxy that should be avoided.

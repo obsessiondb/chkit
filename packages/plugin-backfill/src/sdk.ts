@@ -1,20 +1,20 @@
 export * from '@logtape/logtape'
 
-export { executeBackfill, syncProgress } from './async-backfill.js'
+export { BackfillInterruptedError, CHECKPOINT_VERSION, executeBackfill, syncProgress } from './async-backfill.js'
 export { analyzeAndChunk, analyzeTable } from './chunking/analyze.js'
 export {
   decodeChunkPlanFromPersistence,
   encodeChunkPlanForPersistence,
 } from './chunking/boundary-codec.js'
 export { generateChunkPlan } from './chunking/planner.js'
-export { buildBackfillPlan } from './planner.js'
+export { assertPinnedInsertSettingsAccepted, buildBackfillPlan, readPinnedSettingAliases } from './planner.js'
 export {
   confirmBackfillSubmission,
   listRemoteSubmissions,
   readPlanSubmission,
   recordBackfillSubmission,
 } from './state.js'
-export { PlanSchema, SubmitSchema, parseByteSize } from './options.js'
+export { insertSettingsFromOptions, PlanSchema, SubmitSchema, parseByteSize } from './options.js'
 export {
   CHKIT_BACKFILL_LOGGER_CATEGORY,
   CHKIT_LOGGER_CATEGORY,
@@ -22,8 +22,13 @@ export {
 } from './logging.js'
 export {
   buildChunkExecutionSql,
+  assertInsertSettingsKeepPinned,
   buildWhereClauseFromChunk,
+  deliveryOverrideWarning,
+  effectiveInsertSettings,
   injectSortKeyFilter,
+  type InsertSettings,
+  PINNED_INSERT_SETTINGS,
   rewriteSelectColumns,
 } from './chunking/sql.js'
 export { generateIdempotencyToken } from './chunking/utils/ids.js'

@@ -54,7 +54,7 @@ from chkit.core.model import (
     SkipIndexVectorSimilarity,
     TableConstraintDefinition,
 )
-from chkit.core.sql_lexer import identifier_name, is_trivia, tokenize_sql
+from chkit.core.sql_lexer import identifier_name, is_trivia, js_regex, js_trim, tokenize_sql
 from chkit.core.sql_normalizer import is_synthetic_ephemeral_default, normalize_sql_fragment
 from chkit.core.sql_scan import strip_wrapping_parens
 from chkit.core.table_settings import AUTO_MINMAX_INDEX_PREFIX
@@ -153,6 +153,15 @@ class IntrospectedView:
     to: tuple[str, str] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class IntrospectedDictionary:
+    database: str
+    name: str
+    # The ``CREATE DICTIONARY`` statement as ClickHouse stores it, with secrets
+    # shown as ``[HIDDEN]``.
+    create_query: str
+
+
 _NULLABLE_RE = re.compile(r"^Nullable\((.+)\)$")
 _INDEX_TYPE_RE = re.compile(r"^(\w+)\((.*)\)$", re.DOTALL)
 
@@ -182,7 +191,7 @@ def normalize_column_from_system_row(row: SystemColumnRow) -> ColumnDefinition:
         raise ValueError(f"Unsupported column default kind: {kind}")
     if row.default_expression and kind:
         # Preserve whitespace inside SQL string literals when pulling expressions.
-        default_value = row.default_expression.strip()
+        default_value = js_trim(row.default_expression)
 
     # ClickHouse synthesizes defaultValueOfTypeName('<type as written>') for a
     # bare EPHEMERAL column, keeping alias spellings such as BIGINT or TEXT.
@@ -193,7 +202,7 @@ def normalize_column_from_system_row(row: SystemColumnRow) -> ColumnDefinition:
     ):
         default_value = None
     codec_steps = parse_codec(row.compression_codec)
-    comment = row.comment.strip() if row.comment is not None else None
+    comment = js_trim(row.comment) if row.comment is not None else None
 
     return ColumnDefinition.model_validate({
         "name": row.name,
@@ -213,7 +222,7 @@ def _numeric_args(args: str | None) -> list[float] | None:
     """Every argument as a number, or None when any is not a plain number."""
     if args is None:
         return None
-    parts = [part.strip() for part in args.split(",")]
+    parts = [js_trim(part) for part in args.split(",")]
     if not all(_NUMBER_ARG_RE.match(part) for part in parts):
         return None
     return [float(part) for part in parts]
@@ -228,7 +237,7 @@ def _is_server_generated_index(name: str, create_table_query: str | None) -> boo
     appears in the CREATE and is kept."""
     if not name.startswith(AUTO_MINMAX_INDEX_PREFIX):
         return False
-    pattern = rf"\bINDEX\s+`?{re.escape(name)}`?\s"
+    pattern = js_regex(rf"\bINDEX\s+`?{re.escape(name)}`?\s")
     return re.search(pattern, create_table_query or "", re.IGNORECASE) is None
 
 
@@ -253,7 +262,7 @@ def normalize_index_from_system_row(  # noqa: PLR0911, PLR0912
     raw = SkipIndexRaw(**base_payload, raw_type=normalize_sql_fragment(row.type))
 
     match = _INDEX_TYPE_RE.match(row.type)
-    base_name = match.group(1) if match is not None else row.type.strip()
+    base_name = match.group(1) if match is not None else js_trim(row.type)
     args_str = match.group(2) if match is not None else None
     numbers = _numeric_args(args_str)
 
@@ -408,7 +417,13 @@ SELECT database, name, engine, comment
 FROM system.tables
 WHERE is_temporary = 0
   AND database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA')
-  AND NOT startsWith(name, '_chkit_')\
+  AND NOT startsWith(name, '_chkit_')
+  AND (database, name) NOT IN (
+    SELECT database, arrayJoin([
+      concat('.inner_id.', toString(uuid)),
+      concat('.tmp.inner_id.', toString(uuid))
+    ]) FROM system.tables WHERE engine = 'MaterializedView'
+  )\
 """
 
 
@@ -539,6 +554,31 @@ def list_view_details(client: Any, databases: list[str]) -> list[IntrospectedVie
             )
         )
     return out
+
+
+def list_dictionary_details(client: Any, databases: list[str]) -> list[IntrospectedDictionary]:
+    """The dictionaries in ``databases``, with the statement ClickHouse stores for each.
+
+    Read from ``system.tables``, not ``system.dictionaries``: the latter shows
+    an empty source and layout until the dictionary first loads. A table with
+    ``ENGINE = Dictionary(...)`` has the same engine name and is left out.
+    """
+    if not databases:
+        return []
+    rows = client.query(
+        f"SELECT database, name, create_table_query "
+        f"FROM system.tables "
+        f"WHERE is_temporary = 0 AND database IN ({_quote_str_list(databases)}) "
+        f"AND engine = 'Dictionary' AND startsWith(create_table_query, 'CREATE DICTIONARY')"
+    ).rows
+    return [
+        IntrospectedDictionary(
+            database=str(r["database"]),
+            name=str(r["name"]),
+            create_query=str(r.get("create_table_query") or ""),
+        )
+        for r in rows
+    ]
 
 
 _MV_NAME_END = 4

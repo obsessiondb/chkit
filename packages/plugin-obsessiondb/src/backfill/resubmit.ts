@@ -10,8 +10,9 @@ export interface ReplacedJob {
 
 /**
  * Loads a saved plan for `submit --plan-id`. Only a plan whose job failed or
- * was cancelled is re-submitted, and only with the chunks whose task did not
- * finish in that job, so no chunk is written twice.
+ * was cancelled is re-submitted, and only with the chunks that job carried but
+ * did not finish, so no chunk is written twice, however often a plan is
+ * re-submitted.
  */
 export async function loadPlanForResubmit(
 	input: {
@@ -43,13 +44,24 @@ export async function loadPlanForResubmit(
 		)
 	}
 
-	// Task ids are the chunk ids sent by submit.
+	// Task ids are the chunk ids sent by submit. A re-submitted job carries only
+	// the chunks still owed, so a chunk missing from it finished in an earlier job.
+	const taskIds = new Set(job.tasks.map((task) => task.id))
+	const carried = new Set(plan.chunkPlan.chunks.filter((chunk) => taskIds.has(chunk.id)).map((chunk) => chunk.id))
+	// A task missing from the response would count as finished and its chunk
+	// would never be sent again, so refuse unless every task is a listed chunk.
+	if (carried.size !== job.totalTasks || taskIds.size !== job.totalTasks) {
+		throw new Error(
+			`Job ${jobId} for plan ${planId} lists ${carried.size} of its ${job.totalTasks} tasks, ` +
+				'so its unfinished chunks are unknown. Nothing was re-submitted.',
+		)
+	}
 	const finished = new Set(
 		job.tasks
 			.filter((task) => task.runs.some((run) => run.type === 'insert' && run.status === 'done'))
 			.map((task) => task.id),
 	)
-	const remaining = plan.chunkPlan.chunks.filter((chunk) => !finished.has(chunk.id))
+	const remaining = plan.chunkPlan.chunks.filter((chunk) => carried.has(chunk.id) && !finished.has(chunk.id))
 	if (remaining.length === 0) {
 		throw new Error(`Every chunk of plan ${planId} already finished in job ${jobId}. Nothing to re-submit.`)
 	}

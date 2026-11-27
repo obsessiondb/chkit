@@ -1,7 +1,5 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { ClickHouseExecutor } from '@chkit/clickhouse'
-
 import {
 	createRemoteExecutor,
 	normalizeQueryData,
@@ -109,7 +107,7 @@ describe('createRemoteExecutor submit', () => {
 			expect(await remote.submit('INSERT INTO t SELECT 1', 'qid-1')).toBe('qid-1')
 
 			expect(workbench.inputs).toEqual([
-				{ serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', queryId: 'qid-1' },
+				{ serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', queryId: 'qid-1', settings: { async_insert: 0, wait_for_async_insert: 1 } },
 			])
 		} finally {
 			workbench.stop()
@@ -124,10 +122,47 @@ describe('createRemoteExecutor submit', () => {
 			await remote.submit('INSERT INTO t SELECT 1', 'qid-1', { log_comment: 'x' })
 
 			expect(workbench.inputs).toEqual([
-				{ serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', queryId: 'qid-1', settings: { log_comment: 'x' } },
+				{ serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', queryId: 'qid-1', settings: { async_insert: 0, wait_for_async_insert: 1, log_comment: 'x' } },
 			])
 		} finally {
 			workbench.stop()
+		}
+	})
+
+	test('an abort ends a submit whose async_insert lookup stalls, and nothing is sent', async () => {
+		const queries: string[] = []
+		let releaseLookup = () => {}
+		const lookupHeld = new Promise<void>((resolve) => {
+			releaseLookup = resolve
+		})
+		const server = Bun.serve({
+			port: 0,
+			async fetch(request) {
+				const { json: input } = (await request.json()) as { json: { query: string } }
+				queries.push(input.query)
+				if (input.query.includes('FROM system.settings')) await lookupHeld
+				return Response.json({ json: { data: [], meta: [], rows: 0 } })
+			},
+		})
+		try {
+			const remote = connect(`http://127.0.0.1:${server.port}`)
+			const controller = new AbortController()
+			const reason = new Error('run gave up')
+			const submitted = remote.submit('INSERT INTO t VALUES (1)', 'qid-stalled', undefined, { signal: controller.signal })
+			// A second submit waits on the same lookup and must not be cancelled with the first.
+			const other = remote.submit('INSERT INTO t VALUES (2)', 'qid-other')
+			while (queries.length === 0) await Bun.sleep(5)
+			controller.abort(reason)
+			expect(await submitted.catch((error: unknown) => error)).toBe(reason)
+			releaseLookup()
+			expect(await other).toBe('qid-other')
+			expect(queries).toEqual([
+				"SELECT name, value, toString(readonly) AS readonly FROM system.settings WHERE name IN ('readonly', 'async_insert', 'wait_for_async_insert')",
+				'INSERT INTO t VALUES (2)',
+			])
+		} finally {
+			releaseLookup()
+			server.stop(true)
 		}
 	})
 
@@ -138,7 +173,7 @@ describe('createRemoteExecutor submit', () => {
 
 			await remote.submit('INSERT INTO t SELECT 1')
 
-			expect(workbench.inputs).toEqual([{ serviceSlug: 'test', query: 'INSERT INTO t SELECT 1' }])
+			expect(workbench.inputs).toEqual([{ serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', settings: { async_insert: 0, wait_for_async_insert: 1 } }])
 		} finally {
 			workbench.stop()
 		}
@@ -146,6 +181,7 @@ describe('createRemoteExecutor submit', () => {
 })
 
 // migrate --setting (#321) reaches ClickHouse through command()'s settings.
+// Every write also sends async_insert = 0 and wait_for_async_insert = 1 under them, as a direct connection does.
 describe('createRemoteExecutor command', () => {
 	test('forwards per-statement settings to the API', async () => {
 		const workbench = startScriptedWorkbench({ replicas: 1 })
@@ -154,11 +190,209 @@ describe('createRemoteExecutor command', () => {
 
 			await remote.command('DROP TABLE t', { max_table_size_to_drop: '0' })
 			await remote.command('DROP TABLE u')
+			await remote.command('INSERT INTO t SELECT 1', { async_insert: 'true' as unknown as 1, profile: 'bulk' })
+
+			// After the caller's other settings, so a profile cannot change them (#790).
+			expect(Object.keys(workbench.inputs[0]?.settings ?? {})).toEqual(['max_table_size_to_drop', 'async_insert', 'wait_for_async_insert'])
+			expect(Object.entries(workbench.inputs[2]?.settings ?? {})).toEqual([['profile', 'bulk'], ['async_insert', 'true'], ['wait_for_async_insert', 1]])
+			expect(workbench.inputs.slice(0, 2)).toEqual([
+				{ serviceSlug: 'test', query: 'DROP TABLE t', settings: { async_insert: 0, wait_for_async_insert: 1, max_table_size_to_drop: '0' } },
+				{ serviceSlug: 'test', query: 'DROP TABLE u', settings: { async_insert: 0, wait_for_async_insert: 1 } },
+			])
+		} finally {
+			workbench.stop()
+		}
+	})
+
+	test('sends insert() rows with the durable-insert settings under the caller\'s', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1 })
+		try {
+			const remote = connect(workbench.url)
+
+			await remote.insert({ table: 'db.t', values: [{ id: 1 }], settings: { insert_deduplication_token: 'tok' } })
+			await remote.insert({ table: 'db.t', values: [{ id: 2 }], settings: { async_insert: 1, wait_for_async_insert: 1 } })
 
 			expect(workbench.inputs).toEqual([
-				{ serviceSlug: 'test', query: 'DROP TABLE t', settings: { max_table_size_to_drop: '0' } },
-				{ serviceSlug: 'test', query: 'DROP TABLE u' },
+				{ serviceSlug: 'test', query: 'INSERT INTO db.t (id) VALUES (1)', settings: { async_insert: 0, wait_for_async_insert: 1, insert_deduplication_token: 'tok' } },
+				{ serviceSlug: 'test', query: 'INSERT INTO db.t (id) VALUES (2)', settings: { async_insert: 1, wait_for_async_insert: 1 } },
 			])
+		} finally {
+			workbench.stop()
+		}
+	})
+
+	// A profile that locks a setting rejects any change of it, also on DDL.
+	test('leaves out the settings the profile locks at the durable value, looked up once', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1, settingRows: [['async_insert', '0', '1'], ['wait_for_async_insert', '1', '1']] })
+		try {
+			const remote = connect(workbench.url)
+
+			await remote.command('CREATE TABLE t (id UInt64) ENGINE = MergeTree ORDER BY id')
+			await remote.insert({ table: 't', values: [{ id: 1 }], settings: { insert_deduplication_token: 'tok' } })
+			await remote.commandTracked?.('INSERT INTO t VALUES (2)', () => {}, async () => 'tracked-locked')
+			await remote.submit('INSERT INTO t VALUES (3)', 'qid-locked')
+
+			expect(workbench.inputs).toEqual([
+				{ serviceSlug: 'test', query: 'CREATE TABLE t (id UInt64) ENGINE = MergeTree ORDER BY id' },
+				{ serviceSlug: 'test', query: 'INSERT INTO t (id) VALUES (1)', settings: { insert_deduplication_token: 'tok' } },
+				{ serviceSlug: 'test', query: 'INSERT INTO t VALUES (2)', queryId: 'tracked-locked' },
+				{ serviceSlug: 'test', query: 'INSERT INTO t VALUES (3)', queryId: 'qid-locked' },
+			])
+			expect(workbench.settingsLookups).toHaveLength(1)
+		} finally {
+			workbench.stop()
+		}
+	})
+
+	test('refuses a write when the profile fixes a durable-insert setting at another value', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1, settingRows: [['async_insert', '1', '1'], ['wait_for_async_insert', '1', '0']] })
+		try {
+			const remote = connect(workbench.url)
+
+			await expect(remote.command('CREATE TABLE t (id UInt64) ENGINE = MergeTree ORDER BY id')).rejects.toThrow(
+				'Setting async_insert is fixed at 1 for this ClickHouse user, and chkit writes need async_insert = 0 to be stored when they return.',
+			)
+			await expect(remote.submit('INSERT INTO t VALUES (1)', 'qid-refused')).rejects.toThrow('Setting async_insert is fixed at 1')
+
+			expect(workbench.inputs).toEqual([])
+		} finally {
+			workbench.stop()
+		}
+	})
+
+	test('sends a readonly = 1 user\'s write without settings, for the server to refuse', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1, settingRows: [['readonly', '1', '0'], ['async_insert', '1', '1'], ['wait_for_async_insert', '0', '1']] })
+		try {
+			const remote = connect(workbench.url)
+
+			await remote.command('DROP TABLE t')
+
+			expect(workbench.inputs).toEqual([{ serviceSlug: 'test', query: 'DROP TABLE t' }])
+		} finally {
+			workbench.stop()
+		}
+	})
+
+	test('sends no write when the settings lookup fails, and looks it up again next time', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1, settingRows: { error: 'Code: 497. ACCESS_DENIED' } })
+		try {
+			const remote = connect(workbench.url)
+
+			await expect(remote.command('DROP TABLE t')).rejects.toThrow('ACCESS_DENIED')
+			await expect(remote.command('DROP TABLE t')).rejects.toThrow('ACCESS_DENIED')
+
+			expect(workbench.inputs).toEqual([])
+			expect(workbench.settingsLookups).toHaveLength(2)
+		} finally {
+			workbench.stop()
+		}
+	})
+})
+
+describe('createRemoteExecutor cancellation transport', () => {
+	test('persists an id and rechecks ownership before sending a write with its settings', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1 })
+		try {
+			const remote = connect(workbench.url)
+			const events: string[] = []
+			expect(remote.commandTracked).toBeFunction()
+			await remote.commandTracked('INSERT INTO t SELECT 1', () => {
+				events.push('check')
+			}, async () => {
+				expect(workbench.inputs).toHaveLength(0)
+				events.push('intent')
+				return 'tracked-1'
+			}, { async_insert: 1, query_id: 'ignored', log_comment: 'kept' })
+			expect(events).toEqual(['check', 'intent', 'check'])
+			expect(workbench.inputs).toEqual([{
+				serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', queryId: 'tracked-1',
+				settings: { async_insert: 1, wait_for_async_insert: 1, log_comment: 'kept' },
+			}])
+		} finally {
+			workbench.stop()
+		}
+	})
+
+	// Like the native path, a tracked write sends the durable-insert settings under the
+	// caller's settings; recovery forces async_insert = 0 over them (#733 review G).
+	test('sends a tracked write with the durable-insert settings under the caller\'s settings', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1 })
+		try {
+			const remote = connect(workbench.url)
+			await remote.commandTracked('INSERT INTO t SELECT 1', () => {}, async () => 'tracked-sync')
+			expect(workbench.inputs).toEqual([{
+				serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', queryId: 'tracked-sync', settings: { async_insert: 0, wait_for_async_insert: 1 },
+			}])
+		} finally {
+			workbench.stop()
+		}
+	})
+
+	test('does not send when ownership is lost while recording the intent', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1 })
+		try {
+			const remote = connect(workbench.url)
+			let held = true
+			await expect(remote.commandTracked('TRUNCATE TABLE t', () => {
+				if (!held) throw new Error('lost ownership')
+			}, async () => {
+				held = false
+				return 'tracked-2'
+			})).rejects.toThrow('lost ownership')
+			expect(workbench.inputs).toHaveLength(0)
+		} finally {
+			workbench.stop()
+		}
+	})
+
+	test('bounds a stalled response body rather than waiting for fetch headers only', async () => {
+		const server = Bun.serve({
+			port: 0,
+			fetch: () => new Response(new ReadableStream({ start(controller) {
+				controller.enqueue(new TextEncoder().encode('{"json":'))
+			} }), { headers: { 'Content-Type': 'application/json' } }),
+		})
+		try {
+			const remote = connect(`http://127.0.0.1:${server.port}`)
+			await expect(remote.queryControl('SELECT 1', 100)).rejects.toThrow('deadline expired')
+		} finally {
+			server.stop(true)
+		}
+	})
+
+	test('forwards receipt control id at top level and settings without a conflicting query_id', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1 })
+		try {
+			await connect(workbench.url).queryControl('SELECT * FROM system.one', 1000, { queryId: 'receipt-control', settings: { log_queries: 1, query_id: 'ignored', use_query_cache: 1, enable_reads_from_query_cache: 1, enable_writes_to_query_cache: 1 } })
+			expect(workbench.inputs).toHaveLength(1)
+			expect(workbench.inputs[0]).toMatchObject({ queryId: 'receipt-control', settings: { log_queries: 1, use_query_cache: 0, enable_reads_from_query_cache: 0, enable_writes_to_query_cache: 0 } })
+			expect(workbench.inputs[0]?.settings).not.toHaveProperty('query_id')
+			const cacheSettings = { use_query_cache: 1, enable_reads_from_query_cache: 1, enable_writes_to_query_cache: 1 } as const
+			await connect(workbench.url).query('SELECT 1', cacheSettings)
+			expect(workbench.inputs[1]?.settings).toMatchObject(cacheSettings)
+		} finally { workbench.stop() }
+	})
+	for (const truncated of [true, false]) {
+		test(`control refuses API truncation without changing ordinary reads (${truncated})`, async () => {
+			const workbench = startScriptedWorkbench({ replicas: 1, truncated })
+			try {
+				const remote = connect(workbench.url)
+				const control = remote.queryControl('SELECT * FROM system.one', 1000, { settings: { result_overflow_mode: 'break', max_result_rows: 1 } })
+				if (truncated) await expect(control).rejects.toThrow('truncated')
+				else expect(await control).toEqual([{ replicas: '1' }])
+				expect(workbench.inputs[0]?.settings).toMatchObject({ result_overflow_mode: 'throw', group_by_overflow_mode: 'throw', set_overflow_mode: 'throw', max_result_rows: 1 })
+				expect(await remote.query('SELECT * FROM system.one')).toEqual([{ replicas: '1' }])
+			} finally { workbench.stop() }
+		})
+	}
+	test('decodes control rows and propagates server errors', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 2, processesError: 'ACCESS_DENIED' })
+		try {
+			const remote = connect(workbench.url)
+			expect(await remote.queryControl('SELECT * FROM system.one', 1000)).toEqual([{ replicas: '2' }])
+			await expect(remote.queryControl('SELECT * FROM system.processes', 1000)).rejects.toThrow('ACCESS_DENIED')
+			await expect(remote.queryControl('SELECT 1', 0)).rejects.toThrow('deadline expired')
+			expect(workbench.inputs).toHaveLength(2)
 		} finally {
 			workbench.stop()
 		}
@@ -205,6 +439,70 @@ describe('createRemoteExecutor queryStatus', () => {
 			expect(processes).toContain('FROM system.processes')
 			expect(queryLog).toContain('FROM system.query_log')
 			expect([processes, queryLog].join('\n')).not.toContain('clusterAllReplicas')
+		} finally {
+			workbench.stop()
+		}
+	})
+
+	// #767 (Opus review): a rejected duplicate delivery of the id logs an
+	// early ExceptionBeforeStart, which never hides the attempt's QueryFinish.
+	test('a QueryFinish outranks a newer ExceptionBeforeStart of a duplicate delivery', async () => {
+		const meta = ['type', 'written_rows', 'written_bytes', 'query_duration_ms', 'exception', 'exception_code']
+		const workbench = startScriptedWorkbench({
+			replicas: 1,
+			queryLog: {
+				meta,
+				data: [
+					['ExceptionBeforeStart', '0', '0', '0', 'Code: 216. QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING', '216'],
+					['QueryFinish', '25', '200', '25000', '', '0'],
+				],
+			},
+		})
+		try {
+			const remote = connect(workbench.url)
+
+			expect(await remote.queryStatus('qid-1', { includeBeforeStart: true })).toEqual({
+				status: 'finished',
+				writtenRows: 25,
+				writtenBytes: 200,
+				durationMs: 25000,
+			})
+			const queryLog = workbench.queries.find((query) => query.includes('system.query_log')) ?? ''
+			expect(queryLog).not.toContain('LIMIT 1')
+		} finally {
+			workbench.stop()
+		}
+	})
+
+	test('two terminal entries of one id are unknown', async () => {
+		const meta = ['type', 'written_rows', 'written_bytes', 'query_duration_ms', 'exception', 'exception_code']
+		const workbench = startScriptedWorkbench({
+			replicas: 1,
+			queryLog: {
+				meta,
+				data: [
+					['QueryFinish', '25', '200', '25000', '', '0'],
+					['ExceptionWhileProcessing', '3', '24', '100', 'Code: 241. MEMORY_LIMIT_EXCEEDED', '241'],
+				],
+			},
+		})
+		try {
+			const remote = connect(workbench.url)
+			expect(await remote.queryStatus('qid-1', { includeBeforeStart: true })).toEqual({ status: 'unknown' })
+		} finally {
+			workbench.stop()
+		}
+	})
+
+	test('a duplicate delivery alone is no failure', async () => {
+		const meta = ['type', 'written_rows', 'written_bytes', 'query_duration_ms', 'exception', 'exception_code']
+		const workbench = startScriptedWorkbench({
+			replicas: 1,
+			queryLog: { meta, data: [['ExceptionBeforeStart', '0', '0', '0', 'Code: 216. QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING', '216']] },
+		})
+		try {
+			const remote = connect(workbench.url)
+			expect(await remote.queryStatus('qid-1', { includeBeforeStart: true })).toEqual({ status: 'unknown' })
 		} finally {
 			workbench.stop()
 		}
@@ -285,11 +583,14 @@ describe('createRemoteExecutor introspection', () => {
 	})
 })
 
-function connect(baseUrl: string): ClickHouseExecutor {
-	return createRemoteExecutor({
+function connect(baseUrl: string) {
+	const executor = createRemoteExecutor({
 		credentials: { access_token: 'test', base_url: baseUrl },
 		serviceSlug: 'test',
 	})
+	const { commandTracked, queryControl } = executor
+	if (!commandTracked || !queryControl) throw new Error('Missing cancellation transport')
+	return { ...executor, commandTracked, queryControl }
 }
 
 // Stands in for the workbench API: answers the replica probe with `replicas`,
@@ -298,25 +599,46 @@ function connect(baseUrl: string): ClickHouseExecutor {
 function startScriptedWorkbench(script: {
 	replicas: number
 	processesError?: string
+	truncated?: boolean
 	tables?: { meta: string[]; data: string[][] }
+	queryLog?: { meta: string[]; data: string[][] }
+	/** system.settings rows (name, value, readonly) of the writes' lookup; an error object fails it. */
+	settingRows?: string[][] | { error: string }
 }) {
 	const queries: string[] = []
 	const inputs: Array<Record<string, unknown>> = []
+	// The writes' async_insert lookup, kept apart from the inputs.
+	const settingsLookups: string[] = []
 	const server = Bun.serve({
 		port: 0,
 		async fetch(request) {
 			const { json: input } = (await request.json()) as {
 				json: { query: string } & Record<string, unknown>
 			}
+			if (input.query.includes('FROM system.settings')) {
+				settingsLookups.push(input.query)
+				const rows = script.settingRows ?? [['readonly', '0', '0'], ['async_insert', '1', '0'], ['wait_for_async_insert', '0', '0']]
+				return Response.json({
+					json: Array.isArray(rows)
+						? { data: rows, meta: ['name', 'value', 'readonly'].map((name) => ({ name, type: 'String' })), rows: rows.length }
+						: { data: [], meta: [], rows: 0, error: rows.error },
+				})
+			}
 			inputs.push(input)
 			queries.push(input.query)
 			if (input.query.includes('system.one')) {
 				return Response.json({
-					json: { data: [[String(script.replicas)]], meta: [{ name: 'replicas', type: 'UInt64' }], rows: 1 },
+					json: { data: [[String(script.replicas)]], meta: [{ name: 'replicas', type: 'UInt64' }], rows: 1, ...(script.truncated !== undefined ? { truncated: script.truncated } : {}) },
 				})
 			}
 			if (script.tables && input.query.includes('FROM system.tables')) {
 				const { meta, data } = script.tables
+				return Response.json({
+					json: { data, meta: meta.map((name) => ({ name, type: 'String' })), rows: data.length },
+				})
+			}
+			if (script.queryLog && input.query.includes('system.query_log')) {
+				const { meta, data } = script.queryLog
 				return Response.json({
 					json: { data, meta: meta.map((name) => ({ name, type: 'String' })), rows: data.length },
 				})
@@ -327,5 +649,5 @@ function startScriptedWorkbench(script: {
 			return Response.json({ json: { data: [], meta: [], rows: 0 } })
 		},
 	})
-	return { url: `http://127.0.0.1:${server.port}`, queries, inputs, stop: () => server.stop(true) }
+	return { url: `http://127.0.0.1:${server.port}`, queries, inputs, settingsLookups, stop: () => server.stop(true) }
 }

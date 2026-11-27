@@ -19,6 +19,8 @@ export default defineConfig({
 	redirects: {
 		'/ingestion': '/sync/',
 		'/ingestion/cli': '/sync/cli/',
+		'/cli/ingest': '/cli/sync/',
+		'/plugins/ingest': '/plugins/sync/',
 	},
 	integrations: [
 		starlight({
@@ -79,6 +81,7 @@ export default defineConfig({
 							items: [
 								{ slug: 'plugins/overview' },
 								{ slug: 'plugins/pull' },
+								{ slug: 'plugins/tinybird' },
 								{ slug: 'plugins/codegen' },
 								{ slug: 'plugins/backfill' },
 							],
@@ -139,10 +142,10 @@ export default defineConfig({
 							label: 'Reference',
 							items: [
 								{ label: 'CLI overview', slug: 'sync/cli' },
-								{ slug: 'cli/ingest' },
+								{ slug: 'cli/sync' },
 								{ slug: 'cli/add' },
 								{ slug: 'cli/registry' },
-								{ slug: 'plugins/ingest' },
+								{ slug: 'plugins/sync' },
 							],
 						},
 					],

@@ -15,8 +15,10 @@ from chkit.cli.commands.drift_compare import (
     ObjectDriftDetail,
     SchemaObjectShape,
     TableDriftDetail,
+    collect_dictionary_sql_queries,
     collect_table_sql_fragments,
     collect_view_sql_queries,
+    compare_dictionary_shape,
     compare_object_comments,
     compare_schema_objects,
     compare_table_shape,
@@ -27,11 +29,13 @@ from chkit.cli.table_scope import TableScope
 from chkit.clickhouse.canonicalize import canonicalize_sql_fragments
 from chkit.clickhouse.introspect import (
     IntrospectedTable,
+    list_dictionary_details,
     list_schema_objects,
     list_table_details,
     list_view_details,
 )
 from chkit.core.model import (
+    DictionaryDefinition,
     MaterializedViewDefinition,
     Snapshot,
     TableDefinition,
@@ -87,24 +91,24 @@ def _is_unknown_database_error(error: BaseException) -> bool:
     return (
         "UNKNOWN_DATABASE" in message
         or "code: 81" in message
-        or ("Database " in message
-        and "doesn't exist" in message)
+        or ("Database " in message and "doesn't exist" in message)
     )
 
 
 def _build_sql_canonicalizer(
     client: Any,
     pairs: list[tuple[TableDefinition, IntrospectedTable]],
-    view_queries: list[str],
+    object_queries: list[str],
+    stored_query_pairs: list[tuple[str, str]],
 ) -> MapSqlCanonicalizer | None:
-    """Canonicalize every SQL fragment across the compared tables and views via ClickHouse.
+    """Canonicalize every SQL fragment across the compared tables, views and dictionaries.
 
     Returns None when there is nothing to canonicalize or ClickHouse can't
     format (old server, offline) — the comparer then falls back to plain string
     normalization.
     """
     expressions: list[str] = []
-    queries: list[str] = list(view_queries)
+    queries: list[str] = list(object_queries)
     for expected, actual in pairs:
         fragments = collect_table_sql_fragments(expected, actual)
         expressions.extend(fragments.expressions)
@@ -112,10 +116,29 @@ def _build_sql_canonicalizer(
     if not expressions and not queries:
         return None
 
+    # Report an unreadable system.functions registry once for both calls:
+    # without it the #729 FLOOR drift would silently come back.
+    registry_warning_logged = False
+
+    def on_registry_unavailable(error: Exception) -> None:
+        nonlocal registry_warning_logged
+        if registry_warning_logged:
+            return
+        registry_warning_logged = True
+        debug(
+            "drift",
+            f"function registry unavailable, keeping function names as written: {error}",
+        )
+
     try:
         return MapSqlCanonicalizer(
-            expressions=canonicalize_sql_fragments(client, expressions, wrap=True),
-            queries=canonicalize_sql_fragments(client, queries, wrap=False),
+            expressions=canonicalize_sql_fragments(
+                client, expressions, wrap=True, on_registry_unavailable=on_registry_unavailable
+            ),
+            queries=canonicalize_sql_fragments(
+                client, queries, wrap=False, stored_query_pairs=stored_query_pairs,
+                on_registry_unavailable=on_registry_unavailable
+            ),
         )
     except Exception as error:
         debug("drift", f"sql canonicalization unavailable, using string comparison: {error}")
@@ -156,9 +179,7 @@ def build_drift_payload(
         actual_objects = list_schema_objects(client)
     except Exception as error:
         if _is_unknown_database_error(error):
-            all_expected = [
-                f"{d.database}.{d.name}" for d in _expected_filtered()
-            ]
+            all_expected = [f"{d.database}.{d.name}" for d in _expected_filtered()]
             return DriftPayload(
                 snapshot_file=snapshot_file,
                 expected_count=len(all_expected),
@@ -223,6 +244,29 @@ def build_drift_payload(
         )
         is not None
     ]
+    expected_dictionary_map: dict[str, DictionaryDefinition] = {
+        f"{d.database}.{d.name}": d
+        for d in snapshot.definitions
+        if isinstance(d, DictionaryDefinition)
+    }
+    actual_dictionaries = (
+        list_dictionary_details(client, sorted(expected_databases))
+        if expected_dictionary_map
+        else []
+    )
+    dictionary_pairs = [
+        (
+            expected_dictionary,
+            collect_dictionary_sql_queries(expected_dictionary, actual_dictionary),
+        )
+        for actual_dictionary in actual_dictionaries
+        if (
+            expected_dictionary := expected_dictionary_map.get(
+                f"{actual_dictionary.database}.{actual_dictionary.name}"
+            )
+        )
+        is not None
+    ]
     # Unqualified names in a view's query resolve to the session database.
     current_database = (
         str(client.query("SELECT currentDatabase() AS database").rows[0]["database"])
@@ -233,17 +277,28 @@ def build_drift_payload(
         client,
         pairs,
         [
-            query
+            *(
+                query
+                for expected_view, actual_view in view_pairs
+                for query in collect_view_sql_queries(expected_view, actual_view)
+            ),
+            *(
+                query
+                for _, queries in dictionary_pairs
+                if queries is not None
+                for query in (queries.expected, queries.actual)
+            ),
+        ],
+        [
+            (queries[0], queries[1])
             for expected_view, actual_view in view_pairs
-            for query in collect_view_sql_queries(expected_view, actual_view)
+            if (queries := collect_view_sql_queries(expected_view, actual_view))
         ],
     )
     table_drift_unsorted = [
         detail
         for expected, actual in pairs
-        if (
-            detail := compare_table_shape(expected, actual, canonicalizer, index_granularity)
-        )
+        if (detail := compare_table_shape(expected, actual, canonicalizer, index_granularity))
         is not None
     ]
     table_drift = sorted(table_drift_unsorted, key=lambda d: d.table)
@@ -255,6 +310,11 @@ def build_drift_payload(
                 for detail in compare_view_shape(
                     expected_view, actual_view, current_database, canonicalizer
                 )
+            ),
+            *(
+                detail
+                for expected_dictionary, queries in dictionary_pairs
+                for detail in compare_dictionary_shape(expected_dictionary, queries, canonicalizer)
             ),
             *compare_object_comments(expected_objects, actual_in_scope),
         ],

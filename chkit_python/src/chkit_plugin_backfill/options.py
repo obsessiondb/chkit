@@ -18,6 +18,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from chkit.core.jsnum import parse_js_number
+from chkit.core.sql_lexer import js_regex, js_trim
 from chkit_plugin_backfill.errors import BackfillConfigError
 
 _GiB = 1024**3
@@ -26,7 +27,7 @@ _GiB = 1024**3
 
 
 def _normalize_timestamp(raw: str, flag_name: str) -> str:
-    value = raw.strip()
+    value = js_trim(raw)
     if not value:
         msg = f"Missing value for {flag_name}"
         raise BackfillConfigError(msg)
@@ -47,7 +48,7 @@ _TARGET_RE = re.compile(r"^[A-Za-z0-9_]+\.[A-Za-z0-9_]+$")
 
 
 def _normalize_target(raw: str) -> str:
-    value = raw.strip()
+    value = js_trim(raw)
     if not _TARGET_RE.match(value):
         msg = "Invalid value for --target. Expected <database.table>."
         raise BackfillConfigError(msg)
@@ -55,7 +56,7 @@ def _normalize_target(raw: str) -> str:
 
 
 def _normalize_cutover_target(raw: str) -> str:
-    value = raw.strip()
+    value = js_trim(raw)
     if not _TARGET_RE.match(value):
         msg = "Invalid value for --cutover. Expected <database.table>."
         raise BackfillConfigError(msg)
@@ -68,11 +69,11 @@ _BYTE_SUFFIXES: dict[str, int] = {
     "M": 1024**2,
     "K": 1024,
 }
-_BYTE_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([TGMK])?$")
+_BYTE_RE = re.compile(js_regex(r"^(\d+(?:\.\d+)?)\s*([TGMK])?$"))
 
 
 def parse_byte_size(raw: str) -> int:
-    trimmed = raw.strip().upper()
+    trimmed = js_trim(raw).upper()
     match = _BYTE_RE.match(trimmed)
     if not match:
         msg = f"Invalid byte size: {raw}. Expected a number with optional suffix (K, M, G, T)."
@@ -91,7 +92,7 @@ _PLAN_ID_RE = re.compile(r"^[a-f0-9]{16}$")
 
 
 def _normalize_plan_id(raw: str) -> str:
-    value = raw.strip()
+    value = js_trim(raw)
     if not _PLAN_ID_RE.match(value):
         msg = "Invalid value for --plan-id. Expected a 16-char lowercase hex id."
         raise BackfillConfigError(msg)
@@ -142,6 +143,18 @@ class PluginConfig(BaseModel):
     insert_settings: dict[str, str | int | float | bool] | None = Field(
         default=None, alias="insertSettings"
     )
+
+    @field_validator("insert_settings")
+    @classmethod
+    def _finite_insert_settings(
+        cls, value: dict[str, str | int | float | bool] | None
+    ) -> dict[str, str | int | float | bool] | None:
+        # TS zod numbers refuse NaN and infinities; so does chkit-py.
+        for key, item in (value or {}).items():
+            if isinstance(item, float) and not math.isfinite(item):
+                msg = f"insertSettings.{key} must be a finite number"
+                raise ValueError(msg)
+        return value
 
     # TS PluginConfigSchema is non-strict zod: unknown keys are stripped, not
     # rejected ("validated softly at load time").
@@ -198,6 +211,7 @@ class RunOptions(BaseModel):
 
 class ResumeOptions(RunOptions):
     replay_failed: bool = Field(default=False, alias="replayFailed")
+    accept_unknown: bool = Field(default=False, alias="acceptUnknown")
 
 
 class StatusOptions(BaseModel):
@@ -286,6 +300,14 @@ RESUME_FLAGS: list[dict[str, Any]] = [
         "type": "boolean",
         "description": "Re-execute failed chunks",
     },
+    {
+        "name": "--accept-unknown",
+        "type": "boolean",
+        "description": (
+            "Replay chunks whose last attempt has an unknown outcome"
+            " (can write their rows twice)"
+        ),
+    },
 ]
 
 PLAN_ID_FLAGS: list[dict[str, Any]] = [
@@ -356,6 +378,7 @@ RUN_FLAG_MAP: dict[str, dict[str, Any]] = {
 RESUME_FLAG_MAP: dict[str, dict[str, Any]] = {
     **RUN_FLAG_MAP,
     "--replay-failed": {"key": "replay_failed"},
+    "--accept-unknown": {"key": "accept_unknown"},
 }
 
 PLAN_ID_FLAG_MAP: dict[str, dict[str, Any]] = {

@@ -77,6 +77,9 @@ export interface BackfillRunState {
   completedAt?: string
   lastError?: string
   progress: BackfillProgress
+  /** `CHECKPOINT_VERSION` of the format `progress` is in; unset when an
+   *  older release wrote it (#765). */
+  checkpointVersion?: number
 }
 
 /**
@@ -189,6 +192,7 @@ export interface BackfillPlugin {
   commands: Array<{
     name: 'plan' | 'submit' | 'run' | 'resume' | 'status' | 'cancel' | 'doctor' | 'list'
     description: string
+    takesArgs?: boolean
     flags?: ReadonlyArray<{
       name: string
       type: 'boolean' | 'string' | 'string[]'

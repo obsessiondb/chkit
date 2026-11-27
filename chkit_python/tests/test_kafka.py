@@ -14,7 +14,7 @@ from chkit.clickhouse.create_table_parser import (
 )
 from chkit.clickhouse.introspect import IntrospectedTable
 from chkit.core.kafka import parse_kafka_setting, render_kafka_setting
-from chkit.core.model import ChxValidationError
+from chkit.core.model import ChxValidationError, TableDefinition
 from chkit.core.planner import plan_diff
 from chkit.core.sql import to_create_sql
 from chkit.core.sql_normalizer import normalize_engine
@@ -22,7 +22,7 @@ from chkit.core.sql_splitter import extract_executable_statements
 from chkit.core.validate import validate_definitions
 
 
-def queue():
+def queue() -> TableDefinition:
     return table(
         database="app",
         name="queue",
@@ -39,7 +39,7 @@ def queue():
     )
 
 
-def test_queue_sql_and_validation():
+def test_queue_sql_and_validation() -> None:
     sql = to_create_sql(queue())
     assert "PRIMARY KEY" not in sql
     assert "ORDER BY" not in sql
@@ -69,15 +69,15 @@ def test_queue_sql_and_validation():
 @pytest.mark.parametrize(
     "value", ["a'b", "a\\b\\", "a; SETTINGS COMMENT", "a\nb\tc", "'quoted'", "é"]
 )
-def test_literal_round_trip(value):
+def test_literal_round_trip(value: str) -> None:
     assert parse_kafka_setting(render_kafka_setting(value)) == value
 
 
-def test_hex_control_and_unknown_escapes():
+def test_hex_control_and_unknown_escapes() -> None:
     assert parse_kafka_setting(r"'\xC3\xA9\a\v\N\q\%'") == "é\a\v\\q\\%"
 
 
-def test_parser_pull_and_drift():
+def test_parser_pull_and_drift() -> None:
     original = queue()
     sql = to_create_sql(original)
     settings = parse_settings_from_create_table_query(sql)
@@ -104,7 +104,7 @@ def test_parser_pull_and_drift():
     assert drift.setting_diffs == ["kafka_group_name"]
 
 
-def test_quoted_delimiters_and_engine_arguments():
+def test_quoted_delimiters_and_engine_arguments() -> None:
     engine = "Kafka('host:9092', 'SETTINGS; COMMENT', 'a  b', 'JSONEachRow')"
     sql = f"CREATE TABLE q (id String) ENGINE = {engine} SETTINGS kafka_client_id = 'a;\\\\';"
     assert parse_engine_from_create_table_query(sql) == engine
@@ -119,7 +119,7 @@ def test_quoted_delimiters_and_engine_arguments():
     )
 
 
-def test_rejects_unsupported_changes_and_drops_synchronously():
+def test_rejects_unsupported_changes_and_drops_synchronously() -> None:
     original = queue()
     for changed in [
         original.model_copy(

@@ -52,7 +52,7 @@
     },
     "packages/cli": {
       "name": "chkit",
-      "version": "0.2.0-beta.16",
+      "version": "0.2.0-beta.19",
       "bin": {
         "chkit": "./dist/bin/chkit.js",
       },
@@ -74,12 +74,14 @@
         "@types/semver": "^7.7.0",
       },
       "optionalDependencies": {
+        "@chkit/plugin-codegen": "workspace:*",
         "@chkit/plugin-obsessiondb": "workspace:*",
+        "@chkit/plugin-pull": "workspace:*",
       },
     },
     "packages/clickhouse": {
       "name": "@chkit/clickhouse",
-      "version": "0.2.0-beta.16",
+      "version": "0.2.0-beta.19",
       "dependencies": {
         "@chkit/core": "workspace:*",
         "@clickhouse/client": "^1.18.0",
@@ -89,14 +91,14 @@
     },
     "packages/codegen": {
       "name": "@chkit/codegen",
-      "version": "0.2.0-beta.16",
+      "version": "0.2.0-beta.19",
       "dependencies": {
         "@chkit/core": "workspace:*",
       },
     },
     "packages/core": {
       "name": "@chkit/core",
-      "version": "0.2.0-beta.16",
+      "version": "0.2.0-beta.19",
       "dependencies": {
         "fast-glob": "^3.3.2",
         "jiti": "^2.7.0",
@@ -111,7 +113,7 @@
     },
     "packages/create-chkit": {
       "name": "create-chkit",
-      "version": "0.2.0-beta.16",
+      "version": "0.2.0-beta.19",
       "bin": {
         "create-chkit": "./dist/bin/create-chkit.js",
       },
@@ -128,7 +130,7 @@
     },
     "packages/plugin-backfill": {
       "name": "@chkit/plugin-backfill",
-      "version": "0.2.0-beta.16",
+      "version": "0.2.0-beta.19",
       "dependencies": {
         "@chkit/clickhouse": "workspace:*",
         "@chkit/core": "workspace:*",
@@ -139,7 +141,7 @@
     },
     "packages/plugin-codegen": {
       "name": "@chkit/plugin-codegen",
-      "version": "0.2.0-beta.16",
+      "version": "0.2.0-beta.19",
       "dependencies": {
         "@chkit/core": "workspace:*",
       },
@@ -152,19 +154,14 @@
     },
     "packages/plugin-ingest": {
       "name": "@chkit/plugin-ingest",
-      "version": "0.2.0-beta.16",
+      "version": "0.2.0-beta.19",
       "dependencies": {
-        "@chkit/clickhouse": "workspace:*",
-        "@chkit/core": "workspace:*",
-        "@opentelemetry/api": "^1.9.1",
-        "p-limit": "^7.2.0",
-        "p-retry": "^7.1.1",
-        "zod": "^4.3.6",
+        "@chkit/plugin-sync": "workspace:*",
       },
     },
     "packages/plugin-obsessiondb": {
       "name": "@chkit/plugin-obsessiondb",
-      "version": "0.2.0-beta.16",
+      "version": "0.2.0-beta.19",
       "dependencies": {
         "@chkit/clickhouse": "workspace:*",
         "@chkit/core": "workspace:*",
@@ -177,11 +174,36 @@
     },
     "packages/plugin-pull": {
       "name": "@chkit/plugin-pull",
-      "version": "0.2.0-beta.16",
+      "version": "0.2.0-beta.19",
       "dependencies": {
         "@chkit/clickhouse": "workspace:*",
         "@chkit/core": "workspace:*",
         "zod": "^4.3.6",
+      },
+    },
+    "packages/plugin-sync": {
+      "name": "@chkit/plugin-sync",
+      "version": "0.2.0-beta.19",
+      "dependencies": {
+        "@chkit/clickhouse": "workspace:*",
+        "@chkit/core": "workspace:*",
+        "@opentelemetry/api": "^1.9.1",
+        "p-limit": "^7.2.0",
+        "p-retry": "^7.1.1",
+        "zod": "^4.3.6",
+      },
+    },
+    "packages/plugin-tinybird": {
+      "name": "@chkit/plugin-tinybird",
+      "version": "0.2.0-beta.19",
+      "dependencies": {
+        "@chkit/clickhouse": "workspace:*",
+        "@chkit/core": "workspace:*",
+        "@chkit/plugin-pull": "workspace:*",
+        "zod": "^4.3.6",
+      },
+      "devDependencies": {
+        "@clickhouse/client": "^1.11.0",
       },
     },
     "registry": {
@@ -190,7 +212,7 @@
       "devDependencies": {
         "@chkit/clickhouse": "workspace:*",
         "@chkit/core": "workspace:*",
-        "@chkit/plugin-ingest": "workspace:*",
+        "@chkit/plugin-sync": "workspace:*",
         "@types/bun": "^1.2.0",
         "chkit": "workspace:*",
         "zod": "^4.3.6",
@@ -345,6 +367,10 @@
     "@chkit/plugin-obsessiondb": ["@chkit/plugin-obsessiondb@workspace:packages/plugin-obsessiondb"],
 
     "@chkit/plugin-pull": ["@chkit/plugin-pull@workspace:packages/plugin-pull"],
+
+    "@chkit/plugin-sync": ["@chkit/plugin-sync@workspace:packages/plugin-sync"],
+
+    "@chkit/plugin-tinybird": ["@chkit/plugin-tinybird@workspace:packages/plugin-tinybird"],
 
     "@chkit/python": ["@chkit/python@workspace:chkit_python"],
 
@@ -1600,11 +1626,13 @@
 
     "@chkit/plugin-codegen/zod": ["zod@4.3.6", "", {}, "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg=="],
 
-    "@chkit/plugin-ingest/zod": ["zod@4.3.6", "", {}, "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg=="],
-
     "@chkit/plugin-obsessiondb/zod": ["zod@4.3.6", "", {}, "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg=="],
 
     "@chkit/plugin-pull/zod": ["zod@4.3.6", "", {}, "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg=="],
+
+    "@chkit/plugin-sync/zod": ["zod@4.3.6", "", {}, "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg=="],
+
+    "@chkit/plugin-tinybird/zod": ["zod@4.3.6", "", {}, "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg=="],
 
     "@chkit/registry/zod": ["zod@4.3.6", "", {}, "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg=="],
 

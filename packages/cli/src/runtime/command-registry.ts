@@ -6,6 +6,8 @@ export interface RegisteredCommand {
   flags: readonly FlagDef[]
   pluginFlags: Array<{ pluginName: string; flags: readonly FlagDef[] }>
   pluginName?: string
+  /** `false` for a plugin command that takes no positional arguments (#659). */
+  takesArgs?: boolean
   subcommands?: RegisteredCommand[]
 }
 
@@ -25,6 +27,7 @@ export function createCommandRegistry(input: {
 }): CommandRegistry {
   const commands: RegisteredCommand[] = []
   const byName = new Map<string, RegisteredCommand>()
+  const hasSync = input.pluginCommands.some(({ pluginName }) => pluginName === 'sync')
 
   for (const { pluginName, commands: pluginCmds, manifestName } of input.pluginCommands) {
     if (pluginCmds.length === 0) continue
@@ -41,6 +44,7 @@ export function createCommandRegistry(input: {
           flags: cmd.flags ?? [],
           pluginFlags: [],
           pluginName,
+          takesArgs: cmd.takesArgs,
         }
         commands.push(registered)
         byName.set(cmd.name, registered)
@@ -54,10 +58,13 @@ export function createCommandRegistry(input: {
       flags: cmd.flags ?? [],
       pluginFlags: [],
       pluginName,
+      takesArgs: cmd.takesArgs,
     }))
+    // Keep the manifest namespace for runtime dispatch and existing hooks.
+    const name = pluginName === 'ingest' && !hasSync ? 'sync' : pluginName
     const registered: RegisteredCommand = {
-      name: pluginName,
-      description: `Plugin: ${pluginName}`,
+      name,
+      description: `Plugin: ${name}`,
       flags: [],
       pluginFlags: [],
       pluginName,
@@ -65,13 +72,13 @@ export function createCommandRegistry(input: {
     }
     commands.push(registered)
     byName.set(pluginName, registered)
+    byName.set(name, registered)
   }
 
   for (const { pluginName, extensions } of input.pluginExtensions) {
     for (const ext of extensions) {
       const targets = Array.isArray(ext.command) ? ext.command : [ext.command]
-      for (const target of targets) {
-        const cmd = byName.get(target)
+      for (const cmd of new Set(targets.map((target) => byName.get(target)))) {
         if (cmd) {
           cmd.pluginFlags.push({ pluginName, flags: ext.flags })
         }
