@@ -63,10 +63,12 @@ describe('runOnboarding claim with an earlier login of another account on disk',
   const originalFetch = globalThis.fetch
   const originalXdg = process.env.XDG_CONFIG_HOME
   const originalApiUrl = process.env.OBSESSIONDB_API_URL
+  const originalIsTTY = process.stdin.isTTY
   let tempDir: string | undefined
 
   afterEach(async () => {
     globalThis.fetch = originalFetch
+    process.stdin.isTTY = originalIsTTY
     if (originalXdg === undefined) delete process.env.XDG_CONFIG_HOME
     else process.env.XDG_CONFIG_HOME = originalXdg
     if (originalApiUrl === undefined) delete process.env.OBSESSIONDB_API_URL
@@ -91,10 +93,14 @@ describe('runOnboarding claim with an earlier login of another account on disk',
   }
 
   /** Fake API: answers signup and claim for account B, records every request's path and token. */
-  async function setup(): Promise<{ configPath: string; requests: { path: string; auth: string | null }[] }> {
+  async function setup(
+    overrides: Record<string, () => Response> = {},
+  ): Promise<{ configPath: string; requests: { path: string; auth: string | null }[] }> {
     tempDir = await mkdtemp(join(tmpdir(), 'chkit-onboarding-'))
     process.env.XDG_CONFIG_HOME = join(tempDir, 'xdg')
     process.env.OBSESSIONDB_API_URL = 'https://api.test.com'
+    // Without a TTY a claim with no code stops after sending it, as in CI and agent runs.
+    process.stdin.isTTY = false
     await saveCredentials({ access_token: 'token-a', base_url: 'https://api.test.com' })
 
     const requests: { path: string; auth: string | null }[] = []
@@ -107,6 +113,7 @@ describe('runOnboarding claim with an earlier login of another account on disk',
       '/rpc/services/instanceClaimStatus': () => json({ json: { eligible: true } }),
       '/rpc/services/claimInstance': () => json({ json: { outcome: 'claimed', id: 'svc-b', slug: 'dev-b' } }),
       '/rpc/services/get': () => json({ json: runningService }),
+      ...overrides,
     }
     globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
       const request = new Request(input, init)
@@ -122,6 +129,19 @@ describe('runOnboarding claim with an earlier login of another account on disk',
     const { configPath, requests } = await setup()
 
     await runOnboarding({ configPath, connect: 'claim', email: 'b@example.com' })
+
+    expect(requests).toEqual([{ path: '/api/auth/email-otp/send-verification-otp', auth: null }])
+    expect(await loadSelectedService(configPath)).toBeNull()
+  })
+
+  test('a failed signup throws without using the old login', async () => {
+    const { configPath, requests } = await setup({
+      '/api/auth/email-otp/send-verification-otp': () => new Response(null, { status: 429 }),
+    })
+
+    await expect(runOnboarding({ configPath, connect: 'claim', email: 'b@example.com' })).rejects.toThrow(
+      /Signup did not complete/,
+    )
 
     expect(requests).toEqual([{ path: '/api/auth/email-otp/send-verification-otp', auth: null }])
     expect(await loadSelectedService(configPath)).toBeNull()

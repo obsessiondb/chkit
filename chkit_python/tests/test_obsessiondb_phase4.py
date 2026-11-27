@@ -33,12 +33,14 @@ from chkit_plugin_obsessiondb import (
     jobs_cancel,
     jobs_get,
     jobs_list,
+    load_selected_service,
     normalize_query_data,
     normalize_query_json_result,
     run_onboarding,
     save_credentials,
     workbench_query_execute,
 )
+from chkit_plugin_obsessiondb import auth_signup as obsessiondb_auth_signup
 from chkit_plugin_obsessiondb import onboarding as obsessiondb_onboarding
 from chkit_plugin_obsessiondb.backfill_job_output import (
     job_list_output,
@@ -870,18 +872,25 @@ def test_run_onboarding_claim_path_signs_up_and_claims(
     assert "obsessiondb()" in updated
 
 
-def test_run_onboarding_claim_code_sent_never_uses_an_earlier_login(
-    isolated_home: Path,
-    tmp_path: Path,
-    httpx_mock: HTTPXMock,
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.fixture
+def earlier_login(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A non-interactive claim for a new email only sends the code: the login of
-    another account already on disk must not claim or select a service."""
+    """Account A's login on disk, and no TTY: a claim with no code stops after sending it."""
     monkeypatch.setattr(
         obsessiondb_onboarding, "resolve_base_url", lambda _stored=None: BASE
     )
+    monkeypatch.setattr(obsessiondb_auth_signup, "_is_tty_stdin", lambda: False)
     save_credentials(Credentials(access_token="token-a", base_url=BASE))
+
+
+def test_run_onboarding_claim_code_sent_never_uses_an_earlier_login(
+    earlier_login: None,
+    tmp_path: Path,
+    httpx_mock: HTTPXMock,
+) -> None:
+    """A non-interactive claim for a new email only sends the code: the login of
+    another account already on disk must not claim or select a service."""
     httpx_mock.add_response(
         url=f"{BASE}/api/auth/email-otp/send-verification-otp", status_code=200
     )
@@ -892,4 +901,86 @@ def test_run_onboarding_claim_code_sent_never_uses_an_earlier_login(
     [request] = httpx_mock.get_requests()
     assert request.url == f"{BASE}/api/auth/email-otp/send-verification-otp"
     assert "authorization" not in request.headers
-    assert not (cfg.parent / ".chkit" / "obsessiondb.json").exists()
+    assert load_selected_service(cfg) is None
+
+
+def test_run_onboarding_claim_failed_signup_never_uses_an_earlier_login(
+    earlier_login: None,
+    tmp_path: Path,
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(
+        url=f"{BASE}/api/auth/email-otp/send-verification-otp", status_code=429
+    )
+    cfg = tmp_path / "project" / "config.py"
+
+    with pytest.raises(RuntimeError, match="Signup did not complete"):
+        run_onboarding(
+            config_path=cfg, connect=ConnectChoice.claim, email="b@example.com"
+        )
+
+    [request] = httpx_mock.get_requests()
+    assert request.url == f"{BASE}/api/auth/email-otp/send-verification-otp"
+    assert "authorization" not in request.headers
+    assert load_selected_service(cfg) is None
+
+
+def test_run_onboarding_claim_verified_uses_the_token_from_this_signup(
+    earlier_login: None,
+    tmp_path: Path,
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(
+        url=f"{BASE}/api/auth/sign-in/email-otp",
+        headers={"set-auth-token": "token-b"},
+        json={"user": {"id": "b", "email": "b@example.com", "name": "B"}},
+    )
+    httpx_mock.add_response(
+        url=f"{BASE}/api/auth/get-session",
+        json={
+            "user": {"id": "b", "email": "b@example.com", "name": "B"},
+            "session": {"activeOrganizationId": "org-b"},
+        },
+    )
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/services/instanceClaimStatus", json={"eligible": True}
+    )
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/services/claimInstance",
+        json={"outcome": "claimed", "id": "svc-b", "slug": "dev-b"},
+    )
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/services/get",
+        json={
+            "id": "svc-b",
+            "slug": "dev-b",
+            "name": "dev-b",
+            "status": "running",
+            "tier": 1,
+            "nodes": 1,
+            "connectionUrl": None,
+            "connectionUsername": None,
+            "desiredStatus": "running",
+            "desiredTier": 1,
+            "desiredNodes": 1,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "managed": True,
+        },
+    )
+    cfg = tmp_path / "project" / "config.py"
+
+    run_onboarding(
+        config_path=cfg,
+        connect=ConnectChoice.claim,
+        email="b@example.com",
+        code="123456",
+    )
+
+    claim_requests = [
+        r for r in httpx_mock.get_requests() if r.url.path.startswith("/rpc/services/")
+    ]
+    assert claim_requests
+    assert all(r.headers["authorization"] == "Bearer token-b" for r in claim_requests)
+    selected = load_selected_service(cfg)
+    assert selected is not None
+    assert selected.service_slug == "dev-b"
