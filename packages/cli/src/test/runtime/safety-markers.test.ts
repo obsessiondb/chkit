@@ -1,8 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 
+import destructiveOperationsFixture from '../../../../../test/fixtures/destructive-operations.json'
 import fixture from '../../../../../test/fixtures/statement-operations.json'
 import {
   collectDestructiveOperationMarkers,
+  collectDestructiveOperations,
   collectUnmarkedDestructiveStatements,
   extractExecutableStatements,
   extractMigrationOperationSummaries,
@@ -11,7 +13,6 @@ import {
   type MigrationOperationSummary,
   isSelectStatement,
   rejectionRunsNothing,
-  migrationContainsDestructiveSql,
   scanDestructiveSqlStatements,
 } from '../../runtime/safety-markers.js'
 
@@ -210,14 +211,12 @@ describe('scanDestructiveSqlStatements (defense-in-depth for unmarked SQL)', () 
     test(`flags ${label}`, () => {
       const found = scanDestructiveSqlStatements(sql)
       expect(found.map((f) => f.type)).toContain(type)
-      expect(migrationContainsDestructiveSql(sql)).toBe(true)
     })
   }
 
   test('does NOT flag a commented-out destructive statement', () => {
     const sql = `-- DROP TABLE default.events;\n-- operation: create_table key=default.events risk=safe\nCREATE TABLE default.events (id UInt64) ENGINE = MergeTree ORDER BY id;`
     expect(scanDestructiveSqlStatements(sql)).toEqual([])
-    expect(migrationContainsDestructiveSql(sql)).toBe(false)
   })
 
   // #642: every comment form ClickHouse reads, plus string literals and quoted
@@ -275,13 +274,13 @@ describe('scanDestructiveSqlStatements (defense-in-depth for unmarked SQL)', () 
 
   test('does NOT flag a non-destructive migration', () => {
     const sql = `CREATE TABLE default.events (id UInt64) ENGINE = MergeTree ORDER BY id;\nINSERT INTO default.events SELECT * FROM s3('...');`
-    expect(migrationContainsDestructiveSql(sql)).toBe(false)
+    expect(scanDestructiveSqlStatements(sql)).toEqual([])
   })
 
   test('does NOT flag the truncate() math function (only TRUNCATE TABLE/DATABASE statements)', () => {
-    expect(migrationContainsDestructiveSql('INSERT INTO default.t SELECT truncate(value) AS v FROM default.s;')).toBe(false)
-    expect(migrationContainsDestructiveSql('TRUNCATE TABLE default.events;')).toBe(true)
-    expect(migrationContainsDestructiveSql('TRUNCATE DATABASE analytics;')).toBe(true)
+    expect(scanDestructiveSqlStatements('INSERT INTO default.t SELECT truncate(value) AS v FROM default.s;')).toEqual([])
+    expect(scanDestructiveSqlStatements('TRUNCATE TABLE default.events;')).toHaveLength(1)
+    expect(scanDestructiveSqlStatements('TRUNCATE DATABASE analytics;')).toHaveLength(1)
   })
 
   test('synthesizes a danger marker (key + preview) for unmarked DROP COLUMN', () => {
@@ -307,6 +306,15 @@ describe('scanDestructiveSqlStatements (defense-in-depth for unmarked SQL)', () 
     expect(marker?.warningCode).toBe('drop_dictionary_dependency_break')
     expect(marker?.summary).toContain('DROP DICTIONARY')
   })
+})
+
+describe('collectDestructiveOperations (#888)', () => {
+  for (const { name, sql, operations } of destructiveOperationsFixture.cases) {
+    test(name, () => {
+      const found = collectDestructiveOperations('m.sql', sql)
+      expect(found.map(({ type, key, summary, warningCode }) => ({ type, key, summary, warningCode }))).toEqual(operations)
+    })
+  }
 })
 
 describe('collectDestructiveOperationMarkers table-recreate warning (#23)', () => {

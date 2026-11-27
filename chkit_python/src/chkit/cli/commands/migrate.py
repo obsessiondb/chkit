@@ -141,8 +141,7 @@ from chkit.cli.migration_store import (
 from chkit.cli.plugin_runtime import PluginRuntime, load_plugin_runtime
 from chkit.cli.safety_markers import (
     DestructiveOperationMarker,
-    collect_destructive_operation_markers,
-    collect_unmarked_destructive_statements,
+    collect_destructive_operations,
     extract_executable_statements,
     extract_statement_operations,
 )
@@ -1389,12 +1388,11 @@ def _apply_plan(ctx: _MigrateContext, plan: _PendingPlan) -> None:
 def _collect_destructive_markers_for_pending(
     migrations_dir: Path, pending: list[str]
 ) -> list[DestructiveOperationMarker]:
-    """Combine planner markers + synthesized markers across every pending migration."""
+    """List destructive operations in statement order across pending migrations."""
     out: list[DestructiveOperationMarker] = []
     for filename in pending:
         sql = (migrations_dir / filename).read_text(encoding="utf-8")
-        out.extend(collect_destructive_operation_markers(filename, sql))
-        out.extend(collect_unmarked_destructive_statements(filename, sql))
+        out.extend(collect_destructive_operations(filename, sql))
     return out
 
 

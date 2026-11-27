@@ -27,6 +27,12 @@ export interface ExecutableStatementWithComments {
    * on its line is left out.
    */
   commentBlocks: string[][]
+  /**
+   * The blocks of `commentBlocks` that only whitespace separates from the
+   * statement's first character (#888): a marker among them comes right
+   * before the statement, with no SQL or other comment in between.
+   */
+  leadingBlocks: string[][]
 }
 
 /**
@@ -38,7 +44,11 @@ export interface ExecutableStatementWithComments {
  */
 export function extractExecutableStatementsWithComments(sql: string): ExecutableStatementWithComments[] {
   const { statements, comments, stripped } = extract(sql, CLICKHOUSE)
-  const result: ExecutableStatementWithComments[] = statements.map((piece) => ({ sql: piece.text, commentBlocks: [] }))
+  const result: ExecutableStatementWithComments[] = statements.map((piece) => ({
+    sql: piece.text,
+    commentBlocks: [],
+    leadingBlocks: [],
+  }))
   let index = 0
   // The offset of the last comment kept for the statement at `index`.
   let previousOffset: number | undefined
@@ -48,13 +58,20 @@ export function extractExecutableStatementsWithComments(sql: string): Executable
       previousOffset = undefined
     }
     const target = result[index]
-    if (target === undefined) break
+    const piece = statements[index]
+    if (target === undefined || piece === undefined) break
     if (!comment.ownLine) continue
     const blocks = target.commentBlocks
     const last = blocks[blocks.length - 1]
     if (last !== undefined && previousOffset !== undefined && stripped.slice(previousOffset, comment.offset).trim() === '') {
       last.push(comment.text)
-    } else blocks.push([comment.text])
+    } else {
+      blocks.push([comment.text])
+      // The comments of one block are only whitespace apart, so its first one tells.
+      if (comment.offset <= piece.start && stripped.slice(comment.offset, piece.start).trim() === '') {
+        target.leadingBlocks.push(blocks[blocks.length - 1] ?? [])
+      }
+    }
     previousOffset = comment.offset
   }
   return result
@@ -72,6 +89,8 @@ export function extractLegacyExecutableStatements(sql: string): string[] {
 
 interface Piece {
   text: string
+  /** The offset of its first non-whitespace character. */
+  start: number
   /** The offset of the `;` that ends it, or the end of its last character. */
   end: number
 }
@@ -87,6 +106,7 @@ interface LineComment {
 function split(sql: string, options: SplitOptions): Piece[] {
   const statements: Piece[] = []
   let current = ''
+  let currentStart = 0
   const lexedEnd = lexedEndAt(sql)
 
   for (let i = 0; i < sql.length; i += 1) {
@@ -101,8 +121,9 @@ function split(sql: string, options: SplitOptions): Piece[] {
 
     if (ch === ';') {
       const trimmed = current.trim()
-      if (trimmed.length > 0) statements.push({ text: `${trimmed};`, end: i })
+      if (trimmed.length > 0) statements.push({ text: `${trimmed};`, start: startOf(current, currentStart), end: i })
       current = ''
+      currentStart = i + 1
       continue
     }
 
@@ -110,8 +131,14 @@ function split(sql: string, options: SplitOptions): Piece[] {
   }
 
   const tail = current.trim()
-  if (tail.length > 0) statements.push({ text: `${tail};`, end: sql.length - (current.length - current.trimEnd().length) })
+  if (tail.length > 0) statements.push({ text: `${tail};`, start: startOf(current, currentStart), end: sql.length - (current.length - current.trimEnd().length) })
   return statements
+}
+
+// `current` is the text from `currentStart` on, so its first non-whitespace
+// character is this many characters further.
+function startOf(current: string, currentStart: number): number {
+  return currentStart + current.length - current.trimStart().length
 }
 
 function extract(

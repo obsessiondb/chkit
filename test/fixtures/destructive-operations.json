@@ -1,0 +1,201 @@
+{
+  "cases": [
+    {
+      "name": "danger marker before its statement",
+      "sql": "-- operation: drop_table key=table:default.a risk=danger\nDROP TABLE default.a;",
+      "operations": [
+        {
+          "type": "drop_table",
+          "key": "table:default.a",
+          "summary": "drop_table key=table:default.a risk=danger",
+          "warningCode": "drop_table_data_loss"
+        }
+      ]
+    },
+    {
+      "name": "danger marker after the last statement",
+      "sql": "DROP TABLE default.a;\n-- operation: drop_table key=table:default.a risk=danger",
+      "operations": [
+        {
+          "type": "drop_table",
+          "key": "default.a",
+          "summary": "unmarked destructive SQL: DROP TABLE default.a;",
+          "warningCode": "drop_table_data_loss"
+        }
+      ]
+    },
+    {
+      "name": "danger marker inside a block comment",
+      "sql": "/*\n-- operation: drop_table key=table:default.a risk=danger\n*/\nDROP TABLE default.b;",
+      "operations": [
+        {
+          "type": "drop_table",
+          "key": "default.b",
+          "summary": "unmarked destructive SQL: /*\n-- operation: drop_table key=table:default.a risk=danger\n*/\nDROP TABLE default.b;",
+          "warningCode": "drop_table_data_loss"
+        }
+      ]
+    },
+    {
+      "name": "danger marker inside a string literal",
+      "sql": "SELECT '\n-- operation: drop_table key=table:default.a risk=danger\n';\nDROP TABLE default.b;",
+      "operations": [
+        {
+          "type": "drop_table",
+          "key": "default.b",
+          "summary": "unmarked destructive SQL: DROP TABLE default.b;",
+          "warningCode": "drop_table_data_loss"
+        }
+      ]
+    },
+    {
+      "name": "no marker",
+      "sql": "DROP TABLE default.b;",
+      "operations": [
+        {
+          "type": "drop_table",
+          "key": "default.b",
+          "summary": "unmarked destructive SQL: DROP TABLE default.b;",
+          "warningCode": "drop_table_data_loss"
+        }
+      ]
+    },
+    {
+      "name": "commented-out danger statement before an unmarked DROP",
+      "sql": "-- operation: drop_table key=table:default.a risk=danger\n-- DROP TABLE default.a;\nDROP TABLE default.b;",
+      "operations": [
+        {
+          "type": "drop_table",
+          "key": "default.b",
+          "summary": "unmarked destructive SQL: DROP TABLE default.b;",
+          "warningCode": "drop_table_data_loss"
+        }
+      ]
+    },
+    {
+      "name": "commented-out safe statement before an unmarked DROP",
+      "sql": "-- operation: create_table key=table:default.a risk=safe\n-- CREATE TABLE default.a (id UInt64) ENGINE = MergeTree ORDER BY id;\nDROP TABLE default.legacy;",
+      "operations": [
+        {
+          "type": "drop_table",
+          "key": "default.legacy",
+          "summary": "unmarked destructive SQL: DROP TABLE default.legacy;",
+          "warningCode": "drop_table_data_loss"
+        }
+      ]
+    },
+    {
+      "name": "commented-out danger statement before a marked DROP",
+      "sql": "-- operation: drop_table key=table:default.a risk=danger\n-- DROP TABLE default.a;\n-- operation: drop_table key=table:default.b risk=danger\nDROP TABLE default.b;",
+      "operations": [
+        {
+          "type": "drop_table",
+          "key": "table:default.b",
+          "summary": "drop_table key=table:default.b risk=danger",
+          "warningCode": "drop_table_data_loss"
+        }
+      ]
+    },
+    {
+      "name": "codegen metadata after the marker",
+      "sql": "-- operation: drop_table key=table:default.a risk=danger\n-- before-retry: SELECT 1;\n-- Warning: This drops data.\nDROP TABLE default.a;",
+      "operations": [
+        {
+          "type": "drop_table",
+          "key": "table:default.a",
+          "summary": "drop_table key=table:default.a risk=danger",
+          "warningCode": "drop_table_data_loss"
+        }
+      ]
+    },
+    {
+      "name": "user comment after the marker",
+      "sql": "-- operation: drop_table key=table:default.a risk=danger\n-- Manually added cleanup\nDROP TABLE default.b;",
+      "operations": [
+        {
+          "type": "drop_table",
+          "key": "default.b",
+          "summary": "unmarked destructive SQL: DROP TABLE default.b;",
+          "warningCode": "drop_table_data_loss"
+        }
+      ]
+    },
+    {
+      "name": "safe marker inside the statement",
+      "sql": "DROP TABLE default.x\n-- operation: create_table key=table:default.x risk=safe\n;",
+      "operations": [
+        {
+          "type": "drop_table",
+          "key": "default.x",
+          "summary": "unmarked destructive SQL: DROP TABLE default.x;",
+          "warningCode": "drop_table_data_loss"
+        }
+      ]
+    },
+    {
+      "name": "slash comment before the statement",
+      "sql": "-- operation: drop_table key=table:default.a risk=danger\n// DROP TABLE default.a;\nDROP TABLE default.b;",
+      "operations": [
+        {
+          "type": "drop_table",
+          "key": "default.b",
+          "summary": "unmarked destructive SQL: // DROP TABLE default.a;\nDROP TABLE default.b;",
+          "warningCode": "drop_table_data_loss"
+        }
+      ]
+    },
+    {
+      "name": "generated table recreate",
+      "sql": "-- operation: drop_table key=table:default.t risk=danger\nDROP TABLE default.t;\n-- operation: create_table key=table:default.t risk=safe\nCREATE TABLE default.t (id UInt64) ENGINE = MergeTree ORDER BY id;",
+      "operations": [
+        {
+          "type": "drop_table",
+          "key": "table:default.t",
+          "summary": "drop_table key=table:default.t risk=danger",
+          "warningCode": "table_recreate_data_loss"
+        }
+      ]
+    },
+    {
+      "name": "generated materialized view drop marked caution",
+      "sql": "-- operation: drop_materialized_view key=materialized_view:default.v risk=caution\nDROP MATERIALIZED VIEW default.v;",
+      "operations": []
+    },
+    {
+      "name": "commented-out create does not trigger a recreate warning",
+      "sql": "-- operation: drop_table key=table:default.t risk=danger\nDROP TABLE default.t;\n-- operation: create_table key=table:default.t risk=safe\n-- CREATE TABLE default.t (id UInt64) ENGINE = MergeTree ORDER BY id;",
+      "operations": [
+        {
+          "type": "drop_table",
+          "key": "table:default.t",
+          "summary": "drop_table key=table:default.t risk=danger",
+          "warningCode": "drop_table_data_loss"
+        }
+      ]
+    },
+    {
+      "name": "unparseable marker breaks binding to an earlier marker",
+      "sql": "-- operation: drop_table key=table:default.a risk=danger\n-- operation: malformed\nDROP TABLE default.b;",
+      "operations": [
+        {
+          "type": "drop_table",
+          "key": "default.b",
+          "summary": "unmarked destructive SQL: DROP TABLE default.b;",
+          "warningCode": "drop_table_data_loss"
+        }
+      ]
+    },
+    {
+      "name": "safe marker, then a discarded comment-only piece, then a DROP",
+      "sql": "-- operation: create_table key=table:default.a risk=safe\n/* CREATE TABLE default.a (id UInt64) ENGINE = MergeTree ORDER BY id */;\nDROP TABLE default.legacy;",
+      "operations": [
+        {
+          "type": "drop_table",
+          "key": "default.legacy",
+          "summary": "unmarked destructive SQL: DROP TABLE default.legacy;",
+          "warningCode": "drop_table_data_loss"
+        }
+      ]
+    }
+  ]
+}

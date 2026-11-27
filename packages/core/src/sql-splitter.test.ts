@@ -260,8 +260,17 @@ describe('extractExecutableStatementsWithComments (#831)', () => {
       '-- trailing',
     ].join('\n')
     expect(extractExecutableStatementsWithComments(sql)).toEqual([
-      { sql: 'SELECT 1;', commentBlocks: [['-- header', '-- operation: a', '-- before-retry: x']] },
-      { sql: '/* block */\n\nSELECT\n\n2;', commentBlocks: [['-- operation: b'], ['-- inside']] },
+      { sql: 'SELECT 1;', commentBlocks: [['-- header', '-- operation: a', '-- before-retry: x']], leadingBlocks: [['-- header', '-- operation: a', '-- before-retry: x']] },
+      { sql: '/* block */\n\nSELECT\n\n2;', commentBlocks: [['-- operation: b'], ['-- inside']], leadingBlocks: [] },
+    ])
+  })
+
+  test('leading blocks are those only whitespace separates from the statement (#888)', () => {
+    const sql = 'SELECT 1;\n-- leading\n  SELECT\n-- inside\n2;\n-- cut off\n/* x */;\n-- kept\nSELECT 3'
+    expect(extractExecutableStatementsWithComments(sql)).toEqual([
+      { sql: 'SELECT 1;', commentBlocks: [], leadingBlocks: [] },
+      { sql: 'SELECT\n\n2;', commentBlocks: [['-- leading'], ['-- inside']], leadingBlocks: [['-- leading']] },
+      { sql: 'SELECT 3;', commentBlocks: [['-- cut off'], ['-- kept']], leadingBlocks: [['-- kept']] },
     ])
   })
 })

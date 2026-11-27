@@ -61,6 +61,10 @@ class ExecutableStatementWithComments:
     # holds the comments that only whitespace separates; a comment after SQL
     # on its line is left out.
     comment_blocks: list[list[str]] = field(default_factory=list)
+    # The blocks of ``comment_blocks`` that only whitespace separates from the
+    # statement's first character (#888): a marker among them comes right
+    # before the statement, with no SQL or other comment in between.
+    leading_blocks: list[list[str]] = field(default_factory=list)
 
 
 def extract_executable_statements_with_comments(text: str) -> list[ExecutableStatementWithComments]:
@@ -86,7 +90,8 @@ def extract_executable_statements_with_comments(text: str) -> list[ExecutableSta
             break
         if not comment.own_line:
             continue
-        blocks = result[index].comment_blocks
+        target = result[index]
+        blocks = target.comment_blocks
         if (
             blocks
             and previous_offset is not None
@@ -95,6 +100,11 @@ def extract_executable_statements_with_comments(text: str) -> list[ExecutableSta
             blocks[-1].append(comment.text)
         else:
             blocks.append([comment.text])
+            # The comments of one block are only whitespace apart, so its first one tells.
+            start = statements[index].start
+            before = extracted.stripped[comment.offset : start]
+            if comment.offset <= start and js_trim(before) == "":
+                target.leading_blocks.append(blocks[-1])
         previous_offset = comment.offset
     return result
 
@@ -113,6 +123,8 @@ def extract_legacy_executable_statements(text: str) -> list[str]:
 @dataclass(frozen=True, slots=True)
 class _Piece:
     text: str
+    # The offset of its first non-whitespace character.
+    start: int
     # The offset of the ``;`` that ends it, or the end of its last character.
     end: int
 
@@ -136,6 +148,7 @@ class _Extracted:
 def _split(text: str, *, line_comments: bool) -> list[_Piece]:
     statements: list[_Piece] = []
     current: list[str] = []
+    current_start = 0
     lexed_end = _lexed_end_at(text)
     openers = _OPENERS_WITH_LINE_COMMENTS if line_comments else _OPENERS
     i = 0
@@ -148,10 +161,14 @@ def _split(text: str, *, line_comments: bool) -> list[_Piece]:
             i = end
             continue
         if ch == ";":
-            trimmed = js_trim("".join(current))
+            piece = "".join(current)
+            trimmed = js_trim(piece)
             if trimmed:
-                statements.append(_Piece(text=f"{trimmed};", end=i))
+                statements.append(
+                    _Piece(text=f"{trimmed};", start=_start_of(piece, current_start), end=i)
+                )
             current = []
+            current_start = i + 1
             i += 1
             continue
         current.append(ch)
@@ -161,8 +178,16 @@ def _split(text: str, *, line_comments: bool) -> list[_Piece]:
     tail = js_trim(rest)
     if tail:
         trailing = len(rest) - len(rest.rstrip(JS_WHITESPACE))
-        statements.append(_Piece(text=f"{tail};", end=n - trailing))
+        statements.append(
+            _Piece(text=f"{tail};", start=_start_of(rest, current_start), end=n - trailing)
+        )
     return statements
+
+
+def _start_of(current: str, current_start: int) -> int:
+    # ``current`` is the text from ``current_start`` on, so its first
+    # non-whitespace character is this many characters further.
+    return current_start + len(current) - len(current.lstrip(JS_WHITESPACE))
 
 
 def _extract(text: str, *, line_comments: bool) -> _Extracted:
