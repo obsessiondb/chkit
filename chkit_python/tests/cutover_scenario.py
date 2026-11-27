@@ -29,13 +29,12 @@ from chkit.cli.commands.migrate_async_apply import iso_without_zone
 from chkit.cli.journal_store import JournalStore, MigrationRowState
 from chkit.cli.main import app
 from chkit.clickhouse.client import ClickHouseClient, clickhouse_error_code
-from chkit.clickhouse.ddl_propagation import wait_for_table, wait_for_table_absent
-from chkit.clickhouse.replicas import resolve_replica_fanout_or_raise
 from chkit.core.model import ChxResolvedClickHouseConfig
 from tests.e2e_testkit import (
     create_journal_table_name,
     create_prefix,
     format_test_diagnostic,
+    wait_for_table_absent_on_every_replica,
     wait_for_table_on_every_replica,
 )
 
@@ -732,6 +731,10 @@ def run_retry_scenario(
         drop_cutover_project(target, project)
 
 
+# How long a table re-created by a scenario may take to leave and reach every replica.
+RECREATE_WAIT_SECONDS = 120.0
+
+
 def _recreate_table(
     target: CutoverTarget,
     project: CutoverProject,
@@ -740,13 +743,25 @@ def _recreate_table(
     *,
     on_cluster: str = "",
 ) -> None:
-    # Probed once and cached, so a failed probe fails here instead of letting the waits read one replica.
-    resolve_replica_fanout_or_raise(target.admin, target.cluster)
     target.admin.execute(f"DROP TABLE {target.database}.{project.table}{on_cluster} SYNC")
-    # The CREATE may land on a replica that has not applied the DROP.
-    wait_for_table_absent(target.admin, target.database, project.table, cluster=target.cluster)
+    # The CREATE may land on a replica that has not applied the DROP. A loaded
+    # ObsessionDB service can take longer than chkit's 30 s wait to show a drop
+    # on every replica (#864).
+    wait_for_table_absent_on_every_replica(
+        target.admin,
+        target.database,
+        project.table,
+        timeout=RECREATE_WAIT_SECONDS,
+        cluster=target.cluster,
+    )
     target.admin.execute(create_sql, settings)
-    wait_for_table(target.admin, target.database, project.table, cluster=target.cluster)
+    wait_for_table_on_every_replica(
+        target.admin,
+        target.database,
+        project.table,
+        timeout=RECREATE_WAIT_SECONDS,
+        cluster=target.cluster,
+    )
 
 
 def run_undeclared_primary_key_scenario(

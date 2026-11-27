@@ -653,6 +653,9 @@ export async function runRetryScenario(
   }
 }
 
+// How long a table re-created by a scenario may take to leave and reach every replica.
+const RECREATE_WAIT_MS = 120_000
+
 async function recreateTable(
   target: CutoverTarget,
   project: CutoverProject,
@@ -660,11 +663,13 @@ async function recreateTable(
   settings?: Record<string, number>,
   onCluster = '',
 ): Promise<void> {
-  const options = { cluster: target.connection.cluster }
+  const options = { cluster: target.connection.cluster, deadlineMs: RECREATE_WAIT_MS }
   // Probed once and cached, so a failed probe fails here instead of letting the waits read one replica.
   await resolveReplicaFanoutOrThrow(target.admin, options.cluster)
   await target.admin.command(`DROP TABLE ${target.database}.${project.table}${onCluster} SYNC`)
-  // The CREATE may land on a replica that has not applied the DROP.
+  // The CREATE may land on a replica that has not applied the DROP. A loaded
+  // ObsessionDB service can take longer than chkit's 30 s wait to show a drop
+  // on every replica (#864).
   await waitForTableAbsent(target.admin, target.database, project.table, options)
   await target.admin.command(createSql, settings)
   await waitForTable(target.admin, target.database, project.table, options)
