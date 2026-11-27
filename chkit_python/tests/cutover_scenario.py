@@ -34,7 +34,7 @@ from tests.e2e_testkit import (
     create_journal_table_name,
     create_prefix,
     format_test_diagnostic,
-    poll_until,
+    wait_for_table_absent_on_every_replica,
     wait_for_table_on_every_replica,
 )
 
@@ -731,6 +731,39 @@ def run_retry_scenario(
         drop_cutover_project(target, project)
 
 
+# How long a table re-created by a scenario may take to leave and reach every replica.
+RECREATE_WAIT_SECONDS = 120.0
+
+
+def _recreate_table(
+    target: CutoverTarget,
+    project: CutoverProject,
+    create_sql: str,
+    settings: dict[str, Any] | None = None,
+    *,
+    on_cluster: str = "",
+) -> None:
+    target.admin.execute(f"DROP TABLE {target.database}.{project.table}{on_cluster} SYNC")
+    # The CREATE may land on a replica that has not applied the DROP. A loaded
+    # ObsessionDB service can take longer than chkit's 30 s wait to show a drop
+    # on every replica (#864).
+    wait_for_table_absent_on_every_replica(
+        target.admin,
+        target.database,
+        project.table,
+        timeout=RECREATE_WAIT_SECONDS,
+        cluster=target.cluster,
+    )
+    target.admin.execute(create_sql, settings)
+    wait_for_table_on_every_replica(
+        target.admin,
+        target.database,
+        project.table,
+        timeout=RECREATE_WAIT_SECONDS,
+        cluster=target.cluster,
+    )
+
+
 def run_undeclared_primary_key_scenario(
     target: CutoverTarget, label: str, directory: Path
 ) -> None:
@@ -740,18 +773,16 @@ def run_undeclared_primary_key_scenario(
     project = create_cutover_project(target, label, directory)
     try:
         fqn = f"{target.database}.{project.table}"
-        target.admin.execute(f"DROP TABLE {fqn} SYNC")
-        target.admin.execute(
+        _recreate_table(
+            target,
+            project,
             f"CREATE TABLE {fqn} (id UInt64, user_id UInt64, payload String) "
-            f"ENGINE = {target.engine} ORDER BY id"
+            f"ENGINE = {target.engine} ORDER BY id",
         )
-        created = poll_until(
-            lambda: target.admin.query(
-                "SELECT engine_full FROM system.tables "
-                f"WHERE database = '{target.database}' AND name = '{project.table}'"
-            ).rows,
-            bool,
-        )
+        created = target.admin.query(
+            "SELECT engine_full FROM system.tables "
+            f"WHERE database = '{target.database}' AND name = '{project.table}'"
+        ).rows
         assert created, "the table is not listed"
         assert " PRIMARY KEY " not in str(created[0]["engine_full"]), created
         target.admin.execute(
@@ -795,21 +826,15 @@ def run_refused_at_start_scenario(
     try:
         fqn = f"{target.database}.{project.table}"
         on_cluster = f" ON CLUSTER '{target.cluster}'" if target.cluster else ""
-        target.admin.execute(f"DROP TABLE {fqn}{on_cluster} SYNC")
-        target.admin.execute(
+        _recreate_table(
+            target,
+            project,
             f"CREATE TABLE {fqn}{on_cluster} ({columns}) "
             f"ENGINE = {engine(project.table)} ORDER BY {order_by}"
             + (f" {clauses}" if clauses else ""),
             settings,
+            on_cluster=on_cluster,
         )
-        created = poll_until(
-            lambda: target.admin.query(
-                "SELECT name FROM system.tables "
-                f"WHERE database = '{target.database}' AND name = '{project.table}'"
-            ).rows,
-            bool,
-        )
-        assert created, "the table is not listed"
 
         _generate_cutover(target, project)
         refused = cli(["migrate", "--apply", "--json"])
@@ -849,20 +874,13 @@ def run_created_outside_chkit_scenario(
     project = create_cutover_project(target, label, directory, schema_columns)
     try:
         fqn = f"{target.database}.{project.table}"
-        target.admin.execute(f"DROP TABLE {fqn} SYNC")
-        target.admin.execute(
+        _recreate_table(
+            target,
+            project,
             f"CREATE TABLE {fqn} ({columns}) ENGINE = {target.engine} ORDER BY {order_by}"
             + (f" {clauses}" if clauses else ""),
             settings,
         )
-        created = poll_until(
-            lambda: target.admin.query(
-                "SELECT name FROM system.tables "
-                f"WHERE database = '{target.database}' AND name = '{project.table}'"
-            ).rows,
-            bool,
-        )
-        assert created, "the table is not listed"
         target.admin.execute(
             f"INSERT INTO {fqn} (id, user_id, payload) "
             "SELECT number, number % 97, 'historic' FROM numbers(1000)"

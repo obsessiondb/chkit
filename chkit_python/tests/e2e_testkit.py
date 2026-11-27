@@ -34,7 +34,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Protocol, TypeVar
+from typing import Any, Literal, Protocol, TypeVar
 from urllib.parse import urlencode, urlparse
 
 from chkit.clickhouse.replicas import (
@@ -277,39 +277,77 @@ def run_once_visible(run: Callable[[], T], *, timeout: float = 30.0, interval: f
 
 
 def wait_for_table_on_every_replica(
-    client: Any, database: str, table: str, *, timeout: float = 30.0
+    client: Any,
+    database: str,
+    table: str,
+    *,
+    timeout: float = 30.0,
+    cluster: str | None = None,
 ) -> None:
     """Poll until every replica of the service lists ``database.table``.
 
     ``wait_for_table`` sees one replica per attempt, so on a multi-replica
     service (ObsessionDB) the next request can still land on one that has not
-    applied the CREATE. Discover the service replicas as the production propagation waits do,
-    then count replicas listing the table through ``clusterAllReplicas`` until
-    all of them do; otherwise (a single node) ``system.tables`` is enough.
+    applied the CREATE. Discover the service replicas (``cluster``, default
+    ``default``) as the production propagation waits do, then count replicas
+    listing the table through ``clusterAllReplicas`` until all of them do;
+    otherwise (a single node) ``system.tables`` is enough.
     ``client.query(sql)`` must return an object with ``rows``.
     """
-    fanout = resolve_replica_fanout_or_raise(client)
-    cluster = fanout.cluster if fanout else ""
+    _wait_for_table_listing(
+        client, database, table, want="present", timeout=timeout, cluster=cluster
+    )
+
+
+def wait_for_table_absent_on_every_replica(
+    client: Any,
+    database: str,
+    table: str,
+    *,
+    timeout: float = 30.0,
+    cluster: str | None = None,
+) -> None:
+    """Poll until no replica lists ``database.table``: a CREATE of the same
+    name can land on a replica that has not applied the DROP yet. TS uses the
+    production ``waitForTableAbsent`` with a ``deadlineMs``."""
+    _wait_for_table_listing(
+        client, database, table, want="absent", timeout=timeout, cluster=cluster
+    )
+
+
+def _wait_for_table_listing(
+    client: Any,
+    database: str,
+    table: str,
+    *,
+    want: Literal["present", "absent"],
+    timeout: float,
+    cluster: str | None,
+) -> None:
+    fanout = resolve_replica_fanout_or_raise(client, cluster)
     db = database.replace("\\", "\\\\").replace("'", "\\'")
     name = table.replace("\\", "\\\\").replace("'", "\\'")
-    if cluster:
-        quoted_cluster = cluster.replace("\\", "\\\\").replace("'", "\\'")
+    if fanout:
+        # Distinct hosts against the probed count, as the production waits do:
+        # a replica that does not answer cannot count as one that lists it.
+        quoted_cluster = fanout.cluster.replace("\\", "\\\\").replace("'", "\\'")
         sql = (
-            f"SELECT (SELECT count() FROM clusterAllReplicas('{quoted_cluster}', system.one))"
-            f" AS replicas, (SELECT count() FROM clusterAllReplicas('{quoted_cluster}', "
-            f"system.tables) WHERE database = '{db}' AND name = '{name}') AS listed"
+            f"SELECT {fanout.replicas} AS replicas, count(DISTINCT hostName()) AS listed "
+            f"FROM clusterAllReplicas('{quoted_cluster}', system.tables) "
+            f"WHERE database = '{db}' AND name = '{name}'"
         )
     else:
         sql = (
             "SELECT 1 AS replicas, count() AS listed FROM system.tables "
             f"WHERE database = '{db}' AND name = '{name}'"
         )
-    row = poll_until(
-        lambda: client.query(sql).rows[0],
-        lambda value: int(value["listed"]) >= int(value["replicas"]),
-        timeout=timeout,
-    )
-    if int(row["listed"]) < int(row["replicas"]):
+
+    def done(value: Any) -> bool:
+        listed = int(value["listed"])
+        return listed >= int(value["replicas"]) if want == "present" else listed == 0
+
+    row = poll_until(lambda: client.query(sql).rows[0], done, timeout=timeout)
+    if not done(row):
         msg = (
             f"{database}.{table} is listed on {row['listed']} of "
             f"{row['replicas']} replicas after {timeout}s"
@@ -445,6 +483,7 @@ __all__ = [
     "resolve_live_env",
     "run_on_every_replica",
     "run_once_visible",
+    "wait_for_table_absent_on_every_replica",
     "wait_for_table_on_every_replica",
 ]
 
