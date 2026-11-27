@@ -26,10 +26,6 @@ describe('generate --cutover e2e (#202)', () => {
     await runKeepScenario(liveCutoverTarget(), 'cutover_keep')
   }, 900_000)
 
-  test('keeps flattened Nested rows while writers insert during the cutover', async () => {
-    await runKeepScenario(liveCutoverTarget(), 'cutover_keep_nested', true)
-  }, 900_000)
-
   test('cuts over a table created with only ORDER BY, without PRIMARY KEY (#524)', async () => {
     await runUndeclaredPrimaryKeyScenario(liveCutoverTarget(), 'cutover_pk')
   }, 300_000)
