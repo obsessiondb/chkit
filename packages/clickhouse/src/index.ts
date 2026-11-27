@@ -904,15 +904,17 @@ const INSERT_SETTING_URL_KEYS = new Map([
 	['clickhouse_setting_wait_for_async_insert', 'wait_for_async_insert'],
 ])
 
-/** Reads the two insert settings migrate accepts from the connection URL (#879). */
+/**
+ * Reads the two insert settings migrate accepts from the connection URL
+ * (#879). The last assignment of a setting wins, under either prefix, as with
+ * repeated `--setting` flags.
+ */
 export function insertSettingsFromUrl(url: string): Record<string, string> | undefined {
 	if (!URL.canParse(url)) return undefined
-	const params = new URL(url).searchParams
 	let settings: Record<string, string> | undefined
-	for (const key of params.keys()) {
+	for (const [key, value] of new URL(url).searchParams) {
 		const name = INSERT_SETTING_URL_KEYS.get(key)
-		const value = params.get(key)
-		if (name === undefined || value === null) continue
+		if (name === undefined) continue
 		settings ??= {}
 		settings[name] = value
 	}

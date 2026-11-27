@@ -144,8 +144,15 @@ def test_insert_settings_override_warning() -> None:
         ),
         (
             "http://localhost/?clickhouse_setting_async_insert=1&clickhouse_setting_async_insert=0",
-            {"async_insert": "1"},
+            {"async_insert": "0"},
         ),
+        (
+            "http://localhost/?ch_async_insert=1&ch_wait_for_async_insert=0&"
+            "clickhouse_setting_wait_for_async_insert=1&ch_wait_for_async_insert=1",
+            {"async_insert": "1", "wait_for_async_insert": "1"},
+        ),
+        (" http://localhost/?ch_async_insert=0\t \n", {"async_insert": "0"}),
+        ("http://localhost/?ch_async_insert=%201+", {"async_insert": " 1 "}),
         ("http://localhost/?ch_max_threads=4&async_insert=1", None),
         ("http://localhost/", None),
         ("http://[broken/?ch_async_insert=1", None),
