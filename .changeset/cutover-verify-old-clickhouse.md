@@ -3,4 +3,4 @@
 "@chkit/core": patch
 ---
 
-Cutover verification now handles NULL values on ClickHouse 24.9–25.2 and avoids false mismatches for identical aggregate states on ClickHouse 24.9–25.10.
+Cutover verification now works on ClickHouse 24.9–25.10 for tables with Nullable columns holding NULLs or with AggregateFunction columns. Verification could previously fail after the shadow table and mirror were created.

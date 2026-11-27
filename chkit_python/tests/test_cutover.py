@@ -252,12 +252,9 @@ def test_verify_compares_rows_per_key(copy: str, cluster: str | None) -> None:
         cluster=cluster,
     )
     verify = next(op.sql for op in cutover.operations if op.type == "cutover_verify")
-    # Tuple hashing throws on NULL in ClickHouse 24.9-25.2 and can hash identical
-    # AggregateFunction states differently across tables in 24.9-25.10 (#868).
-    row_hash = "cityHash64(formatRow('RowBinary', `id`, `user_id`, `payload`))"
+    row_hash = "cityHash64(tuple(`id`, `user_id`, `payload`))"
     assert f"toUInt8(1) AS src, {row_hash} AS h FROM app.{cutover.names.snapshot} UNION ALL" in verify
     assert f"toUInt8(0) AS src, {row_hash} AS h FROM app.{cutover.names.shadow})" in verify
-    assert "cityHash64(tuple(" not in verify
     assert (
         "GROUP BY `id` HAVING snapshot_rows > 0 AND "
         "(snapshot_rows != shadow_rows OR snapshot_hash != shadow_hash)"
@@ -268,6 +265,33 @@ def test_verify_compares_rows_per_key(copy: str, cluster: str | None) -> None:
         else "chkit plugin backfill plan --cutover app.events"
     )
     assert message in verify
+
+
+def test_wraps_only_tuple_elements_that_need_rowbinary_on_old_clickhouse_versions() -> None:
+    # #868 covers NULLs on ClickHouse 24.9-25.2 and aggregate states on 24.9-25.10.
+    mixed: list[Any] = [
+        {"name": "id", "type": "UInt64"},
+        {"name": "price", "type": "Decimal64(2)", "nullable": True},
+        {"name": "tags", "type": "Array(/* a comment */ `Nullable`(String))"},
+        {"name": "label", "type": 'LowCardinality("Nullable"(String))'},
+        {"name": "state", "type": "AggregateFunction(argMax, LowCardinality(String), DateTime)"},
+        {"name": "j", "type": "JSON"},
+        {"name": "named", "type": "Tuple(`Nullable` UInt8)"},
+        {"name": "mixed", "type": "Tuple(a Nullable(UInt8), b JSON)"},
+        {"name": "lower_json", "type": "Tuple(a Nullable(UInt8), b json)"},
+        {"name": "n", "type": "Nested(x Nullable(UInt8), y UInt8)"},
+    ]
+    old_def = events(columns=mixed)
+    new_def = events(columns=mixed).model_copy(update={"order_by": ["id", "named"]})
+    cutover = plan(old_def=old_def, new_def=new_def)
+    verify = next(op.sql for op in cutover.operations if op.type == "cutover_verify")
+    row_hash = (
+        "cityHash64(tuple(`id`, formatRow('RowBinary', `price`), formatRow('RowBinary', `tags`), "
+        "formatRow('RowBinary', `label`), formatRow('RowBinary', `state`), `j`, `named`, `mixed`, "
+        "`lower_json`, formatRow('RowBinary', `n.x`), `n.y`))"
+    )
+    assert f"toUInt8(1) AS src, {row_hash} AS h FROM app.{cutover.names.snapshot} UNION ALL" in verify
+    assert f"toUInt8(0) AS src, {row_hash} AS h FROM app.{cutover.names.shadow})" in verify
 
 
 def test_compares_a_numeric_read_only_setting_by_value() -> None:
@@ -505,11 +529,10 @@ def test_recognizes_the_nested_parent_name_only_for_an_unflattened_nested_type()
 
 
 def test_checks_the_table_stores_the_old_column_types() -> None:
-    # The copy can convert a value without the verify detecting it, as with
-    # LowCardinality(String) to String. ClickHouse stores Decimal64(2) as Decimal(18, 2),
-    # so the server renders the schema's types too, from a one-row format() table.
-    # defaultValueOfTypeName fails for some types before ClickHouse 26.4.
-    # TS cutover.test.ts asserts the same.
+    # The snapshot takes the types the server stores, and cityHash64 hides UInt32 vs
+    # UInt64. ClickHouse stores Decimal64(2) as Decimal(18, 2), so the server renders
+    # the schema's types too, from a one-row format() table: defaultValueOfTypeName
+    # fails for some types before ClickHouse 26.4. TS cutover.test.ts asserts the same.
     typed: list[Any] = [
         *COLUMNS,
         {"name": "price", "type": "Decimal64(2)", "nullable": True},
@@ -564,7 +587,7 @@ def test_moves_flattened_nested_leaves(cluster: str | None) -> None:
     ):
         assert "`n.x`, `n.y z`" in sql[key]
         assert "`n`" not in sql[key]
-    assert "cityHash64(formatRow('RowBinary', `id`, `user_id`, `payload`, `n.x`, `n.y z`))" in verify
+    assert "cityHash64(tuple(`id`, `user_id`, `payload`, `n.x`, `n.y z`))" in verify
     assert cutover.columns == ["id", "user_id", "payload", "n.x", "n.y z"]
     assert '"columns":["id","user_id","payload","n.x","n.y z"]' in snapshot
     for name in (cutover.names.shadow, cutover.names.reconcile):

@@ -30,7 +30,7 @@ describe('generate --cutover e2e (#202)', () => {
     await runUndeclaredPrimaryKeyScenario(liveCutoverTarget(), 'cutover_pk')
   }, 300_000)
 
-  // Copying can convert column types, and the verify compares values after the copy.
+  // cityHash64 hashes both pairs alike, so the verify step after the copy would miss them.
   test('stops before it creates anything when the table stores UInt32 where the schema says UInt64', async () => {
     const target = liveCutoverTarget()
     await runRefusedAtStartScenario(target, 'cutover_uint', { columns: 'id UInt32, user_id UInt64, payload String', engine: () => target.engine }, MISTYPED)

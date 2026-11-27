@@ -207,7 +207,7 @@ describe('planCutover', () => {
   })
 
   test('checks the table stores the column types of the old definition, before it creates anything', () => {
-    // The copy can convert a value without the verify detecting it, as with LowCardinality(String) to String.
+    // The snapshot takes the types the server stores, and cityHash64 hides UInt32 vs UInt64.
     // chkit-py's test_cutover.py asserts the same.
     // ClickHouse stores Decimal64(2) as Decimal(18, 2), so the server renders the schema's types too.
     const typed = [...columns, { name: 'price', type: 'Decimal64(2)', nullable: true }, { name: 'n', type: 'Nested(x UInt8, `y z` Decimal64(2))' }] as TableDefinition['columns']
@@ -240,7 +240,7 @@ describe('planCutover', () => {
         expect(sql).toContain('`n.x`, `n.y z`')
         expect(sql).not.toContain('`n`')
       }
-      expect(verify).toContain("cityHash64(formatRow('RowBinary', `id`, `user_id`, `payload`, `n.x`, `n.y z`))")
+      expect(verify).toContain('cityHash64(tuple(`id`, `user_id`, `payload`, `n.x`, `n.y z`))')
       expect(cutover.columns).toEqual(['id', 'user_id', 'payload', 'n.x', 'n.y z'])
       expect(snapshot).toContain(`"columns":${JSON.stringify(cutover.columns)}`)
       expect(sqlOf(`table:app.${cutover.names.shadow}`)).toEndWith('SETTINGS index_granularity = 4096, flatten_nested = 1;')
@@ -451,19 +451,41 @@ describe('planCutover', () => {
   })
 
   test('verifies per key that the shadow holds exactly the snapshot rows', () => {
-    // Tuple hashing throws on NULL in ClickHouse 24.9-25.2 and can hash identical
-    // AggregateFunction states differently across tables in 24.9-25.10 (#868).
-    const hash = "cityHash64(formatRow('RowBinary', `id`, `user_id`, `payload`))"
+    const hash = 'cityHash64(tuple(`id`, `user_id`, `payload`))'
     for (const [copy, cluster] of [['migration', undefined], ['backfill', undefined], ['migration', 'c2']] as const) {
       const engine = cluster ? 'ReplicatedMergeTree' : 'MergeTree'
       const cutover = plan({ oldDef: { ...OLD, engine }, newDef: { ...NEW, engine }, options: { copy, cluster } })
       const verify = cutover.operations.find((op) => op.type === 'cutover_verify')?.sql ?? ''
       expect(verify).toContain(`toUInt8(1) AS src, ${hash} AS h FROM app.${cutover.names.snapshot} UNION ALL`)
       expect(verify).toContain(`toUInt8(0) AS src, ${hash} AS h FROM app.${cutover.names.shadow})`)
-      expect(verify).not.toContain('cityHash64(tuple(')
       expect(verify).toContain('GROUP BY `id` HAVING snapshot_rows > 0 AND (snapshot_rows != shadow_rows OR snapshot_hash != shadow_hash)')
       expect(verify).toContain(copy === 'migration' ? 'The table was not swapped.' : 'chkit plugin backfill plan --cutover app.events')
     }
+  })
+
+  test('wraps only tuple elements that need RowBinary on old ClickHouse versions', () => {
+    // #868 covers NULLs on ClickHouse 24.9-25.2 and aggregate states on 24.9-25.10.
+    const mixed = [
+      { name: 'id', type: 'UInt64' },
+      { name: 'price', type: 'Decimal64(2)', nullable: true },
+      { name: 'tags', type: 'Array(/* a comment */ `Nullable`(String))' },
+      { name: 'label', type: 'LowCardinality("Nullable"(String))' },
+      { name: 'state', type: 'AggregateFunction(argMax, LowCardinality(String), DateTime)' },
+      { name: 'j', type: 'JSON' },
+      { name: 'named', type: 'Tuple(`Nullable` UInt8)' },
+      { name: 'mixed', type: 'Tuple(a Nullable(UInt8), b JSON)' },
+      { name: 'lower_json', type: 'Tuple(a Nullable(UInt8), b json)' },
+      { name: 'n', type: 'Nested(x Nullable(UInt8), y UInt8)' },
+    ]
+    const oldDef = events({ columns: mixed })
+    const newDef = events({ columns: mixed, orderBy: ['id', 'named'] })
+    const cutover = plan({ oldDef, newDef })
+    const verify = cutover.operations.find((op) => op.type === 'cutover_verify')?.sql ?? ''
+    const hash = "cityHash64(tuple(`id`, formatRow('RowBinary', `price`), formatRow('RowBinary', `tags`), " +
+      "formatRow('RowBinary', `label`), formatRow('RowBinary', `state`), `j`, `named`, `mixed`, " +
+      "`lower_json`, formatRow('RowBinary', `n.x`), `n.y`))"
+    expect(verify).toContain(`toUInt8(1) AS src, ${hash} AS h FROM app.${cutover.names.snapshot} UNION ALL`)
+    expect(verify).toContain(`toUInt8(0) AS src, ${hash} AS h FROM app.${cutover.names.shadow})`)
   })
 
   test('cuts over a change of read-only settings only, telling the tables apart by them (#511)', () => {
