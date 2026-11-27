@@ -9,8 +9,11 @@ before every replica has the new schema. Migrations that follow up with
 fail. These helpers poll ``system.tables`` / ``system.columns`` until
 the operation is observable, then return.
 
-Retry strategy: 20 attempts x 500 ms delay (~10 s budget). Matches the TS
-``p-retry`` defaults (``factor: 1`` -> fixed delay, no exponential backoff).
+Retry strategy: checks 500 ms apart until a 30 s deadline, starting no check
+that would begin at or after it, and no delay after the last check. A loaded
+ObsessionDB service can take well over 10 s to show a CREATE or DROP on every
+replica (#719). Matches TS, which polls with ``p-retry`` (``factor: 1`` ->
+fixed delay, no exponential backoff) until the same deadline.
 
 The polling client is passed in (any object with a ``query(sql) ->
 QueryResult`` method) so this module can be unit-tested without a live
@@ -21,6 +24,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -33,9 +37,11 @@ from chkit.clickhouse.alter_column_statement import (
 )
 from chkit.clickhouse.replicas import ReplicaFanout, all_replicas, resolve_replica_fanout
 
-MAX_ATTEMPTS = 20
+# Retries after the first check, like TS ``retries: 20``: 21 checks in all.
+# The journal reads use it; the propagation waits poll until the deadline.
+MAX_RETRIES = 20
 RETRY_DELAY_SECONDS = 0.5
-# Upper bound on a column definition or rename wait.
+# How long a propagation wait gives every replica to show the change (#719).
 DEFINITION_WAIT_DEADLINE_SECONDS = 30.0
 
 
@@ -84,24 +90,29 @@ def _quote(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "\\'")
 
 
-def _poll(
-    check_fn: Callable[[], bool],
-    *,
-    attempts: int = MAX_ATTEMPTS,
-    delay: float = RETRY_DELAY_SECONDS,
-) -> None:
-    """Call ``check_fn`` until it returns truthy or ``attempts`` is exhausted.
+def _poll(check_fn: Callable[[], bool]) -> None:
+    """Call ``check_fn`` until it returns truthy or the deadline passes.
 
-    Raises the last error from ``check_fn`` if every attempt fails.
+    Sleeps ``RETRY_DELAY_SECONDS`` between checks and starts no check that
+    would begin at or after ``DEFINITION_WAIT_DEADLINE_SECONDS``, like TS
+    ``pollUntilDeadline``. Raises the last error from ``check_fn`` if every
+    check fails. A ``TypeError`` or ``AttributeError`` is a bug in the check,
+    not lag, and is raised at once: p-retry does not retry a ``TypeError`` that
+    is not a fetch network failure, and these are its Python equivalents (#627).
     """
+    deadline = time.monotonic() + DEFINITION_WAIT_DEADLINE_SECONDS
     last_error: BaseException | None = None
-    for _ in range(attempts):
+    while True:
         try:
             if check_fn():
                 return
+        except (TypeError, AttributeError):
+            raise
         except Exception as error:
             last_error = error
-        time.sleep(delay)
+        if time.monotonic() + RETRY_DELAY_SECONDS >= deadline:
+            break
+        time.sleep(RETRY_DELAY_SECONDS)
     if last_error is not None:
         raise last_error
     msg = "polling exhausted without success or error"
@@ -400,8 +411,9 @@ def wait_for_column_definition(
     )
     replicas = fanout.replicas if fanout else 1
     _wait_until_applied(
+        client,
         f"{database}.{table_name}.{column_name} definition",
-        lambda: _column_definition_mismatch(client.query(sql).rows, replicas, expected),
+        lambda reader: _column_definition_mismatch(reader.query(sql).rows, replicas, expected),
     )
 
 
@@ -424,8 +436,8 @@ def wait_for_column_rename(
         f"AND name IN ('{_quote(from_)}', '{_quote(to)}')"
     )
 
-    def _check() -> str | None:
-        rows = client.query(sql).rows
+    def _check(reader: Any) -> str | None:
+        rows = reader.query(sql).rows
         stale = [str(row.get("replica")) for row in rows if row.get("name") == from_]
         if stale:
             return f"replica {', '.join(stale)} still lists column {from_}"
@@ -434,38 +446,74 @@ def wait_for_column_rename(
             return f"column {to} is listed on {len(renamed)} of {replicas} replicas"
         return None
 
-    _wait_until_applied(f"{database}.{table_name} rename of column {from_} to {to}", _check)
+    _wait_until_applied(client, f"{database}.{table_name} rename of column {from_} to {to}", _check)
 
 
-def _wait_until_applied(subject: str, check: Callable[[], str | None]) -> None:
+def _wait_until_applied(client: Any, subject: str, check: Callable[[Any], str | None]) -> None:
     """Poll ``check`` until it reports no mismatch.
 
-    Uses the retry budget of the other waits (21 checks, 0.5 s apart) and stops
-    retrying at a 30 s deadline (TS also abandons a check that does not
-    return by then; a synchronous query here is bounded by the client's
-    receive timeout). On timeout the error names what was still different on
-    the last check.
+    Checks 0.5 s apart until the 30 s deadline; a check that does not return
+    ends the wait at the deadline, as in TS. chkit-py requests have no read
+    timeout (#661). On timeout the error names what was still different on the
+    last check that returned, and says so when the check after it did not
+    return (#750).
+
+    A check cut off at the deadline is still in flight, so the checks go
+    through ``client.open_concurrent()`` when the client has one: ClickHouse
+    runs one query at a time per session, and a check left running on the
+    caller's session would lock out its next request (TS ``waitUntilApplied``).
     """
     deadline = time.monotonic() + DEFINITION_WAIT_DEADLINE_SECONDS
+    open_concurrent = getattr(client, "open_concurrent", None)
+    concurrent = open_concurrent() if callable(open_concurrent) else None
+    reader = concurrent or client
     detail = ""
     checks = 0
-    for attempt in range(MAX_ATTEMPTS + 1):
-        checks += 1
-        try:
-            mismatch = check()
-        except Exception as error:  # reported on timeout
-            mismatch = str(error)
-        if mismatch is None:
-            return
-        detail = mismatch
-        if attempt == MAX_ATTEMPTS or time.monotonic() + RETRY_DELAY_SECONDS >= deadline:
-            break
-        time.sleep(RETRY_DELAY_SECONDS)
+    try:
+        while True:
+            checks += 1
+            timed_out, mismatch = _check_before(lambda: check(reader), deadline)
+            if timed_out:
+                late = f"did not return within the {DEFINITION_WAIT_DEADLINE_SECONDS:g}s deadline"
+                detail = f"{detail} (the last check {late})" if detail else f"a check {late}"
+                break
+            if mismatch is None:
+                return
+            detail = mismatch
+            if time.monotonic() + RETRY_DELAY_SECONDS >= deadline:
+                break
+            time.sleep(RETRY_DELAY_SECONDS)
+    finally:
+        if concurrent is not None:
+            concurrent.close()
     msg = (
         f"waitForDDLPropagation: {subject} not applied on every replica "
         f"after {checks} checks: {detail}"
     )
     raise RuntimeError(msg)
+
+
+def _check_before(check: Callable[[], str | None], deadline: float) -> tuple[bool, str | None]:
+    """Run ``check`` and stop waiting for it at ``deadline`` (TS ``checkBefore``).
+
+    Returns whether the check timed out, else its mismatch or error message.
+    The check runs on a daemon thread, so a check that never returns does not
+    keep the process alive.
+    """
+    outcome: list[str | None] = []
+
+    def _run() -> None:
+        try:
+            outcome.append(check())
+        except Exception as error:  # reported on timeout
+            outcome.append(str(error))
+
+    thread = threading.Thread(target=_run, name="chkit-ddl-propagation-check", daemon=True)
+    thread.start()
+    thread.join(max(deadline - time.monotonic(), 0))
+    if not outcome:
+        return True, None
+    return False, outcome[0]
 
 
 def wait_for_exchange(client: Any, statement: str, *, cluster: str | None = None) -> None:
@@ -501,8 +549,8 @@ def wait_for_exchange(client: Any, statement: str, *, cluster: str | None = None
         f"FROM {all_replicas(fanout, 'system.tables')} WHERE {where} GROUP BY database, name"
     )
 
-    def _check() -> str | None:
-        rows = client.query(sql).rows
+    def _check(reader: Any) -> str | None:
+        rows = reader.query(sql).rows
         if len(rows) < 2:  # noqa: PLR2004 - the two exchanged tables
             return f"only {len(rows)} of the 2 tables are listed"
         for row in rows:
@@ -517,7 +565,7 @@ def wait_for_exchange(client: Any, statement: str, *, cluster: str | None = None
             return "both names report the same uuid"
         return None
 
-    _wait_until_applied(f"EXCHANGE TABLES {db1}.{t1} AND {db2}.{t2}", _check)
+    _wait_until_applied(client, f"EXCHANGE TABLES {db1}.{t1} AND {db2}.{t2}", _check)
 
 
 _QUOTED_OR_BARE = r"(?:`(?:[^`\\]|\\.)*`|[^\s.`;]+)"

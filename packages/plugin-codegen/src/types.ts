@@ -36,6 +36,7 @@ export interface CodegenPlugin {
   commands: Array<{
     name: 'codegen'
     description: string
+    takesArgs?: boolean
     flags?: readonly FlagDef[]
     optionsSchema?: SafeParseable<CodegenOptions>
     flagMapping?: FlagMapping

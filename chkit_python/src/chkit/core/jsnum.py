@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 import re
+from decimal import ROUND_FLOOR, ROUND_HALF_UP, Context, Decimal, InvalidOperation
 
 # JS Number() grammar (after trimming JS whitespace): decimal with optional
 # exponent, hex/octal/binary literals, Infinity, empty string == 0. Compiled
@@ -32,6 +33,13 @@ _BIN_RE = re.compile(r"^0[bB][01]+$", re.ASCII)
 
 _JS_POSITIONAL_EXP_MIN = -7  # exclusive: exponent -7 → e-notation in JS
 _JS_POSITIONAL_EXP_MAX = 21  # exclusive: exponent 21 → e-notation in JS
+# Rounding never reads the ambient decimal context, which user code can change
+# (lower precision, FloatOperation trap). 60 digits hold any toFixed result
+# below 1e21 exactly.
+_ROUNDING_CONTEXT = Context(prec=60, rounding=ROUND_HALF_UP, traps=[InvalidOperation])
+_HALF = Decimal("0.5")
+_JS_TO_FIXED_LIMIT = 1e21  # toFixed falls back to String() from here
+_JS_INTEGRAL_LIMIT = 2.0**52  # every double of this magnitude is an integer
 
 
 def parse_js_number(raw: str) -> float:  # noqa: PLR0911 — Number() grammar arms
@@ -91,4 +99,38 @@ def js_number_to_string(value: float) -> str:  # noqa: PLR0911 — String() gram
     return f"{sign}{js_mantissa}e{exponent_sign}{abs(exponent)}"
 
 
-__all__ = ["js_number_to_string", "parse_js_number"]
+def js_to_fixed(value: float, digits: int) -> str:
+    """Replicate JS ``value.toFixed(digits)``.
+
+    JS rounds the double's exact value and takes the larger candidate on a
+    tie: ``(1.25).toFixed(1)`` is ``1.3``, where ``f"{1.25:.1f}"`` rounds half
+    to even and gives ``1.2``. ``Decimal.from_float`` is that exact value, so a
+    double just below a decimal tie (1.005 is 1.00499...) still rounds down,
+    as in JS. A negative value rounds its magnitude the same way. A non-finite
+    value or one of magnitude ``>= 1e21`` prints as ``String(value)``, as in JS.
+    """
+    if not math.isfinite(value) or abs(value) >= _JS_TO_FIXED_LIMIT:
+        return js_number_to_string(value)
+    exact = Decimal.from_float(value if value != 0 else 0.0)  # (-0).toFixed is "0..."
+    step = Decimal((0, (1,), -digits))
+    # "f", not str(): str() switches to exponent form ("0E-7") for small results.
+    return format(exact.quantize(step, rounding=ROUND_HALF_UP, context=_ROUNDING_CONTEXT), "f")
+
+
+def js_math_round(value: float) -> float:
+    """Replicate JS ``Math.round``: a tie rounds toward +Infinity, not to even.
+
+    ``Math.round(-2.5)`` is ``-2`` and ``Math.round(2.5)`` is ``3``. A non-finite
+    value, or one of magnitude ``>= 2**52`` (already an integer), is returned as is.
+    """
+    if not math.isfinite(value) or abs(value) >= _JS_INTEGRAL_LIMIT:
+        return value
+    # floor(value + 0.5). The sum may round in the 60-digit context (a tiny value
+    # has hundreds of digits), but never across an integer.
+    shifted = _ROUNDING_CONTEXT.add(Decimal.from_float(value), _HALF)
+    rounded = float(shifted.to_integral_value(rounding=ROUND_FLOOR, context=_ROUNDING_CONTEXT))
+    # JS keeps the sign on a zero result: Math.round(-0.2) is -0.
+    return math.copysign(rounded, value) if rounded == 0 else rounded
+
+
+__all__ = ["js_math_round", "js_number_to_string", "js_to_fixed", "parse_js_number"]

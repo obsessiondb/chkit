@@ -1,4 +1,4 @@
-import { definePipeline, defineStream, fullSync, timestampWindow } from '@chkit/plugin-ingest'
+import { definePipeline, defineStream, fullSync, timestampWindow } from '@chkit/plugin-sync'
 
 import { linearConfig, type LinearConfig } from './config.js'
 import { linear_issuesRaw, readIssues } from './sources/issues.js'

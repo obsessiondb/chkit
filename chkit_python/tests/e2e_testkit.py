@@ -24,14 +24,24 @@ runtime-agnostic here.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
+import random
 import secrets
 import time
+import urllib.error
+import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol, TypeVar
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
+
+from chkit.clickhouse.replicas import (
+    all_replicas,
+    resolve_replica_fanout_or_raise,
+    string_literal,
+)
 
 T = TypeVar("T")
 
@@ -143,6 +153,29 @@ def quote_ident(value: str) -> str:
     return f"`{escaped}`"
 
 
+def drop_database(
+    client: Any, database: str, *, timeout: float = 30.0, interval: float = 0.5
+) -> None:
+    """Drop a test database, re-running the DROP while it fails with ``DATABASE_NOT_EMPTY``.
+
+    DROP DATABASE drops the tables the serving replica lists, then fails if a
+    table appeared meanwhile. On a multi-replica service (ObsessionDB) that
+    happens when the replica applies an earlier CREATE during the drop; the
+    server answers "Try again". Any other error raises at once. ``timeout``
+    stops the re-runs; it does not cut short a DROP that is still running.
+    Port of TS ``dropDatabase``.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            client.execute(f"DROP DATABASE IF EXISTS {quote_ident(database)} SYNC")
+            return
+        except Exception as error:
+            if time.monotonic() >= deadline or "DATABASE_NOT_EMPTY" not in str(error):
+                raise
+        time.sleep(interval)
+
+
 def _random_suffix() -> str:
     """Return an 8-hex-digit random suffix (32 bits).
 
@@ -219,7 +252,7 @@ def poll_until(
 
 # Errors a statement gets when it lands on a replica that hasn't applied an
 # earlier DDL yet. Such a failure changes nothing, so the statement can run again.
-_NOT_YET_VISIBLE_ERRORS = ("UNKNOWN_TABLE",)
+_NOT_YET_VISIBLE_ERRORS = ("UNKNOWN_TABLE", "UNKNOWN_DATABASE")
 
 
 def run_once_visible(run: Callable[[], T], *, timeout: float = 30.0, interval: float = 0.5) -> T:
@@ -227,8 +260,8 @@ def run_once_visible(run: Callable[[], T], *, timeout: float = 30.0, interval: f
 
     On a multi-replica service (ObsessionDB) each request may land on a
     different replica, and one that hasn't applied the CREATE yet answers
-    ``UNKNOWN_TABLE`` even after ``wait_for_table`` saw the table on another
-    one. Such a failure changes nothing, so the statement is re-run until the
+    ``UNKNOWN_TABLE`` (or ``UNKNOWN_DATABASE``) even after ``wait_for_table``
+    saw the table on another one. Such a failure changes nothing, so the statement is re-run until the
     replica serving it sees the object; any other error raises at once.
     """
     deadline = time.monotonic() + timeout
@@ -250,15 +283,13 @@ def wait_for_table_on_every_replica(
 
     ``wait_for_table`` sees one replica per attempt, so on a multi-replica
     service (ObsessionDB) the next request can still land on one that has not
-    applied the CREATE. When the server names a cluster for parallel replicas,
-    count the replicas listing the table through ``clusterAllReplicas`` until
+    applied the CREATE. Discover the service replicas as the production propagation waits do,
+    then count replicas listing the table through ``clusterAllReplicas`` until
     all of them do; otherwise (a single node) ``system.tables`` is enough.
     ``client.query(sql)`` must return an object with ``rows``.
     """
-    cluster_rows = client.query(
-        "SELECT getSetting('cluster_for_parallel_replicas') AS cluster"
-    ).rows
-    cluster = str(cluster_rows[0]["cluster"]) if cluster_rows else ""
+    fanout = resolve_replica_fanout_or_raise(client)
+    cluster = fanout.cluster if fanout else ""
     db = database.replace("\\", "\\\\").replace("'", "\\'")
     name = table.replace("\\", "\\\\").replace("'", "\\'")
     if cluster:
@@ -286,6 +317,84 @@ def wait_for_table_on_every_replica(
         raise AssertionError(msg)
 
 
+def run_on_every_replica(
+    client: Any,
+    env: LiveEnv,
+    statement: str,
+    *,
+    timeout: float = 60.0,
+    interval: float = 0.5,
+) -> None:
+    """Run a replica-local statement, such as ``SYSTEM STOP MERGES db.t``, on
+    every replica of the target, and return once each replica's
+    ``system.query_log`` shows it finished there.
+
+    On a multi-replica service (ObsessionDB) a SYSTEM statement acts only on
+    the replica that serves it, and ON CLUSTER is refused. The load balancer
+    spreads requests over the replicas (round-robin on the test service), so
+    each round sends the statement, tagged with a ``log_comment``, once per
+    replica in a row, then flushes the query log once per replica, until every
+    replica ``clusterAllReplicas`` reaches has logged it. A round with any
+    other request between two of its own could keep reaching the same
+    replica, so rounds are a random time apart, which moves them against
+    concurrent callers. The statement must be safe to repeat, and its table
+    must already be on every replica: ``SYSTEM STOP MERGES`` on a missing
+    table succeeds and does nothing. On a single node it runs once, through
+    ``client``. TS twin: ``runOnEveryReplica``.
+    """
+    fanout = resolve_replica_fanout_or_raise(client)
+    if fanout is None:
+        client.execute(statement)
+        return
+    tag = f"chkit_e2e_every_replica_{create_run_tag()}"
+    coverage = (
+        f"SELECT (SELECT count(DISTINCT hostName()) FROM {all_replicas(fanout, 'system.one')})"
+        f" AS replicas, (SELECT count(DISTINCT hostName()) FROM "
+        f"{all_replicas(fanout, 'system.query_log')} WHERE event_date >= yesterday() AND "
+        f"type = 'QueryFinish' AND log_comment = {string_literal(tag)}) AS ran "
+        "SETTINGS skip_unavailable_shards = 0"
+    )
+    deadline = time.monotonic() + timeout
+    while True:
+        for _ in range(fanout.replicas):
+            _send_on_new_connection(env, statement, {"log_comment": tag})
+        # A replica writes its query_log every few seconds; a flush writes it now.
+        for _ in range(fanout.replicas):
+            _send_on_new_connection(env, "SYSTEM FLUSH LOGS")
+        row = client.query(coverage).rows[0]
+        replicas = int(row["replicas"])
+        ran = int(row["ran"])
+        if replicas > 0 and ran >= replicas:
+            return
+        if time.monotonic() >= deadline:
+            msg = (
+                f"run_on_every_replica: {statement} ran on {ran} of {replicas} "
+                f"replicas after {timeout}s"
+            )
+            raise AssertionError(msg)
+        time.sleep(interval * (0.5 + random.random()))
+
+
+def _send_on_new_connection(env: LiveEnv, sql: str, settings: dict[str, str] | None = None) -> None:
+    """One HTTP request on a connection of its own, so no connection affinity
+    keeps it on the replica that served the previous one."""
+    credentials = base64.b64encode(
+        f"{env.clickhouse_user}:{env.clickhouse_password}".encode()
+    ).decode()
+    request = urllib.request.Request(
+        f"{env.clickhouse_url.rstrip('/')}/?{urlencode(settings or {})}",
+        data=sql.encode(),
+        headers={"Authorization": f"Basic {credentials}", "Connection": "close"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            response.read()
+    except urllib.error.HTTPError as error:
+        msg = f"{sql}: HTTP {error.code}: {error.read().decode(errors='replace')}"
+        raise RuntimeError(msg) from error
+
+
 class _CliResultLike(Protocol):
     """Structural type covering ``typer.testing.Result`` and ad-hoc CLI results.
 
@@ -294,8 +403,11 @@ class _CliResultLike(Protocol):
     typer just to satisfy a type hint.
     """
 
-    exit_code: int
-    output: str
+    @property
+    def exit_code(self) -> int: ...
+
+    @property
+    def output(self) -> str: ...
 
 
 def format_test_diagnostic(
@@ -331,6 +443,23 @@ __all__ = [
     "poll_until",
     "quote_ident",
     "resolve_live_env",
+    "run_on_every_replica",
     "run_once_visible",
     "wait_for_table_on_every_replica",
 ]
+
+
+
+def held_lock_claim(client: Any, database: str, journal_table: str) -> str:
+    """The migrate lock claim that a killed run left behind in the journal
+    (#716), for ``--break-lock``. Port of the TS ``heldLockClaim``."""
+    prefix = "__chkit_migrate_lock__/"
+    rows = client.query(
+        f"SELECT substring(name, {len(prefix) + 1}) AS claim "
+        f"FROM {quote_ident(database)}.{quote_ident(journal_table)} "
+        f"WHERE startsWith(name, '{prefix}') GROUP BY name "
+        "HAVING max(applied_at) < toDateTime64('2299-01-01 00:00:00', 3, 'UTC') "
+        "SETTINGS select_sequential_consistency = 1"
+    ).rows
+    assert len(rows) == 1, f"expected one held migrate lock claim, found {rows}"
+    return str(rows[0]["claim"])

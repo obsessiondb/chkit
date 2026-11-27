@@ -1,0 +1,1 @@
+Plugin lifecycle hooks run around every command with the supplied flags and final exit code, including failures; when several `get_context` hooks provide executors, the last is used and the others are closed.

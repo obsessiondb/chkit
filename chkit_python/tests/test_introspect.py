@@ -178,7 +178,8 @@ def test_normalize_index_reads_back_the_stock_expression(expr: str, expected: st
         return normalize_index_from_system_row(row).expression
 
     assert read("minmax") == expected
-    assert read("text(tokenizer = 'splitByNonAlpha')") == normalize_text_index_sql(expected)
+    assert read("text(tokenizer = 'splitByNonAlpha')") == expected
+    assert normalize_text_index_sql(expected) == expected
 
 
 def test_normalize_index_minmax() -> None:

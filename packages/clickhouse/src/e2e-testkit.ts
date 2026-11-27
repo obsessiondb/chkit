@@ -15,6 +15,7 @@ import {
   createStatelessClickHouseExecutor,
   type ClickHouseExecutor,
 } from './index.js'
+import { allReplicas, resolveReplicaFanoutOrThrow, stringLiteral } from './replicas.js'
 
 // ---------------------------------------------------------------------------
 // Environment
@@ -94,6 +95,37 @@ export function quoteIdent(value: string): string {
   return quoteIdentifier(value)
 }
 
+/**
+ * Drops a test database, re-running the DROP while it fails with
+ * `DATABASE_NOT_EMPTY`.
+ *
+ * DROP DATABASE drops the tables the serving replica lists, then fails if a
+ * table appeared meanwhile. On a multi-replica service (ObsessionDB) that
+ * happens when the replica applies an earlier CREATE during the drop; the
+ * server answers "Try again". Any other error throws at once. `timeoutMs`
+ * stops the re-runs; it does not cut short a DROP that is still running.
+ * chkit-py's twin is `drop_database`.
+ */
+export async function dropDatabase(
+  executor: Pick<ClickHouseExecutor, 'command'>,
+  database: string,
+  options: PollUntilOptions = {},
+): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? 30_000
+  const intervalMs = options.intervalMs ?? 500
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    try {
+      await executor.command(`DROP DATABASE IF EXISTS ${quoteIdent(database)} SYNC`)
+      return
+    } catch (error) {
+      const text = `${(error as { type?: unknown }).type ?? ''} ${error instanceof Error ? error.message : String(error)}`
+      if (Date.now() >= deadline || !text.includes('DATABASE_NOT_EMPTY')) throw error
+    }
+    await sleep(intervalMs)
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Run tags & naming
 // ---------------------------------------------------------------------------
@@ -154,10 +186,112 @@ export async function pollUntil<T>(
   }
 }
 
+// Errors a replica that has not applied an earlier CREATE answers with.
+const NOT_YET_VISIBLE_ERRORS = ['UNKNOWN_TABLE', 'UNKNOWN_DATABASE']
+
+/**
+ * Runs a statement that needs an object an earlier DDL created.
+ *
+ * On a multi-replica service (ObsessionDB) each request may land on a
+ * different replica, and one that hasn't applied the CREATE yet answers
+ * `UNKNOWN_TABLE` or `UNKNOWN_DATABASE`. Such a failure changes nothing, so
+ * the statement is re-run until the replica serving it sees the object; any
+ * other error throws at once. chkit-py's twin is `run_once_visible`.
+ */
+export async function runOnceVisible<T>(run: () => Promise<T>, options: PollUntilOptions = {}): Promise<T> {
+  const timeoutMs = options.timeoutMs ?? 30_000
+  const intervalMs = options.intervalMs ?? 500
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    try {
+      return await run()
+    } catch (error) {
+      const text = `${(error as { type?: unknown }).type ?? ''} ${error instanceof Error ? error.message : String(error)}`
+      if (Date.now() >= deadline || !NOT_YET_VISIBLE_ERRORS.some((code) => text.includes(code))) throw error
+    }
+    await sleep(intervalMs)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Replica-local statements
+// ---------------------------------------------------------------------------
+
+/**
+ * Runs a replica-local statement, such as `SYSTEM STOP MERGES db.t`, on every
+ * replica of the target, and returns once each replica's `system.query_log`
+ * shows it finished there.
+ *
+ * On a multi-replica service (ObsessionDB) a SYSTEM statement acts only on the
+ * replica that serves it, and ON CLUSTER is refused. The load balancer spreads
+ * requests over the replicas (round-robin on the test service), so each round
+ * sends the statement, tagged with a `log_comment`, once per replica in a row,
+ * then flushes the query log once per replica, until every replica
+ * `clusterAllReplicas` reaches has logged it. A round with any other request
+ * between two of its own could keep reaching the same replica, so rounds are
+ * a random time apart, which moves them against concurrent callers. The
+ * statement must be safe to repeat, and its table must already be on every
+ * replica: `SYSTEM STOP MERGES` on a missing table succeeds and does nothing.
+ * On a single node it runs once, through `executor`. chkit-py's twin is
+ * `run_on_every_replica`.
+ */
+export async function runOnEveryReplica(
+  executor: ClickHouseExecutor,
+  env: LiveEnv,
+  statement: string,
+  options: PollUntilOptions = {},
+): Promise<void> {
+  const fanout = await resolveReplicaFanoutOrThrow(executor)
+  if (!fanout) {
+    await executor.command(statement)
+    return
+  }
+  const tag = `chkit_e2e_every_replica_${createRunTag()}`
+  const coverage =
+    `SELECT (SELECT count(DISTINCT hostName()) FROM ${allReplicas(fanout, 'system.one')}) AS replicas, ` +
+    `(SELECT count(DISTINCT hostName()) FROM ${allReplicas(fanout, 'system.query_log')} ` +
+    `WHERE event_date >= yesterday() AND type = 'QueryFinish' AND log_comment = ${stringLiteral(tag)}) AS ran ` +
+    'SETTINGS skip_unavailable_shards = 0'
+  const timeoutMs = options.timeoutMs ?? 60_000
+  const intervalMs = options.intervalMs ?? 500
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    for (let i = 0; i < fanout.replicas; i++) await sendOnNewConnection(env, statement, { log_comment: tag })
+    // A replica writes its query_log every few seconds; a flush writes it now.
+    for (let i = 0; i < fanout.replicas; i++) await sendOnNewConnection(env, 'SYSTEM FLUSH LOGS')
+    const [row] = await executor.query<{ replicas: number | string; ran: number | string }>(coverage)
+    const replicas = Number(row?.replicas ?? 0)
+    const ran = Number(row?.ran ?? 0)
+    if (replicas > 0 && ran >= replicas) return
+    if (Date.now() >= deadline) {
+      throw new Error(`runOnEveryReplica: ${statement} ran on ${ran} of ${replicas} replicas after ${timeoutMs} ms`)
+    }
+    await sleep(intervalMs * (0.5 + Math.random()))
+  }
+}
+
+// One HTTP request on a connection of its own, so no connection affinity keeps
+// it on the replica that served the previous one.
+async function sendOnNewConnection(env: LiveEnv, sql: string, settings: Record<string, string> = {}): Promise<void> {
+  const credentials = Buffer.from(`${env.clickhouseUser}:${env.clickhousePassword}`).toString('base64')
+  let base = env.clickhouseUrl
+  while (base.endsWith('/')) base = base.slice(0, -1)
+  const response = await fetch(`${base}/?${new URLSearchParams(settings)}`, {
+    method: 'POST',
+    body: sql,
+    keepalive: false,
+    signal: AbortSignal.timeout(60_000),
+    headers: { Authorization: `Basic ${credentials}`, Connection: 'close' },
+  })
+  const text = await response.text()
+  if (!response.ok) throw new Error(`${sql}: HTTP ${response.status}: ${text}`)
+}
+
 // Re-exported from ddl-propagation for test convenience.
 
 export {
   waitForTable,
+  waitForTableAbsent,
   waitForView,
   waitForColumn,
   waitForDictionary,

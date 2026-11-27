@@ -1,7 +1,7 @@
 import { type CanonicalizeOptions, canonicalizeDefinitions, definitionKey } from './canonical.js'
+import { compareCodePoints } from './order.js'
 import { diffByName, diffClauses, diffSettings } from './diff-primitives.js'
 import type {
-  ColumnDefaultValue,
   ColumnDefinition,
   ColumnRenameSuggestion,
   DictionaryDefinition,
@@ -36,11 +36,12 @@ import {
   renderAlterRemoveColumnExpression,
   renderAlterResetSetting,
   renderDictionarySQL,
-  columnTypeFingerprint,
-  columnCodecFingerprint,
+  keyFingerprint,
   toCreateSQL,
 } from './sql.js'
-import { literalDefaultFingerprint, parseColumnDefault, renderDefault } from './column-default.js'
+import type { ColumnStatementDefinitions } from './column-cycle-repair.js'
+import { orderColumnStatements } from './column-order.js'
+import { normalizeColumn, shapeKey } from './column-shape.js'
 import { constraintKind } from './constraint.js'
 import { readonlySettingsFingerprint } from './table-settings.js'
 import { sqlExpressionFingerprint } from './sql-normalizer.js'
@@ -154,56 +155,21 @@ function pushCreateDatabaseOperation(
   })
 }
 
-// Whitespace and identifier backtick-quoting carry no meaning in a key clause,
-// and ClickHouse normalizes both when it stores the key: `toStartOfHour( ts )`
-// comes back as `toStartOfHour(ts)`, and a column written bare as `user-id` in
-// config is stored/introspected quoted as `` `user-id` ``. Drop insignificant
-// whitespace and identifier backticks (but preserve single/double-quoted string
-// literals, which are semantic) so a config clause and the introspected clause
-// compare equal, avoiding a phantom table recreate. Comparison-only — never
-// used to render DDL, so keyword expressions like `INTERVAL 1 HOUR` and real
-// identifier quoting keep their form when emitted.
-function stripInsignificantFormatting(token: string): string {
-  let out = ''
-  let quote: "'" | '"' | null = null
-  for (let i = 0; i < token.length; i += 1) {
-    const char = token[i] ?? ''
-    if (quote) {
-      out += char
-      if (char === quote && token[i - 1] !== '\\') quote = null
-      continue
-    }
-    if (char === "'" || char === '"') {
-      quote = char
-      out += char
-      continue
-    }
-    if (char === '`') continue
-    if (/\s/.test(char)) continue
-    out += char
-  }
-  return out
-}
-
-function normalizeClauseList(value: string[] | undefined): string {
-  return (value ?? []).map(stripInsignificantFormatting).join(',')
-}
-
 function requiresTableRecreate(oldDef: TableDefinition, newDef: TableDefinition): boolean {
   return diffClauses([
     { oldValue: oldDef.engine, newValue: newDef.engine },
     {
-      oldValue: normalizeClauseList(oldDef.primaryKey),
-      newValue: normalizeClauseList(newDef.primaryKey),
+      oldValue: keyFingerprint(oldDef, oldDef.primaryKey),
+      newValue: keyFingerprint(newDef, newDef.primaryKey),
     },
     {
-      oldValue: normalizeClauseList(oldDef.orderBy),
-      newValue: normalizeClauseList(newDef.orderBy),
+      oldValue: keyFingerprint(oldDef, oldDef.orderBy),
+      newValue: keyFingerprint(newDef, newDef.orderBy),
     },
     { oldValue: oldDef.partitionBy ?? '', newValue: newDef.partitionBy ?? '' },
     {
-      oldValue: normalizeClauseList(oldDef.uniqueKey),
-      newValue: normalizeClauseList(newDef.uniqueKey),
+      oldValue: keyFingerprint(oldDef, oldDef.uniqueKey),
+      newValue: keyFingerprint(newDef, newDef.uniqueKey),
     },
     // ClickHouse refuses to change or reset these on an existing table (#466).
     {
@@ -228,31 +194,6 @@ function recreateDropRisk(oldDef: TableDefinition): RiskLevel {
 interface TableDiffResult {
   operations: MigrationOperation[]
   renameSuggestions: ColumnRenameSuggestion[]
-}
-
-function normalizeColumn(
-  column: ColumnDefinition
-): Omit<ColumnDefinition, 'name' | 'renamedFrom' | 'nullable' | 'codec'> & { codec: string } {
-  const { name: _name, renamedFrom: _renamedFrom, type: _type, nullable: _nullable, codec: _codec, ...rest } = column
-  // Compare what the DSL renders: inline Nullable(T) and nullable: true are
-  // equivalent, while an additional or differently placed wrapper is not.
-  return {
-    // ClickHouse stores `Decimal(10,2)` as `Decimal(10, 2)` (#466).
-    type: columnTypeFingerprint(column),
-    ...rest,
-    ...(column.default === undefined ? {} : { default: defaultFingerprint(column.default) }),
-    // Codecs compare in the form ClickHouse stores them, like drift (#465).
-    codec: columnCodecFingerprint(column),
-  }
-}
-
-// A literal compares by the SQL it renders, so the literal 7 and the
-// expression '7' that pull reads back are the same default (#466). An
-// expression keeps its comments, which the snapshot records as written.
-function defaultFingerprint(value: ColumnDefaultValue): string {
-  const parsed = parseColumnDefault(value)
-  const sql = parsed.kind === 'expression' ? parsed.sql : renderDefault(value)
-  return literalDefaultFingerprint(sql) ?? sql
 }
 
 function normalizeColumnWithoutCodec(
@@ -339,11 +280,11 @@ function inferColumnRenameSuggestions(
   }
 
   return suggestions.sort((a, b) => {
-    const tableOrder = `${a.database}.${a.table}`.localeCompare(`${b.database}.${b.table}`)
+    const tableOrder = compareCodePoints(`${a.database}.${a.table}`, `${b.database}.${b.table}`)
     if (tableOrder !== 0) return tableOrder
-    const fromOrder = a.from.localeCompare(b.from)
+    const fromOrder = compareCodePoints(a.from, b.from)
     if (fromOrder !== 0) return fromOrder
-    return a.to.localeCompare(b.to)
+    return compareCodePoints(a.to, b.to)
   })
 }
 
@@ -444,15 +385,6 @@ function dictionaryLifetimeFingerprint(lifetime: string): string {
 // the same tuple, and `((s))`, `(s)` and `s` the same expression.
 function indexComparisonShape(index: SkipIndexDefinition): SkipIndexDefinition {
   return { ...index, expression: sqlExpressionFingerprint(index.expression) }
-}
-
-function shapeKey(value: unknown): string {
-  return JSON.stringify(value, sortObjectKeys)
-}
-
-function sortObjectKeys(_key: string, value: unknown): unknown {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return value
-  return Object.fromEntries(Object.entries(value).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
 }
 
 function diffDictionary(
@@ -793,13 +725,15 @@ export function planDiff(
     pushCreateOperation(operations, newDef, 'safe')
   }
 
-  for (const database of [...databasesToCreate].sort((a, b) => a.localeCompare(b))) {
+  for (const database of [...databasesToCreate].sort((a, b) => compareCodePoints(a, b))) {
     pushCreateDatabaseOperation(operations, database, 'safe')
   }
 
   const ordered = orderOperations(operations.sort(compareOperations), {
     drop: invertDependencyGraph(buildDependencyGraph(oldCanonical)),
     create: buildDependencyGraph(newCanonical),
+    previous: oldCanonical,
+    next: newCanonical,
   })
 
   const riskSummary: Record<RiskLevel, number> = { safe: 0, caution: 0, danger: 0 }
@@ -811,11 +745,11 @@ export function planDiff(
     operations: ordered,
     riskSummary,
     renameSuggestions: renameSuggestions.sort((a, b) => {
-      const tableOrder = `${a.database}.${a.table}`.localeCompare(`${b.database}.${b.table}`)
+      const tableOrder = compareCodePoints(`${a.database}.${a.table}`, `${b.database}.${b.table}`)
       if (tableOrder !== 0) return tableOrder
-      const fromOrder = a.from.localeCompare(b.from)
+      const fromOrder = compareCodePoints(a.from, b.from)
       if (fromOrder !== 0) return fromOrder
-      return a.to.localeCompare(b.to)
+      return compareCodePoints(a.to, b.to)
     }),
   }
 }
@@ -842,7 +776,7 @@ function operationRank(op: MigrationOperation): number {
 // The sort is stable, so operations that share a key keep the order diffTables
 // pushed them in: a column's REMOVE DEFAULT before its MODIFY COLUMN.
 function compareOperations(a: MigrationOperation, b: MigrationOperation): number {
-  return operationRank(a) - operationRank(b) || alterRank(a) - alterRank(b) || a.key.localeCompare(b.key)
+  return operationRank(a) - operationRank(b) || alterRank(a) - alterRank(b) || compareCodePoints(a.key, b.key)
 }
 
 function alterRank(op: MigrationOperation): number {
@@ -852,18 +786,19 @@ function alterRank(op: MigrationOperation): number {
 /**
  * Reorders the drop and create segments of a (rank, key)-sorted plan by object
  * dependencies (#231): drops run dependents first, creates run dependencies
- * first. Alters and create_database keep their place.
+ * first. Alters and create_database keep their place, except that the column
+ * statements of a table are ordered by the columns they read and remove.
  */
 function orderOperations(
   sorted: MigrationOperation[],
-  prerequisites: { drop: DependencyGraph; create: DependencyGraph }
+  prerequisites: { drop: DependencyGraph; create: DependencyGraph } & ColumnStatementDefinitions
 ): MigrationOperation[] {
   const drops = sorted.filter((op) => operationRank(op) === 0)
   const middle = sorted.filter((op) => operationRank(op) === 1 || operationRank(op) === 2)
   const creates = sorted.filter((op) => operationRank(op) >= 3)
   return [
     ...orderByDependencies(drops, (op) => op.key, (key) => prerequisites.drop.get(key) ?? []),
-    ...middle,
+    ...orderColumnStatements(middle, prerequisites, []),
     ...orderByDependencies(creates, (op) => op.key, (key) => prerequisites.create.get(key) ?? []),
   ]
 }

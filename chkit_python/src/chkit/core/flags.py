@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Final, Literal, TypeAlias, TypedDict
 
+from chkit.core.sql_lexer import js_trim
+
 FlagType: TypeAlias = Literal["boolean", "string", "string[]"]
 
 ParsedFlagValue: TypeAlias = str | list[str] | bool | None
@@ -53,7 +55,7 @@ def define_flags(defs: list[FlagDef]) -> list[FlagDef]:
 
 
 def _add_array_value(flags: ParsedFlags, key: str, raw: str) -> None:
-    values = [v.strip() for v in raw.split(",")]
+    values = [js_trim(v) for v in raw.split(",")]
     values = [v for v in values if v]
     existing = flags.get(key)
     if isinstance(existing, list):

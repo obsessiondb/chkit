@@ -10,7 +10,9 @@ Runs the CLI in-process against the server in ``CLICKHOUSE_URL`` /
 
 from __future__ import annotations
 
+import functools
 import json
+import operator
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -171,8 +173,8 @@ def test_rebuilt_snapshot_matches_the_views_two_merged_branches_left_in_clickhou
         for name in (events_view, users_view):
             expected = rebuilt_sql(name)
             live_sql = _poll_until(
-                lambda name=name: _read_as_select(client, database, name),
-                lambda value, expected=expected: value == expected,
+                functools.partial(_read_as_select, client, database, name),
+                functools.partial(operator.eq, expected),
             )
             assert live_sql == expected
 

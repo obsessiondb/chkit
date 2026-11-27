@@ -11,7 +11,9 @@ from chkit.cli.commands.pull_render import render_schema_file
 from chkit.clickhouse.introspect import IntrospectedTable
 from chkit.core.model import (
     ColumnDefinition,
+    ColumnInput,
     DictionaryDefinition,
+    SkipIndexInput,
     TableDefinition,
     dictionary,
     table,
@@ -22,7 +24,7 @@ from chkit.core.planner import plan_diff
 def _events(
     default: Any = None,
     settings: dict[str, Any] | None = None,
-    indexes: list[dict[str, Any]] | None = None,
+    indexes: list[SkipIndexInput] | None = None,
 ) -> TableDefinition:
     column: dict[str, Any] = {"name": "n", "type": "UInt8"}
     if default is not None:
@@ -362,6 +364,9 @@ def test_indexes_compare_whatever_order_their_keys_are_written_in() -> None:
 
 
 def _typed(types: list[str]) -> TableDefinition:
+    typed_columns: list[ColumnInput] = [
+        {"name": f"c{i}", "type": type_} for i, type_ in enumerate(types)
+    ]
     return table(
         database="app",
         name="typed",
@@ -370,7 +375,7 @@ def _typed(types: list[str]) -> TableDefinition:
         order_by=["id"],
         columns=[
             {"name": "id", "type": "UInt64"},
-            *({"name": f"c{i}", "type": type_} for i, type_ in enumerate(types)),
+            *typed_columns,
         ],
     )
 

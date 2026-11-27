@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import inspect
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -106,11 +106,11 @@ def test_finding_18_client_exposes_introspect_methods_as_methods() -> None:
 # ---------- #12: ChxGetContextInput + getContext hook ----------
 
 
-def test_finding_12_runtime_resolves_first_non_none_get_context() -> None:
-    """Multiple plugins; first plugin returns None (defer), second returns a
-    PluginContext — runtime returns the second.
+def test_finding_12_runtime_runs_every_get_context_and_skips_none() -> None:
+    """Every get_context hook runs (#686). The first plugin returns None, so it
+    gives no executor. The runtime returns the executor of the second plugin.
     """
-    pretend_executor = object()
+    pretend_executor = cast(ClickHouseClient, object())
     seen: list[ChxPlugin] = []
 
     class _DeferringHooks:
@@ -320,7 +320,9 @@ def test_finding_13_onboarding_default_runner_is_bare_chkit(
 def test_finding_4_10_alias_set_validation_rejects_dash_prefix() -> None:
 
     assert _validate_alias("") == "Alias is required."
-    assert _validate_alias("  prod  ").startswith("Alias cannot start or end")
+    padded_error = _validate_alias("  prod  ")
+    assert padded_error is not None
+    assert padded_error.startswith("Alias cannot start or end")
     # Any leading dash reads as a flag on the command line (#491).
     for name in ("--prod", "-prod", "-"):
         assert _validate_alias(name) == 'Alias cannot start with "-".'
@@ -333,11 +335,11 @@ def test_finding_4_10_alias_set_validation_rejects_dash_prefix() -> None:
 def test_finding_17_plan_status_for_does_not_override_run_status() -> None:
 
     run = BackfillRunState(
-        planId="0" * 16,
+        plan_id="0" * 16,
         target="t",
         status="running",
-        startedAt="2026-01-01T00:00:00.000Z",
-        updatedAt="2026-01-01T00:00:00.000Z",
+        started_at="2026-01-01T00:00:00.000Z",
+        updated_at="2026-01-01T00:00:00.000Z",
     )
     assert (
         plan_status_for(

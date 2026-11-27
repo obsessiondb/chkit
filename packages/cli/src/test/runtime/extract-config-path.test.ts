@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { MissingFlagValueError } from '@chkit/core'
 
 import { extractConfigPath } from '../../runtime/extract-config-path.js'
 
@@ -23,8 +24,27 @@ describe('extractConfigPath', () => {
     expect(extractConfigPath(['query', '--', '--config', 'a.ts'])).toBeUndefined()
   })
 
-  test('first --config wins when multiple are present', () => {
-    expect(extractConfigPath(['--config', 'first.ts', '--config', 'second.ts'])).toBe('first.ts')
+  test('last --config wins when multiple are present, as parseFlags and chkit-py keep (#574)', () => {
+    expect(extractConfigPath(['--config', 'first.ts', '--config', 'second.ts'])).toBe('second.ts')
+    expect(extractConfigPath(['generate', '--config=first.ts', '--config=second.ts'])).toBe('second.ts')
+    expect(extractConfigPath(['generate', '--config', 'first.ts', '--config=second.ts'])).toBe('second.ts')
+    expect(extractConfigPath(['generate', '--config=first.ts', '--json', '--config', 'second.ts'])).toBe('second.ts')
+  })
+
+  test('a --config after "--" does not override an earlier one', () => {
+    expect(extractConfigPath(['query', '--config', 'a.ts', '--', '--config', 'b.ts'])).toBe('a.ts')
+  })
+
+  test('a --config without a value throws before any config is loaded, as parseFlags would', () => {
+    for (const argv of [
+      ['status', '--config'],
+      ['status', '--config', '--json'],
+      ['status', '--config', 'a.ts', '--config'],
+      ['status', '--config', 'a.ts', '--config', '--json'],
+      ['status', '--config', 'a.ts', '--config', '--', '--config', 'b.ts'],
+    ]) {
+      expect(() => extractConfigPath(argv)).toThrow(new MissingFlagValueError('--config'))
+    }
   })
 
   test('returns empty string when --config=  (empty value) is given', () => {

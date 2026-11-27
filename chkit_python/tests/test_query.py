@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
 from clickhouse_connect.driver.exceptions import DatabaseError  # type: ignore[import-untyped]
+from typer.main import get_command
 from typer.testing import CliRunner
 
 from chkit.cli.commands.query import (
@@ -15,7 +17,7 @@ from chkit.cli.commands.query import (
     format_query_json,
     format_rows,
 )
-from chkit.cli.main import app
+from chkit.cli.main import _looks_like_flag, _query_sql_behind_terminator, app
 from chkit.clickhouse.client import ClickHouseColumnMeta, ClickHouseJsonQueryResult
 
 CONFIG_TEMPLATE = """
@@ -36,6 +38,9 @@ config = define_config(
     }
 )
 """
+
+# CI forces rich to colour usage errors.
+ANSI_STYLE = re.compile(r"\x1b\[[0-9;]*m")
 
 CONFIG_NO_CLICKHOUSE = """
 from chkit import define_config
@@ -350,4 +355,102 @@ def test_cli_rejects_missing_clickhouse_config(
     )
     result = runner.invoke(app, ["query", "SELECT 1"])
     assert result.exit_code != 0
+    assert "No target configured" in result.output
+
+
+@pytest.mark.parametrize(
+    ("args", "flag"),
+    [
+        (["-x"], "-x"),
+        (["-x", "SELECT 1"], "-x"),
+        (["SELECT 1", "-x"], "-x"),
+        (["--bogus", "SELECT 1"], "--bogus"),
+        (["SELECT 1", "--bogus=1"], "--bogus"),
+        (["-1"], "-1"),
+    ],
+)
+def test_cli_rejects_an_unknown_flag_instead_of_reading_it_as_sql(
+    runner: CliRunner, project: Path, args: list[str], flag: str
+) -> None:
+    # #584: as TS, an unknown flag is a usage error, not SQL; reported as TS does (#563).
+    result = runner.invoke(app, ["query", *args])
+    assert result.exit_code == 1, result.output
+    assert f"Unknown flag: {flag}" in ANSI_STYLE.sub("", result.output)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["-- note\nSELECT a = 1"],
+        ["--note\nSELECT 1", "--json"],
+        ["--json", "-- note\nSELECT 1"],
+        ["--====\nSELECT 1"],
+        ["--tag=a b\nSELECT 1"],
+        ["-"],
+        ["--", "-1"],
+    ],
+)
+def test_cli_reads_sql_that_starts_with_a_dash_as_sql(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    args: list[str],
+) -> None:
+    # #584: as TS, SQL that starts with a line comment is SQL, so the command
+    # gets past argument parsing to the missing target.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    (tmp_path / "clickhouse.config.py").write_text(
+        CONFIG_NO_CLICKHOUSE, encoding="utf-8"
+    )
+    result = runner.invoke(app, ["query", *args])
+    assert result.exit_code == 1, result.output
+    assert "No target configured" in result.output
+
+
+def test_query_sql_goes_behind_the_terminator_and_option_values_stay() -> None:
+    params = get_command(app).commands["query"].params  # type: ignore[attr-defined]
+    assert _query_sql_behind_terminator(
+        ["-- c\nSELECT 1", "--service", "-- not sql", "-x", "SELECT 2", "--", "-1"],
+        params,
+    ) == ["--service", "-- not sql", "-x", "--", "-- c\nSELECT 1", "SELECT 2", "-1"]
+    assert _query_sql_behind_terminator(["--json", "-c=x"], params) == [
+        "--json",
+        "-c=x",
+    ]
+    # A declared option's attached value may hold spaces.
+    assert _query_sql_behind_terminator(
+        ["-c/my dir/c.py", "--config=/my dir/c.py", "SELECT 1"], params
+    ) == ["-c/my dir/c.py", "--config=/my dir/c.py", "--", "SELECT 1"]
+
+
+@pytest.mark.parametrize(
+    ("token", "is_flag"),
+    [
+        ("-x", True),
+        ("--bogus=a b", True),
+        ("-\x1cx", True),  # not whitespace in JavaScript
+        ("-- note", False),
+        ("--tag=x\nSELECT 1", False),
+        ("-\u00a0x", False),
+        ("-\ufeffx", False),
+        ("-", False),
+    ],
+)
+def test_looks_like_flag_matches_ts(token: str, is_flag: bool) -> None:
+    assert _looks_like_flag(token) is is_flag
+
+
+def test_cli_reads_an_attached_config_path_with_spaces(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_dir = tmp_path / "my project"
+    config_dir.mkdir()
+    (config_dir / "clickhouse.config.py").write_text(CONFIG_NO_CLICKHOUSE, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    result = runner.invoke(
+        app, ["query", f"-c{config_dir / 'clickhouse.config.py'}", "SELECT 1"]
+    )
+    assert result.exit_code == 1, result.output
     assert "No target configured" in result.output

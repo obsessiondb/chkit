@@ -13,7 +13,8 @@ projections). Returns ``None`` when shapes are identical.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from typing import Literal, Protocol, TypeAlias
 
 from chkit.cli.commands.drift_diff import (
@@ -21,18 +22,38 @@ from chkit.cli.commands.drift_diff import (
     diff_named_shape_maps,
     diff_settings,
 )
-from chkit.clickhouse.introspect import IntrospectedTable, IntrospectedView, SchemaObjectKind
+from chkit.cli.logging_setup import debug
+from chkit.clickhouse.create_dictionary_parser import (
+    parse_attribute_list_text_from_create_dictionary_query,
+    parse_dictionary_primary_key_from_create_dictionary_query,
+    parse_dictionary_range_from_create_dictionary_query,
+    parse_dictionary_settings_from_create_dictionary_query,
+    parse_layout_from_create_dictionary_query,
+    parse_lifetime_from_create_dictionary_query,
+    parse_source_from_create_dictionary_query,
+    replace_source_in_create_dictionary_query,
+)
+from chkit.clickhouse.introspect import (
+    IntrospectedDictionary,
+    IntrospectedTable,
+    IntrospectedView,
+    SchemaObjectKind,
+)
+from chkit.clickhouse.replicas import string_literal
 from chkit.core.column_default import literal_default_fingerprint, render_default
 from chkit.core.constraint import constraint_expression, constraint_kind
-from chkit.core.identifier import unquote_identifiers
+from chkit.core.engine import replicated_engine_as_shared
+from chkit.core.jsnum import js_number_to_string
 from chkit.core.kafka import is_kafka_engine, kafka_setting_fingerprint, parse_kafka_settings
-from chkit.core.key_clause import split_top_level_comma
+from chkit.core.key_clause import key_clause_fingerprint, split_top_level_comma
 from chkit.core.model import (
     ColumnDefinition,
+    DictionaryDefinition,
     MaterializedViewDefinition,
     ProjectionDefinition,
     SkipIndexDefinition,
     SkipIndexRaw,
+    SkipIndexText,
     SkipIndexVectorSimilarity,
     TableConstraintDefinition,
     TableDefinition,
@@ -42,13 +63,15 @@ from chkit.core.projection import is_index_projection, normalize_projection_inde
 from chkit.core.sql import (
     column_codec_fingerprint,
     column_type_fingerprint,
+    render_dictionary_sql,
     render_key_clause_columns,
 )
 from chkit.core.sql_lexer import (
-    JS_WHITESPACE_RUN,
+    SQLToken,
     identifier_name,
     is_trivia,
     js_trim,
+    string_literal_value,
     tokenize_sql,
 )
 from chkit.core.sql_normalizer import (
@@ -57,8 +80,13 @@ from chkit.core.sql_normalizer import (
     normalize_sql_fragment,
     sql_expression_fingerprint,
 )
+from chkit.core.sql_scan import find_matching_paren
 from chkit.core.table_settings import DEFAULT_INDEX_GRANULARITY, with_default_index_granularity
-from chkit.core.text_index import render_text_index_type, text_index_fingerprint
+from chkit.core.text_index import (
+    canonicalize_text_index,
+    render_text_index_type,
+    text_index_fingerprint,
+)
 from chkit.core.vector_index import render_vector_index_type
 
 ObjectDriftReasonCode: TypeAlias = Literal[
@@ -68,6 +96,11 @@ ObjectDriftReasonCode: TypeAlias = Literal[
     "query_mismatch",
     "target_mismatch",
     "comment_mismatch",
+    "source_mismatch",
+    "structure_mismatch",
+    "layout_mismatch",
+    "lifetime_mismatch",
+    "dictionary_setting_mismatch",
 ]
 
 TableDriftReasonCode: TypeAlias = Literal[
@@ -153,13 +186,12 @@ class ObjectDriftDetail:
     object: str
     expected_kind: SchemaObjectKind | None = None
     actual_kind: SchemaObjectKind | None = None
-    # query_mismatch / target_mismatch / comment_mismatch: the compared query,
-    # ``TO`` target or comment.
+    # Any code that compares two values: the schema's value and the live one.
     expected: str | None = None
     actual: str | None = None
 
 
-# What ClickHouse stores in place of a secret in a view's query.
+# What ClickHouse stores in place of a secret in a view's query or a dictionary's source.
 _HIDDEN_SECRET = "'[HIDDEN]'"
 
 
@@ -331,15 +363,46 @@ def summarize_drift_reasons(
     )
 
 
-def _normalize_column_shape(column: ColumnDefinition) -> str:
-    rendered = None if column.default is None else render_default(column.default)
+def _live_columns(actual: IntrospectedTable) -> list[ColumnDefinition]:
+    # system.columns stores SQL, whereas schema strings are literals unless fn:-prefixed.
+    return [
+        column.model_copy(update={"default": f"fn:{column.default}"})
+        if isinstance(column.default, str) and not column.default.startswith("fn:")
+        else column
+        for column in actual.columns
+    ]
+
+
+def _column_default_sql(column: ColumnDefinition) -> str | None:
     # ClickHouse stores a bare EPHEMERAL column as defaultValueOfTypeName('<type>'),
     # which introspection reads back as no expression; an explicit one matches it.
+    if column.default is None:
+        return None
+    rendered = render_default(column.default)
+    if column.default_kind == "EPHEMERAL" and is_synthetic_ephemeral_default(rendered):
+        return None
+    return rendered
+
+
+def _canonicalize_default(rendered: str, canonicalizer: SqlCanonicalizer | None) -> str:
+    canonical = None if canonicalizer is None else canonicalizer.expression(js_trim(rendered))
+    return rendered if canonical is None else canonical
+
+
+def _normalize_column_shape(
+    column: ColumnDefinition, canonicalizer: SqlCanonicalizer | None = None
+) -> str:
+    # A DEFAULT, MATERIALIZED or ALIAS expression goes through the canonicalizer,
+    # since ClickHouse re-formats it when it stores it (``id*2+1`` comes back as
+    # ``(id * 2) + 1``). A literal compares by its value (#466).
+    rendered = _column_default_sql(column)
     normalized_default = (
         ""
         if rendered is None
-        or (column.default_kind == "EPHEMERAL" and is_synthetic_ephemeral_default(rendered))
-        else (literal_default_fingerprint(rendered) or sql_expression_fingerprint(rendered))
+        else (
+            literal_default_fingerprint(rendered)
+            or sql_expression_fingerprint(_canonicalize_default(rendered, canonicalizer))
+        )
     )
 
     # Introspection unwraps Nullable(T) into type=T plus nullable=True, and
@@ -348,7 +411,7 @@ def _normalize_column_shape(column: ColumnDefinition) -> str:
         f"type={column_type_fingerprint(column)}",
         f"default={normalized_default}",
         f"defaultKind={column.default_kind or 'DEFAULT'}",
-        f"comment={(column.comment or '').strip()}",
+        f"comment={js_trim(column.comment or '')}",
         f"codec={column_codec_fingerprint(column)}",
     ]
     return "|".join(parts)
@@ -407,11 +470,30 @@ def _index_expression_base(index: SkipIndexDefinition) -> str:
         expression = js_trim(expression[tokens[0].end : tokens[-1].start])
 
 
+def _text_index_expression_base(index: SkipIndexText) -> str:
+    """The text index expression as the canonicalizer looks it up.
+
+    ClickHouse re-formats a text index expression when it stores it, e.g.
+    ``NOT a AND b`` comes back as ``(NOT a) AND b``, so the expression goes
+    through the canonicalizer like any other index expression. It is read with
+    the text index lexer rather than ``normalize_sql_fragment``, which would
+    collapse the spaces inside its string literals.
+    """
+    return canonicalize_text_index(index).expression
+
+
 def _normalize_index_shape(
     index: SkipIndexDefinition, canonicalizer: SqlCanonicalizer | None = None
 ) -> str:
-    if index.type == "text":
-        return text_index_fingerprint(index)
+    if isinstance(index, SkipIndexText):
+        canonical = (
+            None
+            if canonicalizer is None
+            else canonicalizer.expression(_text_index_expression_base(index))
+        )
+        return text_index_fingerprint(
+            index if canonical is None else index.model_copy(update={"expression": canonical})
+        )
     expression = _canonicalize_expression(_index_expression_base(index), canonicalizer)
     return "|".join(
         [
@@ -455,16 +537,19 @@ def _normalize_projection_shape(
 
 
 _WRAPPED_RE = re.compile(r"^\((.*)\)$")
+# Tokens are joined by single spaces, and only a ``)`` token ends in `` )``.
+_WRAPPED_TOKENS_RE = re.compile(r"\( (.+) \)")
 
 
 def _normalize_clause(value: str | None, canonicalizer: SqlCanonicalizer | None = None) -> str:
     # Key and partition clauses are compared as SQL: comments are removed while
-    # quoted names still carry their backticks (#232), then the names are
-    # unquoted, since ClickHouse re-renders identifiers with its own quoting and
-    # escaping, and one pair of parentheses around the whole clause is dropped.
-    # From there on only whitespace is collapsed: unquoted, `user--id` would
-    # read as `user` followed by a comment. For the same reason a canonicalizer
-    # sees each element while its names are still quoted.
+    # quoted names still carry their backticks (#232). Then each side is
+    # compared by its tokens, where a name matches however ClickHouse re-quotes
+    # it and keeps its commas and spaces: `a, b` quoted is one column, not `a`
+    # and `b` (#558). One pair of parentheses around the whole clause is
+    # dropped. A canonicalizer sees each element while its names are still
+    # quoted, since unquoted, `user--id` would read as `user` followed by a
+    # comment.
     if not value:
         return ""
     sql = normalize_sql_fragment(value)
@@ -475,9 +560,9 @@ def _normalize_clause(value: str | None, canonicalizer: SqlCanonicalizer | None 
         if canonicalizer is not None
         else sql
     )
-    unquoted = js_trim(JS_WHITESPACE_RUN.sub(" ", unquote_identifiers(canonical)))
-    wrapped = _WRAPPED_RE.match(unquoted)
-    return js_trim(wrapped.group(1)) if wrapped is not None and wrapped.group(1) else unquoted
+    tokens = key_clause_fingerprint(canonical)
+    wrapped = _WRAPPED_TOKENS_RE.fullmatch(tokens)
+    return wrapped.group(1) if wrapped is not None else tokens
 
 
 def _clause_elements(sql: str) -> list[str]:
@@ -515,10 +600,119 @@ def _table_clauses(
     }
 
 
+# Keywords the server rewrites in engine arguments: ``is null`` reads back as
+# ``IS NULL``, ``TRUE`` as ``true``. A bare ``true``, ``false`` or ``null`` is always a literal.
+_ENGINE_LITERAL_KEYWORDS = frozenset({"null", "true", "false"})
+_ENGINE_OPERATOR_KEYWORDS = frozenset(
+    {"and", "or", "not", "is", "in", "like", "ilike", "distinct", "from", "global"}
+)
+# The operator keywords that can open an expression (``NOT x``, ``count(DISTINCT x)``);
+# the others always follow an operand.
+_ENGINE_PREFIX_KEYWORDS = frozenset({"not", "distinct"})
+# Names the server keeps quoted because they read back as a literal when bare
+# (writeProbablyQuotedStringImpl): ``true`` is a Bool, ```true``` a column.
+_ENGINE_LITERAL_NAMES = frozenset({"null", "true", "false", "inf", "infinity", "nan"})
+# Keywords the server quotes as names from some version on: 26.3 writes a
+# ``cube`` column bare, later versions ```cube```.
+_ENGINE_KEYWORD_NAMES = frozenset(
+    {"distinct", "all", "some", "table", "select", "cube", "rollup", "recursive"}
+)
+_BARE_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
 def _normalize_engine_for_compare(value: str | None) -> str:
+    """Column names and string literals in engine arguments are case-sensitive,
+    so they keep their case (#673). Function names (``RAND()`` reads back as
+    ``rand()``) and operator keywords do not, and whitespace between tokens is
+    insignificant. An operator keyword where an operand belongs
+    (``if(And > 1, 1, 0)``) can only be a column. A quoted name compares as the
+    server writes it back (#679)."""
     if not value:
         return ""
-    return normalize_engine(normalize_sql_fragment(value)).lower()
+    lexed = [
+        token
+        for token in tokenize_sql(normalize_engine(normalize_sql_fragment(value)))
+        if not is_trivia(token)
+    ]
+    tokens = [
+        _unquote_engine_name(
+            token,
+            lexed[index - 1] if index > 0 else None,
+            lexed[index + 1] if index + 1 < len(lexed) else None,
+        )
+        for index, token in enumerate(lexed)
+    ]
+
+    def normalized(index: int) -> str:
+        token = tokens[index]
+        if token.kind != "identifier":
+            return token.text
+        lower = token.text.lower()
+        previous = tokens[index - 1] if index > 0 else None
+        following = tokens[index + 1] if index + 1 < len(tokens) else None
+        keyword = lower in _ENGINE_LITERAL_KEYWORDS or _is_operator_keyword(
+            lower, previous, following
+        )
+        function = following is not None and following.text == "("
+        return lower if function or keyword else token.text
+
+    return " ".join(normalized(index) for index in range(len(tokens)))
+
+
+def _unquote_engine_name(
+    token: SQLToken, previous: SQLToken | None, following: SQLToken | None
+) -> SQLToken:
+    """The server writes a quoted name bare when the quotes are not needed:
+    ``Ver`` for ```Ver``` or ``"Ver"``, and ``Null`` for an engine or function
+    name, which the server itself writes as ```Null```. A name that needs its
+    quotes keeps them, in backticks, so different names never compare equal. An
+    unquoted name stays a quoted identifier, so it keeps its case even where a
+    keyword could be."""
+    name = identifier_name(token) if token.kind == "quoted_identifier" else None
+    if name is None:
+        return token
+    if _BARE_NAME_RE.fullmatch(name) is None:
+        return replace(token, text="`" + name.replace("\\", "\\\\").replace("`", "\\`") + "`")
+    if following is not None and following.text == "(":
+        return replace(token, kind="identifier", text=name)
+    lower = name.lower()
+    keeps_quotes = lower in _ENGINE_LITERAL_NAMES or (
+        lower in _ENGINE_KEYWORD_NAMES and (_ends_operand(previous) or _starts_operand(following))
+    )
+    return replace(token, text=f"`{name}`" if keeps_quotes else name)
+
+
+def _is_operator_keyword(lower: str, previous: SQLToken | None, following: SQLToken | None) -> bool:
+    if lower not in _ENGINE_OPERATOR_KEYWORDS:
+        return False
+    return _ends_operand(previous) or (
+        lower in _ENGINE_PREFIX_KEYWORDS and _starts_operand(following)
+    )
+
+
+def _ends_operand(token: SQLToken | None) -> bool:
+    return token is not None and (_is_value_token(token) or token.text in (")", "]"))
+
+
+def _starts_operand(token: SQLToken | None) -> bool:
+    return token is not None and (_is_value_token(token) or token.text == "(")
+
+
+def _is_value_token(token: SQLToken) -> bool:
+    return token.kind in ("identifier", "quoted_identifier", "number", "string")
+
+
+def _engines_match(expected: str | None, actual: str | None) -> bool:
+    """ObsessionDB and ClickHouse Cloud store a ``Replicated*MergeTree`` table as
+    ``Shared*MergeTree``, without the Keeper path and replica name (#669)."""
+    if _normalize_engine_for_compare(expected) == _normalize_engine_for_compare(actual):
+        return True
+    if not expected or not actual or not js_trim(actual).startswith("Shared"):
+        return False
+    shared = replicated_engine_as_shared(expected)
+    return shared is not None and _normalize_engine_for_compare(
+        shared
+    ) == _normalize_engine_for_compare(actual)
 
 
 def collect_table_sql_fragments(
@@ -527,15 +721,24 @@ def collect_table_sql_fragments(
     """Every SQL fragment ``compare_table_shape`` will look up in a canonicalizer.
 
     Collected at the exact granularity it looks them up (whole expressions for
-    index/ttl, per-element for key/partition clauses, whole query for SELECT
-    projections). The drift command collects these across all compared tables,
-    formats them in one round-trip, and hands back a map-backed canonicalizer.
+    column defaults and index/ttl, per-element for key/partition clauses, whole
+    query for SELECT projections). The drift command collects these across all
+    compared tables, formats them in one round-trip, and hands back a map-backed
+    canonicalizer.
     """
     expressions = [
-        _index_expression_base(index)
-        for index in [*(expected.indexes or []), *actual.indexes]
-        if index.type != "text"
+        js_trim(sql)
+        for sql in (
+            _column_default_sql(column) for column in [*expected.columns, *_live_columns(actual)]
+        )
+        if sql is not None and literal_default_fingerprint(sql) is None
     ]
+    expressions.extend(
+        _text_index_expression_base(index)
+        if isinstance(index, SkipIndexText)
+        else _index_expression_base(index)
+        for index in [*(expected.indexes or []), *actual.indexes]
+    )
     expressions.extend(
         _render_index_type_fingerprint(index)
         for index in [*(expected.indexes or []), *actual.indexes]
@@ -571,14 +774,9 @@ def compare_table_shape(  # noqa: PLR0912, PLR0915
     that does not show index_granularity."""
     column_diff = diff_by_name(
         expected.columns,
-        [
-            column.model_copy(update={"default": f"fn:{column.default}"})
-            if isinstance(column.default, str) and not column.default.startswith("fn:")
-            else column
-            for column in actual.columns
-        ],
+        _live_columns(actual),
         lambda c: c.name,
-        _normalize_column_shape,
+        lambda c: _normalize_column_shape(c, canonicalizer),
     )
     missing_columns = column_diff.missing
     extra_columns = column_diff.extra
@@ -618,9 +816,7 @@ def compare_table_shape(  # noqa: PLR0912, PLR0915
     )
     ttl_mismatch = expected_ttl != actual_ttl
 
-    engine_mismatch = _normalize_engine_for_compare(
-        expected.engine
-    ) != _normalize_engine_for_compare(actual.engine)
+    engine_mismatch = not _engines_match(expected.engine, actual.engine)
 
     clauses = _table_clauses(expected, actual)
     expected_pk = _normalize_clause(clauses["primary_key"][0], canonicalizer)
@@ -803,3 +999,371 @@ def _strip_database_qualifier(sql: str, database: str) -> str:
         out.append(token.text)
         i += 1
     return "".join(out)
+
+
+# Source keys whose whole value is a secret: the keys ClickHouse hides, and the
+# keys newer ClickHouse versions hide but 26.3 stores in clear. Drift hides them
+# on both sides, so ``expected`` never shows one.
+_SECRET_SOURCE_KEYS = frozenset(
+    {
+        "PASSWORD",
+        "HEADERS",
+        "HEADER",
+        "CONNECTION_STRING",
+        "DATASOURCE",
+        "OAUTH_TOKEN",
+        "SSL_CA_PEM",
+        "SSL_CERT_PEM",
+        "SSL_KEY_PEM",
+        "SSL_KEY_PASSPHRASE",
+        "SSLROOTCERT_PEM",
+        "SSLCERT_PEM",
+        "SSLKEY_PEM",
+    }
+)
+
+# The user info of a URL. ClickHouse 26.3 hides only the password of a MongoDB
+# ``URI`` and stores an HTTP ``URL`` in clear; drift hides the user info of every
+# URL on both sides.
+_URL_USERINFO = re.compile(r"^([a-zA-Z][a-zA-Z0-9+.-]*://)[^/?#]+@")
+_URL_SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
+
+# Query parameters whose value is a secret, as ClickHouse after 26.3 hides them
+# in a URL: the name, percent-decoded and in lower case, contains one of these
+# words, or is ``sig``. ClickHouse 26.3 stores them in clear.
+_SECRET_PARAMETER_WORDS = (
+    "secret",
+    "password",
+    "passwd",
+    "token",
+    "credential",
+    "signature",
+    "key",
+)
+_PERCENT_ESCAPE = re.compile(r"%([0-9a-fA-F]{2})")
+_HEX_PAIR = re.compile(r"[0-9a-fA-F]{2}")
+# ClickHouse drops the backslash before a control character (code 0-31).
+_LAST_CONTROL_CHAR = 31
+
+# The C escapes ClickHouse reads in a quoted string, by the letter after the backslash.
+_QUOTED_STRING_ESCAPES = {
+    "a": "\x07",
+    "b": "\b",
+    "e": "\x1b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "v": "\v",
+    "0": "\0",
+}
+
+# The characters ClickHouse escapes when it writes a quoted string, and the
+# letter it writes after the backslash.
+_QUOTED_STRING_LETTERS = {
+    "\b": "b",
+    "\f": "f",
+    "\n": "n",
+    "\r": "r",
+    "\t": "t",
+    "\0": "0",
+    "\\": "\\",
+    "'": "'",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class DictionarySqlQueries:
+    """The two statements ``compare_dictionary_shape`` formats, and the live SOURCE it compares.
+
+    Both statements have ``SOURCE(NULL())`` and no comment.
+    """
+
+    expected: str
+    actual: str
+    actual_source: str
+
+
+@dataclass(frozen=True, slots=True)
+class _SourcePair:
+    """A ``SOURCE`` key and its value: a literal, or a group of pairs in parentheses."""
+
+    key: str
+    value: str | list[_SourcePair]
+
+
+def collect_dictionary_sql_queries(
+    expected: DictionaryDefinition, actual: IntrospectedDictionary
+) -> DictionarySqlQueries | None:
+    """The statements ``compare_dictionary_shape`` formats.
+
+    None when the live statement has no single top-level ``SOURCE`` or can't be
+    read whole. Then nothing of it reaches the formatter, which logs its input
+    in ``system.query_log``, and the dictionary is not compared.
+    """
+    actual_source = parse_source_from_create_dictionary_query(actual.create_query)
+    actual_query = replace_source_in_create_dictionary_query(actual.create_query, "NULL()")
+    if actual_source is None or actual_query is None:
+        return None
+    definition = expected.model_copy(update={"source": "NULL()", "comment": None})
+    return DictionarySqlQueries(
+        expected=render_dictionary_sql(definition).removesuffix(";"),
+        actual=_without_comment(actual_query),
+        actual_source=actual_source,
+    )
+
+
+def compare_dictionary_shape(
+    expected: DictionaryDefinition,
+    queries: DictionarySqlQueries | None,
+    canonicalizer: SqlCanonicalizer | None = None,
+) -> list[ObjectDriftDetail]:
+    """Compare a dictionary with the live one, clause by clause.
+
+    ``queries`` is what ``collect_dictionary_sql_queries`` returned for the pair.
+
+    The attributes, primary key and ``RANGE`` (together the structure),
+    ``LAYOUT``, ``LIFETIME`` and ``SETTINGS`` are compared as ClickHouse's
+    formatter renders them, as view queries are: when either statement can't be
+    formatted, they are not compared. Both statements reach the formatter with
+    ``SOURCE(NULL())``, because the formatter shows secrets and logs its input
+    in ``system.query_log``.
+
+    ``SOURCE`` is compared locally, with its keys in any order. Both sides are
+    rendered as ClickHouse stores a source, with secret values replaced by
+    ``[HIDDEN]``, so ``expected`` never shows a schema secret and a change to a
+    secret alone is not drift. ``SOURCE`` is not compared when ClickHouse hid a
+    value that drift does not hide, or when a value is a function call, which
+    ClickHouse stores evaluated. When the live ``SOURCE`` can't be parsed, the
+    dictionary is not compared.
+    """
+    obj = f"{expected.database}.{expected.name}"
+    if queries is None:
+        debug("drift", f"{obj}: live SOURCE not parsed, dictionary not compared")
+        return []
+    actual_source = queries.actual_source
+    drift: list[ObjectDriftDetail] = []
+    expected_source = _normalize_dictionary_source(expected.source)
+    actual_source_shape = _normalize_dictionary_source(actual_source)
+    unhidden_masks = _normalize_dictionary_source(actual_source.replace("[HIDDEN]", "x"))
+    if expected_source is None or actual_source_shape is None:
+        debug("drift", f"{obj}: SOURCE not compared, it holds a function call or another shape")
+    elif unhidden_masks is None or actual_source_shape[1] != unhidden_masks[1]:
+        debug("drift", f"{obj}: SOURCE not compared, ClickHouse hid a value drift does not hide")
+    elif expected_source[1] != actual_source_shape[1]:
+        drift.append(
+            ObjectDriftDetail(
+                code="source_mismatch",
+                object=obj,
+                expected=expected_source[0],
+                actual=actual_source_shape[0],
+            )
+        )
+    expected_formatted = canonicalizer.query(queries.expected) if canonicalizer else None
+    actual_formatted = canonicalizer.query(queries.actual) if canonicalizer else None
+    if not expected_formatted or not actual_formatted:
+        debug("drift", f"{obj}: dictionary clauses not compared, the server could not format them")
+        return drift
+    for code, read in _DICTIONARY_CLAUSES:
+        expected_clause = read(expected_formatted)
+        actual_clause = read(actual_formatted)
+        if expected_clause != actual_clause:
+            drift.append(
+                ObjectDriftDetail(
+                    code=code, object=obj, expected=expected_clause, actual=actual_clause
+                )
+            )
+    return drift
+
+
+def _dictionary_structure(query: str) -> str:
+    attributes = parse_attribute_list_text_from_create_dictionary_query(query) or ""
+    primary_key = ", ".join(parse_dictionary_primary_key_from_create_dictionary_query(query))
+    range_ = parse_dictionary_range_from_create_dictionary_query(query)
+    range_text = "" if range_ is None else f" RANGE(MIN {range_[0]} MAX {range_[1]})"
+    return f"({attributes}) PRIMARY KEY {primary_key}{range_text}"
+
+
+def _dictionary_settings(query: str) -> str:
+    """Sorted by name: the snapshot sorts dictionary settings, ClickHouse keeps them as written."""
+    settings = parse_dictionary_settings_from_create_dictionary_query(query) or {}
+    return ", ".join(
+        f"{key} = {string_literal(value) if isinstance(value, str) else js_number_to_string(value)}"
+        for key, value in sorted(settings.items())
+    )
+
+
+# The clauses ``compare_dictionary_shape`` reads from both formatted statements, by drift code.
+_DICTIONARY_CLAUSES: tuple[tuple[ObjectDriftReasonCode, Callable[[str], str]], ...] = (
+    ("structure_mismatch", _dictionary_structure),
+    ("layout_mismatch", lambda query: parse_layout_from_create_dictionary_query(query) or ""),
+    ("lifetime_mismatch", lambda query: parse_lifetime_from_create_dictionary_query(query) or ""),
+    ("dictionary_setting_mismatch", _dictionary_settings),
+)
+
+
+def _normalize_dictionary_source(source: str) -> tuple[str, str] | None:
+    """A dictionary ``SOURCE`` body as ClickHouse stores it, and the same sorted.
+
+    The first string has the keys and the source name in upper case, strings
+    quoted with backslashes, and secret values replaced by ``[HIDDEN]``. The
+    second has the pairs of each group in sorted order, for comparing:
+    ClickHouse keeps the order as written. None when the source is not a list
+    of ``KEY value`` pairs, or a value is a function call.
+    """
+    tokens = [token for token in tokenize_sql(source) if not is_trivia(token)]
+    parsed = _parse_source_pairs(source, tokens, 0)
+    if parsed is None or parsed[1] != len(tokens):
+        return None
+    return (
+        _render_source_pairs(parsed[0], sorted_=False),
+        _render_source_pairs(parsed[0], sorted_=True),
+    )
+
+
+def _parse_source_pairs(
+    source: str, tokens: list[SQLToken], start: int
+) -> tuple[list[_SourcePair], int] | None:
+    """The pairs from ``tokens[start]`` up to the ``)`` that closes their group, or the end."""
+    pairs: list[_SourcePair] = []
+    i = start
+    while i < len(tokens) and tokens[i].text != ")":
+        key_token = tokens[i]
+        if key_token.kind != "identifier" or i + 1 >= len(tokens) or tokens[i + 1].text == ")":
+            return None
+        key = key_token.text.upper()
+        value_token = tokens[i + 1]
+        if value_token.text == "(":
+            close_at = find_matching_paren(source, value_token.start)
+            close = next((j for j, token in enumerate(tokens) if token.start == close_at), None)
+            if close is None:
+                return None
+            if key in _SECRET_SOURCE_KEYS:
+                pairs.append(_SourcePair(key, "('[HIDDEN]')"))
+            else:
+                group = _parse_source_pairs(source, tokens, i + 2)
+                if group is None or group[1] != close:
+                    return None
+                pairs.append(_SourcePair(key, group[0]))
+            i = close + 1
+            continue
+        # A signed number, such as ``PRIORITY -1``, stored without the space.
+        signed = (
+            value_token.text in ("-", "+")
+            and i + 2 < len(tokens)
+            and tokens[i + 2].kind == "number"
+        )
+        value_end = i + 2 if signed else i + 1
+        # A function call, such as ``DB currentDatabase()``: ClickHouse stores its result.
+        if value_end + 1 < len(tokens) and tokens[value_end + 1].text == "(":
+            return None
+        if signed:
+            value = f"{'-' if value_token.text == '-' else ''}{tokens[i + 2].text}"
+        else:
+            value = _source_value_text(value_token)
+        pairs.append(_SourcePair(key, _HIDDEN_SECRET if key in _SECRET_SOURCE_KEYS else value))
+        i = value_end + 1
+    return (pairs, i)
+
+
+def _render_source_pairs(pairs: list[_SourcePair], *, sorted_: bool, nested: bool = False) -> str:
+    """``NAME(`` for the source name, ``KEY (`` for a nested group, as ClickHouse prints them."""
+    rendered = [
+        f"{pair.key} {pair.value}"
+        if isinstance(pair.value, str)
+        else f"{pair.key}{' ' if nested else ''}"
+        f"({_render_source_pairs(pair.value, sorted_=sorted_, nested=True)})"
+        for pair in pairs
+    ]
+    return " ".join(sorted(rendered) if sorted_ else rendered)
+
+
+def _source_value_text(token: SQLToken) -> str:
+    if token.kind != "string" or not token.terminated:
+        return token.text
+    value = (
+        _read_quoted_string(token.text)
+        if token.text.startswith("'")
+        else string_literal_value(token)
+    )
+    return token.text if value is None else _write_quoted_string(_mask_url_credentials(value))
+
+
+def _read_quoted_string(text: str) -> str:
+    """The value of a ``'...'`` literal, decoded as ClickHouse reads it.
+
+    ``\\n``, ``\\t`` and the other C escapes, ``\\xHH``, and a doubled quote are
+    decoded. A backslash before a character that needs no escape stays, so
+    ``'a\\%'`` is ``a\\%``.
+    """
+    body = text[1:-1]
+    out: list[str] = []
+    i = 0
+    while i < len(body):
+        char = body[i]
+        if char == "'" and body[i + 1 : i + 2] == "'":
+            out.append("'")
+            i += 1
+        elif char != "\\" or i + 1 == len(body):
+            out.append(char)
+        elif body[i + 1] == "x" and _HEX_PAIR.fullmatch(body[i + 2 : i + 4]):
+            out.append(chr(int(body[i + 2 : i + 4], 16)))
+            i += 3
+        else:
+            following = body[i + 1]
+            decoded = _QUOTED_STRING_ESCAPES.get(following, following)
+            kept = decoded not in "\\'\"`/=" and ord(decoded) > _LAST_CONTROL_CHAR
+            # ``\\N`` reads as nothing.
+            if following != "N":
+                out.append(f"\\{decoded}" if kept else decoded)
+            i += 1
+        i += 1
+    return "".join(out)
+
+
+def _write_quoted_string(value: str) -> str:
+    """A ``'...'`` literal as ClickHouse writes it."""
+    escaped = "".join(
+        f"\\{_QUOTED_STRING_LETTERS[char]}" if char in _QUOTED_STRING_LETTERS else char
+        for char in value
+    )
+    return f"'{escaped}'"
+
+
+def _without_comment(query: str) -> str:
+    """The statement without its trailing ``COMMENT '...'``: its text could look like a clause."""
+    tokens = [token for token in tokenize_sql(query) if not is_trivia(token)]
+    keyword, comment = [None, None, *tokens][-2:]
+    if (
+        keyword is not None
+        and comment is not None
+        and keyword.kind == "identifier"
+        and keyword.text.upper() == "COMMENT"
+        and comment.kind == "string"
+    ):
+        return query[: keyword.start].rstrip()
+    return query
+
+
+def _mask_url_credentials(value: str) -> str:
+    """A URL with its user info and its secret query parameter values replaced by ``[HIDDEN]``."""
+    if _URL_SCHEME.match(value) is None:
+        return value
+    url = _URL_USERINFO.sub(r"\1[HIDDEN]@", value)
+    question = url.find("?")
+    if question == -1:
+        return url
+    parameters = []
+    for parameter in url[question + 1 :].split("&"):
+        equals = parameter.find("=")
+        if equals == -1 or not _is_secret_parameter_name(parameter[:equals]):
+            parameters.append(parameter)
+        else:
+            parameters.append(f"{parameter[:equals]}=[HIDDEN]")
+    return f"{url[: question + 1]}{'&'.join(parameters)}"
+
+
+def _is_secret_parameter_name(raw_name: str) -> bool:
+    decoded = _PERCENT_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)), raw_name.replace("+", " "))
+    name = decoded.lower()
+    return name == "sig" or any(word in name for word in _SECRET_PARAMETER_WORDS)

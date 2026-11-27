@@ -59,6 +59,13 @@ def _captured_log() -> tuple[list[str], list[object]]:
     return str_msgs, objs
 
 
+def _no_services(httpx_mock: HTTPXMock) -> None:
+    """Login offers a service after signing in; these tests have none to offer."""
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/services/listAll", json={"json": {"organizations": []}}
+    )
+
+
 # ---------- helpers ----------
 
 
@@ -89,6 +96,7 @@ def test_login_short_circuits_when_session_still_valid(
         url=f"{BASE}/api/auth/get-session",
         json={"user": {"id": "u", "email": "alice@example.com", "name": "A"}},
     )
+    _no_services(httpx_mock)
     messages: list[str] = []
     exit_code = run_login(BASE, tmp_path / "config.py", messages.append)
     assert exit_code == 0
@@ -116,6 +124,7 @@ def test_login_runs_full_flow_when_no_creds(
         url=f"{BASE}/api/auth/get-session",
         json={"user": {"id": "u", "email": "alice@example.com", "name": "A"}},
     )
+    _no_services(httpx_mock)
     messages: list[str] = []
     code = run_login(BASE, tmp_path / "config.py", messages.append)
     assert code == 0
@@ -151,6 +160,7 @@ def test_login_clears_stored_creds_when_session_fails(
         url=f"{BASE}/api/auth/get-session",
         json={"user": {"id": "u", "email": "alice@example.com", "name": "A"}},
     )
+    _no_services(httpx_mock)
     messages: list[str] = []
     code = run_login(BASE, tmp_path / "config.py", messages.append)
     assert code == 0
@@ -339,6 +349,7 @@ def test_plugin_dispatches_to_login_command(
         url=f"{BASE}/api/auth/get-session",
         json={"user": {"id": "u", "email": "alice@example.com", "name": "A"}},
     )
+    _no_services(httpx_mock)
 
     config = ChxResolvedConfig(
         schema_=["./schema.py"],

@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { hostname } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -138,6 +139,71 @@ describe('plugin runtime', () => {
       const payload = JSON.parse(result.stdout) as { ok: boolean; args: string[] }
       expect(payload.ok).toBe(true)
       expect(payload.args).toEqual(['alpha', 'beta'])
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('plugin commands get only positionals in args, and -- ends their flags (#568)', async () => {
+    const fixture = await createFixture()
+    const pluginPath = join(fixture.dir, 'echo-plugin.ts')
+    try {
+      await writeFile(
+        pluginPath,
+        `import { definePlugin } from '${CLI_ENTRY}'\n\nexport const plugin = definePlugin({\n  manifest: { name: 'echoer', apiVersion: 1 },\n  commands: [\n    {\n      name: 'echo',\n      flags: [\n        { name: '--name', type: 'string', description: 'Name' },\n        { name: '--loud', type: 'boolean', description: 'Loud' },\n      ],\n      run({ args, flags, print }) {\n        print({ args, name: flags['--name'] ?? null, loud: flags['--loud'] ?? null })\n      },\n    },\n    { name: 'other', run() {} },\n  ],\n})\n`,
+        'utf8'
+      )
+      await writeFile(
+        fixture.configPath,
+        `import { plugin } from '${pluginPath}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ plugin }],\n}\n`,
+        'utf8'
+      )
+      // The global flags go first: after --, they would be positionals.
+      const run = ([command = '', ...rest]: string[]) => {
+        const result = runCli([command, '--config', fixture.configPath, '--json', ...rest])
+        expect(result.stderr).toBe('')
+        expect(result.exitCode).toBe(0)
+        return JSON.parse(result.stdout) as { args: string[]; name: string | null; loud: boolean | null }
+      }
+
+      expect(run(['plugin', 'echoer', 'echo', 'alpha', '--name', 'ada', 'beta', '--loud'])).toEqual({
+        args: ['alpha', 'beta'],
+        name: 'ada',
+        loud: true,
+      })
+      // After --, every token is a positional, global flags included.
+      expect(run(['plugin', 'echoer', 'echo', 'alpha', '--loud', '--', '--name', 'x', '-z', '--json', '--'])).toEqual({
+        args: ['alpha', '--name', 'x', '-z', '--json', '--'],
+        name: null,
+        loud: true,
+      })
+      // After --, help and the JSON flag are arguments too.
+      expect(run(['plugin', 'echoer', 'echo', '--', '--help', '-h', '--help-plugins']).args).toEqual([
+        '--help',
+        '-h',
+        '--help-plugins',
+      ])
+      // A -- before the names ends the flags; the names still come first.
+      expect(run(['plugin', '--', 'echoer', 'echo', '--loud']).args).toEqual(['--loud'])
+      expect(run(['plugin', 'echoer', '--', 'echo', '-z']).args).toEqual(['-z'])
+      // The shortcut gives the command the same args as `chkit plugin`, without its name (#624).
+      expect(run(['echoer', 'echo', 'alpha', '--name', 'ada', '--', '--loud', '-z'])).toEqual({
+        args: ['alpha', '--loud', '-z'],
+        name: 'ada',
+        loud: null,
+      })
+      expect(run(['echoer', '--', 'echo', 'echo', '-z']).args).toEqual(['echo', '-z'])
+      expect(run(['echoer', 'echo']).args).toEqual([])
+
+      // A flag value is never the --.
+      const missing = runCli(['plugin', '--config', fixture.configPath, 'echoer', 'echo', '--name', '--', 'beta'])
+      expect(missing.exitCode).toBe(1)
+      expect(missing.stderr.trim()).toBe('Missing value for --name')
+
+      // A command without flags still rejects an unknown flag before --.
+      const unknown = runCli(['plugin', '--config', fixture.configPath, 'echoer', 'other', '-z', '--', 'x'])
+      expect(unknown.exitCode).toBe(1)
+      expect(unknown.stderr.trim()).toBe('Unknown flag: -z')
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }
@@ -422,6 +488,35 @@ describe('plugin runtime', () => {
     }
   })
 
+  test('chkit plugin flag error is reported before onInit, getContext and onComplete, like the shortcut', async () => {
+    const fixture = await createHookProbeFixture()
+    try {
+      const cases: Array<[string[], string]> = [
+        [['greet', '--bogus'], 'Unknown flag: --bogus'],
+        [['greet', '--name'], 'Missing value for --name'],
+        [['other', '-x'], 'Unknown flag: -x'],
+      ]
+      for (const [args, message] of cases) {
+        const shortcut = runCli(['probe', ...args, '--config', fixture.configPath])
+        const forwarded = runCli(['plugin', 'probe', ...args, '--config', fixture.configPath])
+        expect([shortcut.exitCode, shortcut.stderr.trim()]).toEqual([1, message])
+        expect([forwarded.exitCode, forwarded.stdout, forwarded.stderr.trim()]).toEqual([1, '', message])
+      }
+
+      const json = runCli(['plugin', 'probe', 'greet', '--bogus', '--json', '--config', fixture.configPath])
+      expect(json.exitCode).toBe(1)
+      expect(json.stderr).toBe('')
+      expect(JSON.parse(json.stdout)).toEqual({
+        command: 'plugin',
+        schemaVersion: 1,
+        ok: false,
+        error: 'Unknown flag: --bogus',
+      })
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
   test('a plugin command without flags rejects an unknown short flag in both forms (#491)', async () => {
     const fixture = await createHookProbeFixture()
     try {
@@ -579,6 +674,48 @@ describe('plugin runtime', () => {
         expect(statusPayload.status).toBe('completed')
         expect(statusPayload.chunkCounts.done).toBe(statusPayload.chunkCounts.total)
         expect(statusPayload.chunkCounts.failed).toBe(0)
+      } finally {
+        await rm(fixture.dir, { recursive: true, force: true })
+      }
+    } finally {
+      await db.command(`DROP TABLE IF EXISTS ${chEnv.database}.${tableName}`)
+      await db.close()
+    }
+  }, 120_000)
+
+  // #765 round 4: chunk workers poll at once; through a session-bound
+  // executor their reads were refused (SESSION_IS_LOCKED) until the poll
+  // error budget ran out.
+  test('chkit plugin backfill run completes chunks polled at once', async () => {
+    const chEnv = getClickHouseEnv()
+    const chConfig = clickhouseConfigBlock(chEnv)
+    const tableName = `chkit_e2e_bf_overlap_${Date.now()}_${Math.floor(Math.random() * 100000)}`
+    const db = createClickHouseExecutor(chEnv)
+    try {
+      await db.command(`CREATE TABLE ${chEnv.database}.${tableName} (id UInt64, event_time DateTime) ENGINE = MergeTree() PARTITION BY toYYYYMMDD(event_time) ORDER BY (event_time, id)`)
+      await db.command(`INSERT INTO ${chEnv.database}.${tableName} VALUES (1, '2026-01-01 12:00:00'), (2, '2026-01-02 12:00:00'), (3, '2026-01-03 12:00:00'), (4, '2026-01-04 12:00:00'), (5, '2026-01-05 12:00:00'), (6, '2026-01-06 12:00:00')`)
+      await waitForParts(db, chEnv.database, tableName, 6)
+
+      const fixture = await createFixture()
+      const pluginPath = join(fixture.dir, 'backfill-plugin.ts')
+      try {
+        await writeFile(pluginPath, `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport const plugin = createBackfillPlugin()\n`, 'utf8')
+        await writeFile(
+          fixture.configPath,
+          `import { plugin } from '${pluginPath}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  ${chConfig}\n  plugins: [{ plugin }],\n}\n`,
+          'utf8'
+        )
+        const planned = runCli(['plugin', 'backfill', 'plan', '--target', `${chEnv.database}.${tableName}`, '--from', '2026-01-01T00:00:00.000Z', '--to', '2026-01-07T00:00:00.000Z', '--config', fixture.configPath, '--json'])
+        expect(planned.exitCode).toBe(0)
+        const planPayload = JSON.parse(planned.stdout) as { planId: string }
+
+        const ran = runCli(['plugin', 'backfill', 'run', '--plan-id', planPayload.planId, '--concurrency', '6', '--poll-interval', '1', '--config', fixture.configPath, '--json'])
+
+        expect(ran.exitCode, ran.stdout + ran.stderr).toBe(0)
+        const runPayload = JSON.parse(ran.stdout) as { status: string; chunkCounts: { done: number; total: number } }
+        expect(runPayload.status).toBe('completed')
+        expect(runPayload.chunkCounts.total).toBeGreaterThan(1)
+        expect(runPayload.chunkCounts.done).toBe(runPayload.chunkCounts.total)
       } finally {
         await rm(fixture.dir, { recursive: true, force: true })
       }
@@ -758,6 +895,32 @@ describe('plugin runtime', () => {
         ])
         expect(planned.exitCode).toBe(0)
         const planPayload = JSON.parse(planned.stdout) as { planId: string }
+
+        // #765: a resume takes the plan's lock before it reads the checkpoint;
+        // this test process, alive on this host, holds it.
+        const runsDir = join(fixture.metaDir, 'backfill', 'runs')
+        const lockPath = join(runsDir, `${planPayload.planId}.lock`)
+        await mkdir(runsDir, { recursive: true })
+        await writeFile(lockPath, `${JSON.stringify({ pid: process.pid, host: hostname(), startedAt: '2026-11-18T10:00:00.000Z', token: '0123456789abcdef' })}\n`, 'utf8')
+        const lockedResume = runCli([
+          'plugin',
+          'backfill',
+          'resume',
+          '--plan-id',
+          planPayload.planId,
+          '--config',
+          fixture.configPath,
+          '--json',
+        ])
+        expect(lockedResume.exitCode).toBe(2)
+        expect(lockedResume.stdout).toContain(
+          `Backfill plan ${planPayload.planId} is locked by another run, resume or cancel (pid ${process.pid} on ${hostname()}, since 2026-11-18T10:00:00.000Z).`,
+        )
+        // Cancel takes the same lock, so it never replaces a checkpoint a run writes.
+        const lockedCancel = runCli(['plugin', 'backfill', 'cancel', '--plan-id', planPayload.planId, '--config', fixture.configPath, '--json'])
+        expect(lockedCancel.exitCode).toBe(2)
+        expect(lockedCancel.stdout).toContain(`Backfill plan ${planPayload.planId} is locked by another run, resume or cancel`)
+        await rm(lockPath)
 
         const blockedResume = runCli([
           'plugin',
@@ -1129,17 +1292,6 @@ describe('plugin runtime', () => {
       const result = runCli(['codegen', '--config', fixture.configPath, '--json'])
       expect(result.exitCode).toBe(1)
       expect(result.stderr).toContain('Codegen plugin is not configured')
-    } finally {
-      await rm(fixture.dir, { recursive: true, force: true })
-    }
-  })
-
-  test('pull root command fails when pull plugin is not configured', async () => {
-    const fixture = await createFixture()
-    try {
-      const result = runCli(['pull', '--config', fixture.configPath, '--json'])
-      expect(result.exitCode).toBe(1)
-      expect(result.stderr).toContain('Pull plugin is not configured')
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }

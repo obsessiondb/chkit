@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import process from 'node:process'
-import { Command } from 'commander'
+import { CONNECT_CHOICES } from '@chkit/plugin-obsessiondb'
+import { Command, Option } from 'commander'
 
 import { type CreateOptions, runCreate } from '../create.js'
 import { CREATE_CHKIT_VERSION } from '../version.js'
@@ -16,7 +17,9 @@ program
   .option('-m, --package-manager <pm>', 'npm | pnpm | yarn | bun (overrides auto-detection)')
   .option('--skip-install', 'skip installing dependencies after scaffolding')
   .option('--skip-onboarding', 'skip the database connection prompt')
-  .option('--connect <choice>', 'preselect connection: claim | account | clickhouse | later')
+  .addOption(
+    new Option('--connect <choice>', `preselect connection: ${CONNECT_CHOICES.join(' | ')}`).choices(CONNECT_CHOICES),
+  )
   .option('--email <email>', 'email for the claim flow (skips the prompt)')
   .option('--code <code>', 'one-time code for the claim flow (skips the prompt)')
   .option('--org-name <name>', 'override the auto-created organization name')

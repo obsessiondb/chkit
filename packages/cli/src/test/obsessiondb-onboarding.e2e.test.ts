@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -11,10 +11,12 @@ const CLI_BIN_ENTRY = join(WORKSPACE_ROOT, 'packages/cli/src/bin/chkit.ts')
 async function runCliAsync(
   args: string[],
   env: Record<string, string | undefined>,
+  stdin?: string,
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const proc = Bun.spawn({
     cmd: ['bun', CLI_BIN_ENTRY, ...args],
     cwd: WORKSPACE_ROOT,
+    stdin: stdin === undefined ? 'ignore' : new Blob([stdin]),
     stdout: 'pipe',
     stderr: 'pipe',
     env: { ...process.env, ...env },
@@ -80,6 +82,20 @@ function startMockServer(counts: { sendOtp: number } = { sendOtp: 0 }): ReturnTy
       }
       if (pathname === '/rpc/services/get') {
         return Response.json({ json: RUNNING_SERVICE })
+      }
+      if (pathname === '/rpc/services/listAll') {
+        return Response.json({
+          json: {
+            organizations: [
+              {
+                id: 'org-1',
+                name: 'Acme',
+                slug: 'acme',
+                services: [RUNNING_SERVICE, { ...RUNNING_SERVICE, id: 'svc-2', slug: 'second', name: 'second' }],
+              },
+            ],
+          },
+        })
       }
 
       return new Response('not found', { status: 404 })
@@ -209,4 +225,60 @@ describe('@chkit/cli obsessiondb onboarding e2e', () => {
       await rm(fixture.dir, { recursive: true, force: true })
     }
   })
+
+  test('login --json without a TTY prints only JSON and skips the service prompt', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'chkit-onboarding-'))
+    const fixture = await createFixture()
+    const server = startMockServer()
+    try {
+      const apiUrl = `http://127.0.0.1:${server.port}`
+      const xdgConfigHome = join(tempDir, 'xdg')
+      const env = { XDG_CONFIG_HOME: xdgConfigHome }
+
+      await writeFile(
+        fixture.configPath,
+        `import { obsessiondb } from '${OBSDB_PLUGIN_ENTRY}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [obsessiondb()],\n}\n`,
+        'utf8',
+      )
+      // Already logged in without a selected service, so login offers one without the device flow.
+      await mkdir(join(xdgConfigHome, 'chkit'), { recursive: true })
+      await writeFile(
+        join(xdgConfigHome, 'chkit', 'credentials.json'),
+        JSON.stringify({ access_token: 'test-token', base_url: apiUrl }),
+        'utf8',
+      )
+
+      const result = await runCliAsync(
+        ['obsessiondb', 'login', '--api-url', apiUrl, '--json', '--config', fixture.configPath],
+        env,
+        '2\n',
+      )
+      expect(result.exitCode).toBe(0)
+      const messages = parseJsonEnvelopes(result.stdout).map(
+        (envelope) => (envelope as { message?: unknown }).message,
+      )
+      // stdin is a pipe, so login skips the optional prompt and never reads the "2" (#739).
+      expect(messages).toEqual([
+        'Already logged in as playground@example.com',
+        'You can select a service later with: chkit obsessiondb service select',
+      ])
+      expect(result.stderr).not.toContain('Select service')
+      expect(await Bun.file(join(fixture.dir, '.chkit', 'obsessiondb.json')).exists()).toBe(false)
+    } finally {
+      server.stop()
+      await rm(tempDir, { recursive: true, force: true })
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
 })
+
+/**
+ * Parses stdout as a sequence of pretty-printed JSON envelopes, each starting
+ * with `{` at the start of a line. Throws if anything else is in it.
+ */
+function parseJsonEnvelopes(stdout: string): unknown[] {
+  return stdout
+    .trim()
+    .split(/\n(?=\{)/)
+    .map((chunk) => JSON.parse(chunk) as unknown)
+}

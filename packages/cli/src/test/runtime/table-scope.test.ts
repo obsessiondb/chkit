@@ -16,6 +16,15 @@ describe('table scope selector', () => {
     })
   })
 
+  test('trims JavaScript whitespace', () => {
+    // chkit-py's test_name_trim.py asserts the same (#580).
+    expect(parseTableSelector('\ufeffanalytics\ufeff.\ufeffevents\x85')).toEqual({
+      database: 'analytics',
+      mode: 'exact',
+      value: 'events\x85',
+    })
+  })
+
   test('rejects invalid wildcard selectors', () => {
     expect(() => parseTableSelector('*events')).toThrow('Invalid --table selector')
     expect(() => parseTableSelector('events*raw')).toThrow('Invalid --table selector')

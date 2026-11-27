@@ -12,13 +12,14 @@ from chkit.core.sql_lexer import (
     JS_WHITESPACE_RUN,
     SQLToken,
     is_js_space,
+    js_regex,
     js_trim,
     tokenize_sql,
 )
 from chkit.core.text_index_sql import text_expression_fingerprint, text_sql_fingerprint
 
 _SYNTHETIC_EPHEMERAL_DEFAULT: Final[re.Pattern[str]] = re.compile(
-    r"defaultValueOfTypeName\s*\(\s*'(?:[^'\\]|\\.|'')*'\s*\)", re.DOTALL
+    js_regex(r"defaultValueOfTypeName\s*\(\s*'(?:[^'\\]|\\.|'')*'\s*\)"), re.DOTALL
 )
 
 
@@ -43,7 +44,7 @@ def is_synthetic_ephemeral_default(expression: str) -> bool:
     literal keeps alias spellings (BIGINT, TEXT) that ``system.columns.type``
     canonicalizes, so any single string literal counts.
     """
-    return _SYNTHETIC_EPHEMERAL_DEFAULT.fullmatch(expression.strip()) is not None
+    return _SYNTHETIC_EPHEMERAL_DEFAULT.fullmatch(js_trim(expression)) is not None
 
 
 def normalize_sql_fragment(value: str) -> str:
@@ -134,7 +135,7 @@ def normalize_engine(engine: str) -> str:
         return normalize_kafka_engine(engine)
     if is_distributed_engine(engine):
         return normalize_distributed_engine(engine)
-    normalized = engine.strip()
+    normalized = js_trim(engine)
     if normalized.startswith("Shared"):
         normalized = normalized[len("Shared") :]
     if "(" not in normalized:

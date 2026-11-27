@@ -14,7 +14,12 @@ from typing import Any
 import pytest
 
 from chkit.cli.safety_markers import extract_migration_operation_summaries
-from chkit.core.sql_splitter import extract_executable_statements
+from chkit.core.sql_splitter import (
+    ExecutableStatementWithComments,
+    extract_executable_statements,
+    extract_executable_statements_with_comments,
+    extract_legacy_executable_statements,
+)
 
 FIXTURE: dict[str, Any] = json.loads(
     (Path(__file__).resolve().parents[2] / "test/fixtures/sql-splitter.json").read_text(
@@ -48,3 +53,44 @@ def test_operation_markers_are_still_read_from_the_file() -> None:
 )
 def test_shared_cases(sql: str, statements: list[str]) -> None:
     assert extract_executable_statements(sql) == statements
+    # The markers of each statement are read with the same split (#831).
+    assert [s.sql for s in extract_executable_statements_with_comments(sql)] == statements
+
+
+def test_statements_with_comments_group_the_comment_lines_before_each_statement() -> None:
+    sql = "\n".join(
+        [
+            "-- header",
+            "",
+            "-- operation: a",
+            "-- before-retry: x",
+            "SELECT 1; -- after SQL",
+            "/* block */",
+            "-- operation: b",
+            "SELECT",
+            "-- inside",
+            "2;",
+            "-- trailing",
+        ]
+    )
+    assert extract_executable_statements_with_comments(sql) == [
+        ExecutableStatementWithComments(
+            sql="SELECT 1;", comment_blocks=[["-- header", "-- operation: a", "-- before-retry: x"]]
+        ),
+        ExecutableStatementWithComments(
+            sql="/* block */\n\nSELECT\n\n2;", comment_blocks=[["-- operation: b"], ["-- inside"]]
+        ),
+    ]
+
+
+# The split before #562, which resume compares against: ``legacyStatements``
+# where it differs from ``statements``.
+@pytest.mark.parametrize(
+    ("sql", "statements"),
+    [
+        pytest.param(sql_case["sql"], sql_case.get("legacyStatements", sql_case["statements"]), id=sql_case["name"])
+        for sql_case in FIXTURE["cases"]
+    ],
+)
+def test_shared_cases_legacy(sql: str, statements: list[str]) -> None:
+    assert extract_legacy_executable_statements(sql) == statements

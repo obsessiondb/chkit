@@ -26,11 +26,12 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Sequence
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Any
 
 from chkit import __version__
 from chkit.plugins import (
+    ChxGetContextInput,
     ChxOnAfterApplyContext,
     ChxOnBeforeApplyContext,
     ChxOnBeforePluginCommandContext,
@@ -235,6 +236,12 @@ class PluginRuntime:
                 plan = result
         return plan
 
+    def rewrites_statements(self) -> bool:
+        """Whether a plugin has an on_before_apply hook, which may rewrite statements."""
+        return any(
+            _get_hook(entry.plugin, "on_before_apply") is not None for entry in self._plugins
+        )
+
     def run_on_before_apply(self, context: ChxOnBeforeApplyContext) -> list[str]:
         statements = list(context.statements)
         for entry in self._plugins:
@@ -301,23 +308,37 @@ class PluginRuntime:
                 ChxOnCheckReportContext(result=result, print=print_fn),
             )
 
-    def resolve_context(self, context_input: Any) -> PluginContext | None:
-        """Mirror of TS ``runtime.resolveContext``: try each plugin's
-        ``get_context`` hook in order; return the first non-None
-        :class:`PluginContext`. Plugins return ``None`` to defer to the next.
+    def resolve_context(self, context_input: ChxGetContextInput) -> PluginContext | None:
+        """Mirror of TS ``runtime.resolveContext``: run every plugin's
+        ``get_context`` hook in order. A :class:`PluginContext` with an
+        executor replaces the one before it, which is closed, so the last
+        plugin executor wins. A hook error closes the current plugin executor
+        and raises. Returns None when no plugin provides an executor.
+
+        The caller owns ``context_input.defaults`` and closes it, so this
+        never closes the default executor.
 
         Used by ``chkit plugin <name> <command>`` and other commands that want
         plugin-provided executors (e.g. ObsessionDB's remote executor when a
         service is selected).
         """
+        default_executor = context_input.defaults.executor
+        ctx: PluginContext | None = None
         for entry in self._plugins:
             hook = _get_hook(entry.plugin, "get_context")
             if hook is None:
                 continue
-            result = self._call_hook(entry, "getContext", hook, context_input)
-            if isinstance(result, PluginContext):
-                return result
-        return None
+            try:
+                result = self._call_hook(entry, "getContext", hook, context_input)
+            except Exception:
+                if ctx is not None and ctx.executor is not default_executor:
+                    self.dispose_context(ctx)
+                raise
+            if isinstance(result, PluginContext) and result.executor is not None:
+                if ctx is not None and ctx.executor is not default_executor:
+                    self.dispose_context(ctx)
+                ctx = result if result.has_executor else replace(result, has_executor=True)
+        return ctx
 
     def dispose_context(self, ctx: PluginContext) -> None:
         """Mirror of TS ``runtime.disposeContext``: best-effort close on the
@@ -329,6 +350,13 @@ class PluginRuntime:
             # Disposal is best-effort; never let a close error break a CLI exit.
             with contextlib.suppress(Exception):
                 close()
+
+    def has_on_pull_introspect(self) -> bool:
+        """Whether any plugin defines an ``on_pull_introspect`` hook."""
+        return any(
+            _get_hook(entry.plugin, "on_pull_introspect") is not None
+            for entry in self._plugins
+        )
 
     def run_on_pull_introspect(
         self, context: ChxOnPullIntrospectContext
@@ -408,12 +436,35 @@ class PluginRuntime:
         if isinstance(before_result, ChxOnBeforePluginCommandHandled):
             return before_result.exit_code
 
+        # As TS runPluginCommand: the get_context hooks run right before the
+        # command, which gets a plugin's executor in place of its default one.
+        defaults = context.plugin_context
+        plugin_context = self.resolve_context(
+            ChxGetContextInput(
+                config=context.config,
+                config_path=context.config_path,
+                command=command_name,
+                flags=dict(context.flags),
+                defaults=defaults,
+            )
+        )
+        if plugin_context is defaults:
+            plugin_context = None
+        if plugin_context is not None:
+            context = replace(context, plugin_context=plugin_context)
         try:
             result = command.run(context)
         except Exception as cause:
             if entry.internal:
                 raise
-            raise PluginExecutionError(plugin_name, "command", cause) from cause
+            # As TS names the command: `failed in command:<name>: ...`.
+            raise PluginExecutionError(
+                plugin_name, f"command:{command_name}", cause
+            ) from cause
+        finally:
+            # The caller owns the default context; this closes only a plugin's own.
+            if plugin_context is not None:
+                self.dispose_context(plugin_context)
         return 0 if result is None else int(result)
 
     # ---------- helpers ----------

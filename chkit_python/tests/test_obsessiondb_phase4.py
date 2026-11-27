@@ -173,6 +173,23 @@ def test_workbench_query_execute_propagates_error(httpx_mock: HTTPXMock) -> None
     assert out.error == "Syntax error"
 
 
+def test_workbench_query_execute_waits_as_long_as_node_fetch(httpx_mock: HTTPXMock) -> None:
+    # TS sends the query with Node's fetch: 10 s to connect, 300 s for the
+    # response. The 30 s of the other console calls cut a long statement.
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/workbench/query/execute",
+        json={"data": [], "meta": [], "rows": 0},
+    )
+    workbench_query_execute(_creds(), service_slug=SVC, query="OPTIMIZE TABLE t FINAL")
+    [request] = httpx_mock.get_requests()
+    assert request.extensions["timeout"] == {
+        "connect": 10.0,
+        "read": 300.0,
+        "write": 300.0,
+        "pool": 300.0,
+    }
+
+
 # ---------- normalize_query_data ----------
 
 
@@ -214,7 +231,18 @@ def test_normalize_query_json_result_wraps_envelope() -> None:
 # ---------- RemoteClickHouseClient ----------
 
 
+def _add_async_insert_lookup(httpx_mock: HTTPXMock) -> None:
+    """Answer a write's settings lookup (#804): the profile locks none."""
+    rows = [["readonly", "0", "0"], ["async_insert", "1", "0"], ["wait_for_async_insert", "0", "0"]]
+    meta = [{"name": name, "type": "String"} for name in ("name", "value", "readonly")]
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/workbench/query/execute",
+        json={"data": rows, "meta": meta, "rows": len(rows)},
+    )
+
+
 def test_remote_client_execute_raises_on_error_field(httpx_mock: HTTPXMock) -> None:
+    _add_async_insert_lookup(httpx_mock)
     httpx_mock.add_response(
         url=f"{BASE}/rpc/workbench/query/execute",
         json={"data": [], "meta": [], "rows": 0, "error": "bad sql"},
@@ -256,6 +284,7 @@ def test_remote_client_query_json_returns_envelope(httpx_mock: HTTPXMock) -> Non
 
 
 def test_remote_client_submit_returns_passed_query_id(httpx_mock: HTTPXMock) -> None:
+    _add_async_insert_lookup(httpx_mock)
     httpx_mock.add_response(
         url=f"{BASE}/rpc/workbench/query/execute",
         json={"data": [], "meta": [], "rows": 0},
@@ -264,24 +293,46 @@ def test_remote_client_submit_returns_passed_query_id(httpx_mock: HTTPXMock) -> 
     qid = client.submit("ALTER TABLE x ADD COLUMN y UInt64", query_id="my-qid")
     assert qid == "my-qid"
     # The id travels as the top-level queryId, never as a query_id setting.
-    [request] = httpx_mock.get_requests()
+    [_lookup, request] = httpx_mock.get_requests()
     assert json.loads(request.content)["json"] == {
         "serviceSlug": SVC,
         "query": "ALTER TABLE x ADD COLUMN y UInt64",
+        "settings": {"async_insert": 0, "wait_for_async_insert": 1},
         "queryId": "my-qid",
     }
+
+
+def test_remote_client_sends_the_durable_insert_settings_after_the_callers(
+    httpx_mock: HTTPXMock,
+) -> None:
+    """#790, as TS remote-executor.test.ts: defaults a caller's own value
+    replaces, after the caller's other settings so a profile cannot change them."""
+    _add_async_insert_lookup(httpx_mock)
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/workbench/query/execute",
+        json={"data": [], "meta": [], "rows": 0},
+    )
+    client = create_remote_executor(_creds(), service_slug=SVC)
+    client.submit(
+        "INSERT INTO t SELECT 1", query_id="q", settings={"async_insert": "true", "profile": "bulk"}
+    )
+    [_lookup, request] = httpx_mock.get_requests()
+    assert list(json.loads(request.content)["json"]["settings"].items()) == [
+        ("profile", "bulk"), ("async_insert", "true"), ("wait_for_async_insert", 1),
+    ]
 
 
 def test_remote_client_submit_without_query_id_returns_server_id(
     httpx_mock: HTTPXMock,
 ) -> None:
+    _add_async_insert_lookup(httpx_mock)
     httpx_mock.add_response(
         url=f"{BASE}/rpc/workbench/query/execute",
         json={"data": [], "meta": [], "rows": 0, "query_id": "server-id"},
     )
     client = create_remote_executor(_creds(), service_slug=SVC)
     assert client.submit("SELECT 1") == "server-id"
-    [request] = httpx_mock.get_requests()
+    [_lookup, request] = httpx_mock.get_requests()
     assert "queryId" not in json.loads(request.content)["json"]
 
 
@@ -727,6 +778,10 @@ def test_run_onboarding_account_dispatches_to_login(
     httpx_mock.add_response(
         url=f"{BASE}/api/auth/get-session",
         json={"user": {"id": "u", "email": "a@b.com", "name": "A"}},
+    )
+    # No service selected yet, so login offers one, as in TS.
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/services/listAll", json={"json": {"organizations": []}}
     )
     # Pin the resolve_base_url to our test BASE so the login URL matches the mock.
     monkeypatch.setattr(

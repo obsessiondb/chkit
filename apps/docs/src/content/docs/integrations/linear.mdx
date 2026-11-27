@@ -16,7 +16,7 @@ bunx chkit add linear
 bunx chkit check
 bunx chkit generate --name add_linear
 bunx chkit migrate --apply
-bunx chkit ingest run --tag provider:linear
+bunx chkit sync run --tag provider:linear
 ```
 
 Set `LINEAR_API_KEY` in the runtime environment before ingestion. Edit queries and raw destinations in `src/integrations/linear/sources/` to select fields and configure tables. `config.ts` supplies source identity and timestamp selection; `client.ts` handles authenticated requests, and `pipeline.ts` groups nine independent streams in one workspace pipeline.
@@ -36,8 +36,8 @@ See [destinations](/api-sync/destinations/).
 Comments use their own collection, including nullable references for issue and other parent types. History independently discovers all accessible issues before paging their events. Neither reader depends on the issues stream's execution or checkpoint. Paginated project memberships and other associations are outside the selected resource scope.
 
 ```sh
-bunx chkit ingest run --tag provider:linear --tag resource:comments
-bunx chkit ingest run --tag provider:linear --tag resource:issue_history
+bunx chkit sync run --tag provider:linear --tag resource:comments
+bunx chkit sync run --tag provider:linear --tag resource:issue_history
 ```
 
 Repeated tags use AND matching. The default pipeline executes streams sequentially to limit API usage; ordering does not establish a discovery dependency. Expensive history reads can have their own schedule and execution budget.
@@ -53,8 +53,8 @@ Issue relations lack a reliable root change filter. History is only exposed thro
 Deleted records and removed relations remain stored. The API does not promise atomic snapshots, and label renames are not assumed to update issue timestamps. Periodic reconciliation refreshes older timestamp-selected observations:
 
 ```sh
-bunx chkit ingest run --tag provider:linear --tag resource:issues --backfill reconcile-2026-10-05 --from 1970-01-01
-bunx chkit ingest status --tag provider:linear --json
+bunx chkit sync run --tag provider:linear --tag resource:issues --backfill reconcile-2026-10-05 --from 1970-01-01
+bunx chkit sync status --tag provider:linear --json
 ```
 
 Use a new backfill ID for each reconciliation. Timestamp replay reads current observations; the history stream preserves accessible provider events. The raw tables require ClickHouse 25.3 or later. See the installed README for configuration and [registry installation](/cli/add/).
@@ -77,4 +77,4 @@ bun test src/integrations/linear/tests/basic.test.ts
 ## Related pages
 
 - [App registry](/integrations/)
-- [Ingestion plugin](/plugins/ingest/)
+- [Sync plugin](/plugins/sync/)

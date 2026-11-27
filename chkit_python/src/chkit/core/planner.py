@@ -4,14 +4,11 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from collections.abc import Sequence
 
 from chkit.core.canonical import canonicalize_definitions, definition_key
-from chkit.core.column_default import (
-    literal_default_fingerprint,
-    parse_column_default,
-    render_default,
-)
+from chkit.core.column_order import order_column_statements
+from chkit.core.column_shape import _column_identity, _columns_equal, _normalized_column
 from chkit.core.constraint import constraint_kind
 from chkit.core.diff_primitives import diff_by_name, diff_clauses, diff_settings
 from chkit.core.engine import is_distributed_engine
@@ -43,8 +40,7 @@ from chkit.core.object_dependencies import (
     order_by_dependencies,
 )
 from chkit.core.sql import (
-    column_codec_fingerprint,
-    column_type_fingerprint,
+    key_fingerprint,
     render_alter_add_column,
     render_alter_add_constraint,
     render_alter_add_index,
@@ -65,6 +61,10 @@ from chkit.core.sql import (
     render_alter_reset_setting,
     render_dictionary_sql,
     to_create_sql,
+)
+from chkit.core.sql_lexer import (
+    js_regex,
+    js_trim,
 )
 from chkit.core.sql_normalizer import sql_expression_fingerprint
 from chkit.core.table_settings import readonly_settings_fingerprint
@@ -182,57 +182,14 @@ def _push_create_database(
     )
 
 
-# Mirrors the JS `\s` class exactly (TS uses /\s/.test(char)); Python's
-# str.isspace() differs on U+0085/U+001C-001F (included) and U+FEFF (excluded),
-# which would let a pathological key expression diff differently across ports.
-_JS_WHITESPACE_RE = re.compile(
-    r"[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]"
-)
-
-
-def _strip_insignificant_formatting(token: str) -> str:
-    """Drop whitespace and identifier backticks for key-clause comparison.
-
-    ClickHouse normalizes both when it stores a key: ``toStartOfHour( ts )``
-    comes back as ``toStartOfHour(ts)``, and a column written bare as
-    ``user-id`` in config is stored/introspected quoted as ``` `user-id` ```.
-    Single/double-quoted string literals are semantic and preserved.
-    Comparison-only — never used to render DDL, so keyword expressions like
-    ``INTERVAL 1 HOUR`` and real identifier quoting keep their form when
-    emitted.
-    """
-    out: list[str] = []
-    quote: str | None = None
-    for i, char in enumerate(token):
-        if quote is not None:
-            out.append(char)
-            if char == quote and (i == 0 or token[i - 1] != "\\"):
-                quote = None
-            continue
-        if char in ("'", '"'):
-            quote = char
-            out.append(char)
-            continue
-        if char == "`":
-            continue
-        if _JS_WHITESPACE_RE.match(char) is not None:
-            continue
-        out.append(char)
-    return "".join(out)
-
-
-def _join_clause(values: list[str] | None) -> str:
-    return ",".join(_strip_insignificant_formatting(value) for value in values or [])
-
-
 def _requires_table_recreate(old: TableDefinition, new: TableDefinition) -> bool:
     return diff_clauses(
         [
             (old.engine, new.engine),
-            (_join_clause(old.primary_key), _join_clause(new.primary_key)),
-            (_join_clause(old.order_by), _join_clause(new.order_by)),
+            (key_fingerprint(old, old.primary_key), key_fingerprint(new, new.primary_key)),
+            (key_fingerprint(old, old.order_by), key_fingerprint(new, new.order_by)),
             (old.partition_by or "", new.partition_by or ""),
-            (_join_clause(old.unique_key), _join_clause(new.unique_key)),
+            (key_fingerprint(old, old.unique_key), key_fingerprint(new, new.unique_key)),
             # ClickHouse refuses to change or reset these on an existing table (#466).
             (
                 readonly_settings_fingerprint(old.settings),
@@ -240,35 +197,6 @@ def _requires_table_recreate(old: TableDefinition, new: TableDefinition) -> bool
             ),
         ]
     )
-
-
-def _normalized_column(column: ColumnDefinition) -> dict[str, Any]:
-    """Column shape ignoring name + renamed_from, with the type as rendered.
-
-    Compare what the DSL renders: inline ``Nullable(T)`` and ``nullable=True``
-    are equivalent, while an additional or differently placed wrapper is not.
-    A literal default compares by the SQL it renders, so the literal ``7`` and
-    the expression ``'7'`` that pull reads back are the same default (#466).
-    An expression keeps its comments, which the snapshot records as written.
-    """
-    data = column.model_dump(mode="json", by_alias=False)
-    data.pop("name", None)
-    data.pop("renamed_from", None)
-    data.pop("nullable", None)
-    # ClickHouse stores ``Decimal(10,2)`` as ``Decimal(10, 2)`` (#466).
-    data["type"] = column_type_fingerprint(column)
-    if column.default is not None:
-        parsed = parse_column_default(column.default)
-        sql = parsed.sql if parsed.kind == "expression" else render_default(column.default)
-        data["default"] = literal_default_fingerprint(sql) or sql
-    # Codecs compare in the form ClickHouse stores them, like drift (#465).
-    data["codec"] = column_codec_fingerprint(column)
-    return data
-
-
-def _column_identity(column: ColumnDefinition) -> str:
-    """JSON-stable shape of a column ignoring name + renamed_from."""
-    return json.dumps(_normalized_column(column), sort_keys=True, default=str)
 
 
 def _column_identity_after_removals(column: ColumnDefinition, remove_comment: bool) -> str:
@@ -281,10 +209,6 @@ def _column_identity_after_removals(column: ColumnDefinition, remove_comment: bo
     if remove_comment:
         data.pop("comment", None)
     return json.dumps(data, sort_keys=True, default=str)
-
-
-def _columns_equal(left: ColumnDefinition, right: ColumnDefinition) -> bool:
-    return _column_identity(left) == _column_identity(right)
 
 
 def _index_identity(index: SkipIndexDefinition) -> str:
@@ -462,7 +386,7 @@ def _recreate_drop_risk(old: TableDefinition) -> RiskLevel:
     if not is_distributed_engine(old.engine):
         return "danger"
     flush_on_detach = (old.settings or {}).get("flush_on_detach")
-    disabled = flush_on_detach is not None and str(flush_on_detach).strip().lower() in (
+    disabled = flush_on_detach is not None and js_trim(str(flush_on_detach)).lower() in (
         "0",
         "false",
     )
@@ -874,18 +798,21 @@ def _order_operations(
     *,
     drop: DependencyGraph,
     create: DependencyGraph,
+    previous: Sequence[SchemaDefinition],
+    next_: Sequence[SchemaDefinition],
 ) -> list[MigrationOperation]:
     """Reorder the drop and create segments of a (rank, key)-sorted plan by object dependencies.
 
     Drops run dependents first, creates run dependencies first (#231). Alters
-    and create_database keep their place.
+    and create_database keep their place, except that the column statements
+    of a table are ordered by the columns they read and remove.
     """
     drops = [op for op in ordered if _rank(op) == 0]
     middle = [op for op in ordered if _rank(op) in (1, 2)]
     creates = [op for op in ordered if _rank(op) >= 3]  # noqa: PLR2004
     return [
         *order_by_dependencies(drops, lambda op: op.key, lambda key: drop.get(key, ())),
-        *middle,
+        *order_column_statements(middle, previous=previous, next_=next_, renames=()),
         *order_by_dependencies(creates, lambda op: op.key, lambda key: create.get(key, ())),
     ]
 
@@ -913,7 +840,7 @@ def _dictionary_comparison_shape(
 
 
 _LIFETIME_RANGE_RE = re.compile(
-    r"^MIN\s+(\S+)\s+MAX\s+(\S+)$|^MAX\s+(\S+)\s+MIN\s+(\S+)$", re.IGNORECASE
+    js_regex(r"^MIN\s+(\S+)\s+MAX\s+(\S+)$|^MAX\s+(\S+)\s+MIN\s+(\S+)$"), re.IGNORECASE
 )
 
 
@@ -924,7 +851,7 @@ def _dictionary_lifetime_fingerprint(lifetime: str) -> str:
     ``LIFETIME(MAX 300 MIN 10)`` as ``LIFETIME(MIN 10 MAX 300)``, so a
     dictionary pulled back compares by that stored form.
     """
-    trimmed = lifetime.strip()
+    trimmed = js_trim(lifetime)
     if re.fullmatch(r"\d+", trimmed, re.ASCII):
         return f"MIN 0 MAX {trimmed}"
     match = _LIFETIME_RANGE_RE.match(trimmed)
@@ -955,8 +882,8 @@ def _diff_dictionary(
 
 
 def plan_diff(
-    old_definitions: list[SchemaDefinition],
-    new_definitions: list[SchemaDefinition],
+    old_definitions: Sequence[SchemaDefinition],
+    new_definitions: Sequence[SchemaDefinition],
     *,
     index_granularity: int | None = None,
 ) -> MigrationPlan:
@@ -1027,6 +954,8 @@ def plan_diff(
         operations,
         drop=invert_dependency_graph(build_dependency_graph(old_canonical)),
         create=build_dependency_graph(new_canonical),
+        previous=old_canonical,
+        next_=new_canonical,
     )
 
     counts: dict[RiskLevel, int] = {"safe": 0, "caution": 0, "danger": 0}

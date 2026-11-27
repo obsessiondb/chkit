@@ -1,0 +1,14 @@
+NODE counts
+SQL >
+    SELECT user_id, count() AS events FROM events GROUP BY user_id
+
+NODE snapshot
+SQL >
+    SELECT u.user_id AS user_id, u.name AS name, c.events AS events, now() AS snapshot_at
+    FROM users AS u FINAL
+    INNER JOIN counts AS c ON c.user_id = u.user_id
+
+TYPE copy
+TARGET_DATASOURCE user_snapshot
+COPY_MODE replace
+COPY_SCHEDULE 30 2 * * *

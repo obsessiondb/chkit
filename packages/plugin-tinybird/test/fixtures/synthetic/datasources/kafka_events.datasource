@@ -1,0 +1,18 @@
+DESCRIPTION >
+    Events from a Kafka topic; Tinybird adds its Kafka meta columns.
+
+SCHEMA >
+    `ts` DateTime `json:$.ts`,
+    `user_id` UInt64 `json:$.user.id`,
+    `__key` Nullable(String)
+
+ENGINE "MergeTree"
+ENGINE_PARTITION_KEY "toYYYYMM(__timestamp)"
+ENGINE_SORTING_KEY "user_id, ts"
+
+KAFKA_CONNECTION_NAME kconn
+KAFKA_TOPIC events
+KAFKA_GROUP_ID {{ tb_secret('KAFKA_GROUP', 'chkit_fixture') }}
+KAFKA_AUTO_OFFSET_RESET earliest
+KAFKA_STORE_RAW_VALUE True
+KAFKA_STORE_HEADERS True

@@ -17,7 +17,7 @@ chkit init [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--connect <choice>` | string | — | Preselect a connection path: `claim`, `account`, `clickhouse`, or `later`. Skips the interactive prompt. |
+| `--connect <choice>` | string | — | Preselect a connection path: `claim`, `account`, `clickhouse`, or `later`. Skips the interactive prompt; any other value is rejected. |
 | `--email <email>` | string | — | Email for the ObsessionDB `claim` / `account` paths (implies an interactive connect step). |
 | `--code <code>` | string | — | One-time email code, to verify a signup without re-prompting. |
 | `--org-name <name>` | string | — | Override the auto-created ObsessionDB organization name. |
@@ -26,7 +26,7 @@ chkit init [flags]
 
 See [global flags](/cli/overview/#global-flags).
 
-An unknown flag, long or short (`--bogus`, `-x`), or a flag missing its value stops `init` before it writes anything.
+An unknown flag, long or short (`--bogus`, `-x`), a flag missing its value, a `--connect` value other than the four choices (they are case-sensitive), or any argument that is not a flag (`chkit init foo`) stops `init` with exit code 1 before it writes anything.
 
 ## Behavior
 
@@ -88,7 +88,7 @@ For a fully scripted claim with no prompts, use the two-step OTP flow in [Gettin
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
-| non-zero | An unknown flag or missing flag value, or an explicitly requested connect path could not complete |
+| non-zero | An unknown flag, a missing flag value, an invalid `--connect` choice or an unexpected argument, or an explicitly requested connect path could not complete |
 
 ## Related commands
 

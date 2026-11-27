@@ -1,14 +1,98 @@
 import { isTrivia, sqlTokens, tokenizeSQL, type SQLToken } from './sql-lexer.js'
 
+interface SplitOptions {
+  /** Read `//`, `# ` and `#!` comments as ClickHouse does (#562). */
+  lineComments: boolean
+}
+
+const CLICKHOUSE: SplitOptions = { lineComments: true }
+const BEFORE_562: SplitOptions = { lineComments: false }
+
 export function splitSqlStatements(sql: string): string[] {
-  const statements: string[] = []
+  return split(sql, CLICKHOUSE).map((piece) => piece.text)
+}
+
+export function extractExecutableStatements(sql: string): string[] {
+  return extract(sql, CLICKHOUSE).statements.map((piece) => piece.text)
+}
+
+/** An executable statement with the `--` comments that come before it (#831). */
+export interface ExecutableStatementWithComments {
+  /** The statement as `extractExecutableStatements` returns it. */
+  sql: string
+  /**
+   * The `--` comments on lines of their own after the previous executable
+   * statement and before this one ends, trimmed, in file order. Each block
+   * holds the comments that only whitespace separates; a comment after SQL
+   * on its line is left out.
+   */
+  commentBlocks: string[][]
+}
+
+/**
+ * `extractExecutableStatements`, with the `--` comments that belong to each
+ * statement: those between the end of the executable statement before it and
+ * its own end. A comment after the last statement belongs to none. Like the
+ * split, it reads a `--` inside a string, a quoted name, a block comment, a
+ * heredoc or a `//`, `# ` or `#!` comment as text.
+ */
+export function extractExecutableStatementsWithComments(sql: string): ExecutableStatementWithComments[] {
+  const { statements, comments, stripped } = extract(sql, CLICKHOUSE)
+  const result: ExecutableStatementWithComments[] = statements.map((piece) => ({ sql: piece.text, commentBlocks: [] }))
+  let index = 0
+  // The offset of the last comment kept for the statement at `index`.
+  let previousOffset: number | undefined
+  for (const comment of comments) {
+    while (index < statements.length && (statements[index]?.end ?? 0) <= comment.offset) {
+      index += 1
+      previousOffset = undefined
+    }
+    const target = result[index]
+    if (target === undefined) break
+    if (!comment.ownLine) continue
+    const blocks = target.commentBlocks
+    const last = blocks[blocks.length - 1]
+    if (last !== undefined && previousOffset !== undefined && stripped.slice(previousOffset, comment.offset).trim() === '') {
+      last.push(comment.text)
+    } else blocks.push([comment.text])
+    previousOffset = comment.offset
+  }
+  return result
+}
+
+/**
+ * The statements chkit ran before #562, when the splitter did not know `//`,
+ * `# ` and `#!` comments: it cut at a `;` inside one and read a quote, `/*` or
+ * `$tag$` inside one as live. Only for telling whether a migration that an
+ * older chkit applied in part resumes at the statements it recorded.
+ */
+export function extractLegacyExecutableStatements(sql: string): string[] {
+  return extract(sql, BEFORE_562).statements.map((piece) => piece.text)
+}
+
+interface Piece {
+  text: string
+  /** The offset of the `;` that ends it, or the end of its last character. */
+  end: number
+}
+
+interface LineComment {
+  /** Its offset in the text with `--` comments stripped. */
+  offset: number
+  text: string
+  /** Only whitespace comes before it on its line. */
+  ownLine: boolean
+}
+
+function split(sql: string, options: SplitOptions): Piece[] {
+  const statements: Piece[] = []
   let current = ''
   const lexedEnd = lexedEndAt(sql)
 
   for (let i = 0; i < sql.length; i += 1) {
     const ch = sql[i] ?? ''
 
-    const end = quotedEnd(sql, i, lexedEnd)
+    const end = regionEnd(sql, i, lexedEnd, options)
     if (end !== undefined) {
       current += sql.slice(i, end)
       i = end - 1
@@ -17,7 +101,7 @@ export function splitSqlStatements(sql: string): string[] {
 
     if (ch === ';') {
       const trimmed = current.trim()
-      if (trimmed.length > 0) statements.push(`${trimmed};`)
+      if (trimmed.length > 0) statements.push({ text: `${trimmed};`, end: i })
       current = ''
       continue
     }
@@ -26,15 +110,19 @@ export function splitSqlStatements(sql: string): string[] {
   }
 
   const tail = current.trim()
-  if (tail.length > 0) statements.push(`${tail};`)
+  if (tail.length > 0) statements.push({ text: `${tail};`, end: sql.length - (current.length - current.trimEnd().length) })
   return statements
 }
 
-export function extractExecutableStatements(sql: string): string[] {
+function extract(
+  sql: string,
+  options: SplitOptions,
+): { statements: Piece[]; comments: LineComment[]; stripped: string } {
   // Strip single-line comments (--) while respecting quoted strings.
   // We can't use a naive line-based filter because `--` inside string
   // literals must be preserved.
   let stripped = ''
+  const comments: LineComment[] = []
   const lexedEnd = lexedEndAt(sql)
 
   for (let i = 0; i < sql.length; i += 1) {
@@ -44,12 +132,18 @@ export function extractExecutableStatements(sql: string): string[] {
     if (ch === '-' && next === '-') {
       // The comment runs to the end of the line; the newline stays.
       const newline = sql.indexOf('\n', i)
+      const lineStart = sql.lastIndexOf('\n', i - 1) + 1
+      comments.push({
+        offset: stripped.length,
+        text: sql.slice(i, newline === -1 ? sql.length : newline).trim(),
+        ownLine: sql.slice(lineStart, i).trim() === '',
+      })
       if (newline === -1) break
       i = newline - 1
       continue
     }
 
-    const end = quotedEnd(sql, i, lexedEnd)
+    const end = regionEnd(sql, i, lexedEnd, options)
     if (end !== undefined) {
       stripped += sql.slice(i, end)
       i = end - 1
@@ -59,25 +153,47 @@ export function extractExecutableStatements(sql: string): string[] {
     stripped += ch
   }
 
-  const statements = splitSqlStatements(stripped)
+  const statements = split(stripped, options)
   // A statement made only of comments is not executable: ClickHouse rejects it
   // as "Empty query" (for example a block comment after the last statement).
-  const executable = statements.filter(hasExecutableContent)
-  if (executable.length === statements.length) return statements
-  // The splitter does not know `#` and `//` line comments (#197). When one of
-  // them holds a `;`, the splitter cut that comment line in two; keeping the
-  // comment-only piece makes ClickHouse reject the file instead of running the
-  // commented-out text after the `;`.
-  if (tokenizeSQL(stripped).some(isLineCommentWithSemicolon)) return statements
-  return executable
+  const executable = statements.filter((piece) => hasExecutableContent(piece.text))
+  if (executable.length === statements.length) return { statements, comments, stripped }
+  // Before #562 the splitter cut a `#` or `//` comment that holds a `;` in two;
+  // keeping the comment-only piece made ClickHouse reject the file instead of
+  // running the commented-out text after the `;`.
+  if (!options.lineComments && tokenizeSQL(stripped).some(isLineCommentWithSemicolon)) return { statements, comments, stripped }
+  return { statements: executable, comments, stripped }
+}
+
+// The end of the string, quoted identifier, block comment, heredoc or, when
+// the options read them, `//`, `# ` or `#!` comment that starts at `i`.
+function regionEnd(
+  sql: string,
+  i: number,
+  lexedEnd: (i: number) => number | undefined,
+  options: SplitOptions,
+): number | undefined {
+  const end = quotedEnd(sql, i, lexedEnd)
+  if (end !== undefined || !options.lineComments) return end
+  return lineCommentEnd(sql, i)
+}
+
+// ClickHouse reads `//`, `# ` and `#!` as a comment up to the next `\n`, which
+// stays; `#` before anything else is not a comment (ClickHouse rejects it).
+function lineCommentEnd(sql: string, i: number): number | undefined {
+  const ch = sql[i]
+  const next = sql[i + 1]
+  if (!(ch === '/' && next === '/') && !(ch === '#' && (next === ' ' || next === '!'))) return undefined
+  const newline = sql.indexOf('\n', i)
+  return newline === -1 ? sql.length : newline
 }
 
 // Where the ClickHouse lexer reads a heredoc, a block comment (they nest) or a
 // backtick-quoted name (with backslash escapes), the offset of its first
 // character maps to its end. The scanner takes these ends only where it is at
-// such a token itself; inside a `//` or `#` comment, which it does not know
-// (#197), it keeps its own reading, so statements end where they always did.
-// The input is lexed once, only as far as an offset the scanner asks about, and
+// such a token itself. The legacy split does not know `//` and `#` comments, so
+// inside one it keeps its own reading and statements end where they did before
+// #562. The input is lexed once, only as far as an offset the scanner asks about, and
 // only when a token there could end elsewhere than the scanner reads it.
 function lexedEndAt(sql: string): (i: number) => number | undefined {
   const tokens = sqlTokens(sql)

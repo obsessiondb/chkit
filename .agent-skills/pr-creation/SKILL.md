@@ -1,0 +1,179 @@
+---
+name: pr-creation
+description: Use whenever opening or creating a pull request, including requests to ship changes or prepare a PR. Load before committing or pushing PR code; covers verification, releases, PR metadata, and watching for review feedback.
+allowed-tools: [Read, Edit, Write, Bash, Glob, Grep, mcp__conductor__GetWorkspaceDiff]
+metadata:
+  internal: true
+---
+
+# PR Creation Checklist
+
+Follow these steps in order when creating a pull request. Do not skip any step.
+
+## 1. Run Verification
+
+```bash
+bun verify
+```
+
+Do NOT proceed if verification fails. Fix issues first.
+
+## 2. Determine the Change Scope
+
+Inspect `git diff --stat <base>...HEAD`, the full branch diff, and any uncommitted changes to identify the changed surfaces for documentation, release, and PR metadata. Independent code review belongs to the `review` skill, not this workflow.
+
+## 3. Check Documentation (if needed)
+
+After reviewing the diff, check whether the changes require documentation updates. Ask: "After this change, would the docs be inaccurate or incomplete?"
+
+### Package-to-docs mapping
+
+| Changed package | Docs to check |
+|----------------|--------------|
+| `packages/cli` | `apps/docs/src/content/docs/cli/<command>.md` for affected commands |
+| `packages/core` (config) | `apps/docs/src/content/docs/configuration/overview.md` |
+| `packages/core` (schema DSL) | `apps/docs/src/content/docs/schema/dsl-reference.md` |
+| `packages/plugin-codegen` | `apps/docs/src/content/docs/plugins/codegen.md`, `cli/codegen.md` |
+| `packages/plugin-pull` | `apps/docs/src/content/docs/plugins/pull.md`, `cli/pull.md` |
+| `packages/plugin-backfill` | `apps/docs/src/content/docs/plugins/backfill.md` |
+
+### What to update
+
+| Type of change | Update needed |
+|---------------|--------------|
+| New or changed CLI flag | Flags table in `cli/<command>.md` |
+| New CLI command | New `cli/<command>.md` page (use existing command pages as template) |
+| Changed command behavior | Behavior section in `cli/<command>.md` |
+| Changed exit codes or JSON output | Corresponding sections in `cli/<command>.md` |
+| New or changed plugin option | Options section in `plugins/<name>.md` |
+| New plugin subcommand | Commands section in `plugins/<name>.md` |
+| New config field | `configuration/overview.md` |
+| New schema DSL feature | `schema/dsl-reference.md` |
+
+If docs updates are needed, make them in this PR — do not defer to a follow-up. Use the `documentation-authoring` skill for guidance on page templates and formatting conventions.
+
+If the diff already includes appropriate docs changes, or the changes are purely internal with no docs impact, continue to the next step.
+
+## 4. Release Each Changed Surface
+
+Review the whole diff before choosing a release path:
+
+- **Template-only:** Changes to distributed registry source, dependencies, or metadata use the integration's independent version, changelog, and generated release artifact. Do not create a package changeset or bump `chkit` or the fixed npm package group.
+- **Package behavior:** User-facing shared-runtime, CLI, plugin, or library changes require ordinary package changesets, even when they support registry templates.
+- **chkit-py behavior:** Add one fragment of one or two user-facing sentences in `chkit_python/changelog.d/` (`<issue>.<type>.md` or `+<slug>.<type>.md`, type `added`, `changed` or `fixed`) instead of editing `chkit_python/CHANGELOG.md`. Apply the unreleased-entry consolidation rule below to these fragments too, using the latest published PyPI release as their baseline.
+- **Mixed:** Release the affected templates and packages separately. Registry files in a PR never exempt package changes.
+- **Docs or tooling only:** No release is needed unless the changed files are distributed as part of a template or change published package behavior.
+
+### Registry template releases
+
+Update `registry/<provider>/manifest.json`: advance `meta.chkit.version` beyond the merged release and add the current `meta.chkit.changelog` entry (see [Writing changelog entries](#writing-changelog-entries)). Keep at most one new artifact per integration per PR; later edits refresh that same unmerged draft and its changelog entry. Preserve released artifacts and earlier changelog entries.
+
+```bash
+bun run registry:release -- --base origin/main <provider>
+bun run check:registry-releases -- --base origin/main
+```
+
+Use the actual PR base if different. Commit the generated `registry/<provider>/releases/<version>.json` with its source and manifest; never hand-edit generated artifacts. See `AGENTS.md#registry-integration-releases` and the registry authoring guide for the full workflow.
+
+### Package changesets
+
+Before adding a package changeset, read the existing unreleased `.changeset/*.md` entries and compare the final behavior with the latest published release. In prerelease mode, entries named in `.changeset/pre.json` have already been consumed: preserve them unchanged and exclude them from this consolidation.
+
+If the PR refines or fixes behavior that is still unreleased, update its existing pending entry to describe the final user-facing change instead of adding another changeset. Merge overlapping pending entries into one per user-facing change, preserving required upgrade actions; keep distinct changes separate. A fix to behavior in the latest published release still needs a pending entry; never edit a consumed entry.
+
+If the PR introduces a **user-facing npm package change** (new feature, bug fix, API change, behavior change) with no matching pending entry, create `.changeset/<descriptive-name>.md` directly; the interactive `bun run changeset` CLI does not work in this environment. Existing `.changeset/*.md` files show the package names.
+
+```markdown
+---
+"package-name": patch
+---
+
+One sentence on what changed for users.
+```
+
+List only the package where users meet the change, normally exactly one and at most two. All 11 npm packages are one fixed group and always release together, so listing every touched package just copies the same entry into every package's changelog.
+
+Bump `patch` for fixes, `minor` for additions and `major` for breaking changes. **BETA NOTICE:** While chkit is in BETA, **always use `patch`** for all releases regardless of change type.
+
+If the PR is purely internal (CI, docs, refactoring with no user-facing effect), a changeset is not required.
+
+### How to decide: user-facing or internal?
+
+**When in doubt, inspect the changed distribution surface.** An unnecessary package changeset bumps the entire fixed npm group; a missing package changeset delays a real package release.
+
+A package change is **user-facing** if it affects what users experience when they install or run that package. Template code downloaded independently from the registry follows the template release workflow above, not the npm package release.
+
+Examples that **require** a changeset:
+- Package bug fixes — even if the fix is in internal/plugin code, if it corrects wrong behavior users can hit, it's user-facing
+- New CLI flags, commands, or options
+- Changed output format, error messages, or default behavior
+- Performance improvements users would notice
+
+Examples that **do NOT require** a changeset:
+- Registry template-only changes (use the independent template release workflow instead)
+- CI/CD pipeline changes
+- Documentation-only changes (docs site, README)
+- Dev tooling (linter config, test infra)
+- Pure refactors where behavior is identical before and after
+
+### Writing changelog entries
+
+These rules cover changeset summaries and registry `meta.chkit.changelog` items. Users read them in release notes, `CHANGELOG.md` and `chkit registry inspect`, so write for someone deciding whether to upgrade:
+
+- One entry per user-facing area, normally one sentence and at most two. Group related fixes by what users upgrading from the latest published release will notice, rather than writing an entry for each PR or follow-up.
+- Say what changed for the user (fixed, added, now behaves like X), naming the command, option or export they touch. Don't describe the implementation.
+- Leave out internal mechanisms, tests, rationale, edge-case lists and lists of removed internals. The code, docs and PR carry those.
+- Only when a user must act, add one short `- Breaking: …` line below the entry per breaking change or required action. In a template changelog, make it its own item starting with `Breaking:`.
+
+Examples from real entries:
+
+- Bad: "Retry only transient ingestion failures, each in exactly one layer." followed by 13 bullets on `cause` chains, queue slots, test helpers and every removed export. Good, with the new `context.fetch` in its own changeset:
+
+  ```markdown
+  Ingestion retries only transient request failures; any other failure stops the stream, and the next run resumes from its last checkpoint.
+
+  - Breaking: `classifyError` is removed; map rate limits with `HttpError.withStatus`.
+  - Breaking: remove `retry` from `defineStream` and `definePipeline`; retries need no configuration.
+  ```
+
+- Bad: four paragraphs on row hashing, write-unit tokens, `input_format_try_infer_datetimes` and replay mechanics. Good:
+
+  ```markdown
+  Ingestion rejects an invalid `maxRowsPerInsert` instead of hanging, and accepts ISO timestamps and `Date` values in DateTime columns.
+
+  - Breaking: finish interrupted runs before upgrading; replaying one across the upgrade can insert duplicate rows.
+  ```
+
+- Template item. Bad: "Add fixture-tested RateLimit-Reset seconds fallback on HTTP 429 when Retry-After is absent or not parsed by the shared HTTP parser, without changing permission failures or transcript availability handling." Good: "Wait for Circleback's `RateLimit-Reset` when a 429 response has no `Retry-After`."
+
+## 5. Commit All Changes
+
+Stage and commit all changes including changeset files. Follow any user instructions about commit message style.
+
+## 6. Push and Create PR
+
+1. Push to origin with `-u` flag if the branch has no upstream
+2. Use `gh pr create --base main` with:
+   - Title under 80 characters
+   - Description covering ALL changes in the workspace diff (not just the latest commit)
+   - Keep description under five sentences unless instructed otherwise
+
+Write the description to a file and pass it with `gh pr create --base main --title "title here" --body-file <file>`.
+
+When running in Replicas, include the originating workspace link in the PR description, preserve any existing Replicas footer and co-author trailers, and state that an automatic review will follow. Use the actual workspace URL supplied by the environment; do not invent one. This skill does not configure or trigger automatic reviews.
+
+## 7. Watch for Review Feedback
+
+After opening the PR, answer its review comments: push fixes for actionable ones and reply on the PR. Don't rely on `gh event listen`; event subscriptions may be off for the account.
+
+- In a Replicas workspace, review comments on the PR are delivered to the authoring workspace automatically.
+- Elsewhere, check them with `gh pr view <number> --comments` before calling the work done.
+
+Don't review the PR yourself as part of creating it; that is the `review` skill's job.
+
+## Common Mistakes to Avoid
+
+- **Releasing the wrong surface**: Template-only changes need template releases, not package changesets. Package behavior changes need changesets, including in mixed registry/package PRs.
+- **Calling package bug fixes "internal"**: If the code change fixes something that was broken for package users (e.g., wrong file paths, incorrect defaults, broken commands), it needs a changeset — even if only internal files were modified.
+- **Describing only the latest commit**: The PR description should cover the entire branch diff.
+- **Skipping docs updates**: If a change is user-facing enough to need a changeset, it almost certainly needs a docs update too. New flags, options, commands, and plugin features must be reflected in the corresponding docs page.

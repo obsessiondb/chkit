@@ -13,6 +13,7 @@ from chkit.core.codec_rules import column_codec_problem
 from chkit.core.column_default import (
     LEGACY_EXPRESSION_PREFIX,
     column_type_accepts_string_literal,
+    nullable_column_type,
     parse_column_default,
     reads_unparsable_ephemeral_literal_as_null,
     render_default,
@@ -45,7 +46,13 @@ from chkit.core.model import (
     ValidationIssueCode,
 )
 from chkit.core.projection import is_index_projection, normalize_projection_index
-from chkit.core.sql_lexer import SQLToken, js_trim, string_literal_value, tokenize_sql
+from chkit.core.sql_lexer import (
+    SQLToken,
+    js_regex,
+    js_trim,
+    string_literal_value,
+    tokenize_sql,
+)
 from chkit.core.sql_normalizer import normalize_sql_fragment
 from chkit.core.sql_scan import strip_wrapping_parens
 from chkit.core.text_index import render_text_index_type
@@ -75,9 +82,11 @@ def _validate_column_codec(
 ) -> None:
     if column.codec is None:
         return
-    # The type as rendered (`nullable=True` is `Nullable(T)`), like render_column_type.
+    # The type as rendered, like render_column_type.
     type_ = js_trim(str(column.type))
-    problem = column_codec_problem(column.codec, f"Nullable({type_})" if column.nullable else type_)
+    problem = column_codec_problem(
+        column.codec, nullable_column_type(type_) if column.nullable else type_
+    )
     if problem is None:
         return
     _push(
@@ -212,10 +221,10 @@ def _validate_kafka_table(definition: TableDefinition, issues: list[ValidationIs
                 "ALIAS, or EPHEMERAL definition. Compute values in the materialized view.",
             )
     settings = definition.settings or {}
-    if re.fullmatch(r"Kafka\s*(?:\(\s*\))?", definition.engine.strip(), re.IGNORECASE):
+    if re.fullmatch(js_regex(r"Kafka\s*(?:\(\s*\))?"), js_trim(definition.engine), re.IGNORECASE):
         for key in ("kafka_broker_list", "kafka_topic_list", "kafka_group_name", "kafka_format"):
             setting = settings.get(key)
-            if not isinstance(setting, str) or not setting.strip():
+            if not isinstance(setting, str) or not js_trim(setting):
                 _push(
                     issues,
                     definition,
@@ -304,7 +313,7 @@ def _validate_column_default(
     type_ = js_trim(column.type)
     if column_type_accepts_string_literal(type_):
         return
-    effective_type = f"Nullable({type_})" if column.nullable else type_
+    effective_type = nullable_column_type(type_) if column.nullable else type_
     _push(issues, definition, "column_default_looks_like_expression",
           _describe_quoted_function_default(subject, kind, effective_type, parsed.value))
 
@@ -526,7 +535,7 @@ def _validate_unstored_column_references(
 def _engine_arguments(engine: str) -> list[str]:
     """Bare engine arguments, with one tuple level flattened: ``SummingMergeTree((a, b))``."""
     # Only MergeTree-family parameters name columns; e.g. Distributed takes a cluster name.
-    match = re.fullmatch(r"\s*\w*MergeTree\s*\((.*)\)\s*", engine, re.DOTALL)
+    match = re.fullmatch(js_regex(r"\s*\w*MergeTree\s*\((.*)\)\s*"), engine, re.DOTALL)
     arguments = split_top_level_comma(match.group(1)) if match else []
     parts = [p for arg in arguments for p in split_top_level_comma(strip_wrapping_parens(arg))]
     return [part for part in parts if not part.startswith("'")]
@@ -534,7 +543,7 @@ def _engine_arguments(engine: str) -> list[str]:
 
 def _unquote(name: str) -> str:
     """A column name with its backtick or double-quote identifier quotes removed."""
-    name = name.strip()
+    name = js_trim(name)
     return name[1:-1] if len(name) > 1 and name[0] == name[-1] and name[0] in "`\"" else name
 
 
@@ -632,12 +641,14 @@ def _validate_table(definition: TableDefinition, issues: list[ValidationIssue]) 
 
 
 _INTERVAL_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^\s*\d+\s+(SECOND|MINUTE|HOUR|DAY|WEEK|MONTH|YEAR)"
-    r"(\s+\d+\s+(SECOND|MINUTE|HOUR|DAY|WEEK|MONTH|YEAR))*\s*$",
+    js_regex(
+        r"^\s*\d+\s+(SECOND|MINUTE|HOUR|DAY|WEEK|MONTH|YEAR)"
+        r"(\s+\d+\s+(SECOND|MINUTE|HOUR|DAY|WEEK|MONTH|YEAR))*\s*$"
+    ),
     re.IGNORECASE,
 )
 
-_REPLICATED_ENGINE_PATTERN: Final[re.Pattern[str]] = re.compile(r"^(Shared|Replicated)")
+_REPLICATED_ENGINE_PATTERN: Final[re.Pattern[str]] = re.compile(r"^Replicated")
 
 
 def _validate_interval(
@@ -662,7 +673,6 @@ def _validate_interval(
 def _validate_materialized_view(
     definition: MaterializedViewDefinition,
     issues: list[ValidationIssue],
-    definitions: list[SchemaDefinition],
 ) -> None:
     refresh = definition.refresh
     if refresh is None:
@@ -706,27 +716,6 @@ def _validate_materialized_view(
             f"DEPENDS ON with REFRESH AFTER; ClickHouse only allows DEPENDS ON "
             f"with REFRESH EVERY.",
         )
-
-    if not refresh.append:
-        target: TableDefinition | None = None
-        for other in definitions:
-            if (
-                isinstance(other, TableDefinition)
-                and other.database == definition.to.database
-                and other.name == definition.to.name
-            ):
-                target = other
-                break
-        if target is not None and _REPLICATED_ENGINE_PATTERN.match(target.engine) is not None:
-            _push(
-                issues,
-                definition,
-                "refresh_append_required_for_replicated_target",
-                f"Materialized view {definition.database}.{definition.name} refreshes "
-                f"a replicated target {target.database}.{target.name} ({target.engine}) "
-                f"without APPEND. ClickHouse rejects this combination. Set "
-                f"refresh.append = true, or target a non-replicated table.",
-            )
 
 
 def _validate_dictionary(  # noqa: PLR0912
@@ -785,7 +774,7 @@ def _validate_dictionary(  # noqa: PLR0912
                     f'references missing attribute "{column}"',
                 )
 
-    if len(definition.source.strip()) == 0:
+    if len(js_trim(definition.source)) == 0:
         _push(
             issues,
             definition,
@@ -794,7 +783,7 @@ def _validate_dictionary(  # noqa: PLR0912
             f'requires a non-empty "source"',
         )
 
-    if len(definition.layout.strip()) == 0:
+    if len(js_trim(definition.layout)) == 0:
         _push(
             issues,
             definition,
@@ -803,7 +792,7 @@ def _validate_dictionary(  # noqa: PLR0912
             f'requires a non-empty "layout"',
         )
 
-    if len(definition.lifetime.strip()) == 0:
+    if len(js_trim(definition.lifetime)) == 0:
         _push(
             issues,
             definition,
@@ -880,7 +869,7 @@ def validate_definitions(definitions: Iterable[SchemaDefinition]) -> list[Valida
         if isinstance(definition, TableDefinition):
             _validate_table(definition, issues)
         elif isinstance(definition, MaterializedViewDefinition):
-            _validate_materialized_view(definition, issues, materialized)
+            _validate_materialized_view(definition, issues)
         elif isinstance(definition, DictionaryDefinition):
             _validate_dictionary(definition, issues)
 
@@ -900,9 +889,15 @@ def collect_definition_warnings(definitions: Iterable[SchemaDefinition]) -> list
     ``"'standard'"``, renders as ``'''standard'''`` and keeps the quotes in the
     value, which is usually SQL written without ``SQLExpression``. A value may
     contain quotes, so it only warns.
+
+    A refreshable materialized view without APPEND whose target is ``Replicated*``
+    also only warns: ClickHouse refuses it in a non-replicated database (Atomic),
+    but ObsessionDB, ClickHouse Cloud and Replicated databases accept it, and
+    chkit cannot see the database engine offline.
     """
+    materialized: list[SchemaDefinition] = list(definitions)
     issues: list[ValidationIssue] = []
-    for definition in definitions:
+    for definition in materialized:
         if isinstance(definition, TableDefinition):
             for column in definition.columns:
                 kind = column.default_kind or "DEFAULT"
@@ -935,7 +930,41 @@ def collect_definition_warnings(definitions: Iterable[SchemaDefinition]) -> list
                     "dictionary defaults are literals only. "
                     "If the quotes belong to the value, ignore this warning.",
                 )
+        elif isinstance(definition, MaterializedViewDefinition):
+            _warn_replace_refresh_of_replicated_target(definition, materialized, issues)
     return issues
+
+
+def _warn_replace_refresh_of_replicated_target(
+    definition: MaterializedViewDefinition,
+    definitions: list[SchemaDefinition],
+    issues: list[ValidationIssue],
+) -> None:
+    if definition.refresh is None or definition.refresh.append:
+        return
+    target = next(
+        (
+            other
+            for other in definitions
+            if isinstance(other, TableDefinition)
+            and other.database == definition.to.database
+            and other.name == definition.to.name
+        ),
+        None,
+    )
+    if target is None or _REPLICATED_ENGINE_PATTERN.match(target.engine) is None:
+        return
+    _push(
+        issues,
+        definition,
+        "refresh_append_required_for_replicated_target",
+        f"Materialized view {definition.database}.{definition.name} refreshes "
+        f"a replicated target {target.database}.{target.name} ({target.engine}) "
+        f"without APPEND. ClickHouse refuses this in a non-replicated database such "
+        f"as Atomic; ObsessionDB, ClickHouse Cloud and Replicated databases accept "
+        f"it. On a non-replicated database, set refresh.append = true or target a "
+        f"non-replicated table.",
+    )
 
 
 def _quoted_string_default(value: ColumnDefaultValue | None) -> tuple[str, str | None] | None:

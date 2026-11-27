@@ -14,6 +14,9 @@ import {
   quoteIdent,
   runCli,
   runCliWithRetry,
+  runOnceVisible,
+  waitForTable,
+  waitForView,
 } from './e2e-testkit.js'
 
 /**
@@ -115,9 +118,8 @@ describe('comments e2e (#464)', () => {
     240_000
   )
 
-  // ObsessionDB applies MODIFY COMMENT on one replica only; the server fix is
-  // tracked from #407. chkit emits the same SQL on every target, and verify
-  // still runs these cases.
+  // ObsessionDB applies MODIFY COMMENT on one replica only, a server bug. chkit
+  // emits the same SQL on every target, and verify still runs these cases.
   test.skipIf(onObsessionDB)(
     'table, view, materialized view and dictionary comments: create, change, remove, empty, pull round trip and server drift',
     async () => {
@@ -223,11 +225,17 @@ describe('comments e2e (#464)', () => {
       const executor = createLiveExecutor(env)
       const { database } = fixture
       try {
+        // Each request can land on another replica: wait for every CREATE on
+        // all of them before the next statement needs it (#712).
         await executor.command(`CREATE DATABASE IF NOT EXISTS ${quoteIdent(database)}`)
-        await executor.command(`CREATE TABLE ${quoteIdent(database)}.src (id UInt64) ENGINE = MergeTree ORDER BY id`)
+        await runOnceVisible(() =>
+          executor.command(`CREATE TABLE ${quoteIdent(database)}.src (id UInt64) ENGINE = MergeTree ORDER BY id`)
+        )
+        await waitForTable(executor, database, 'src')
         await executor.command(
           `CREATE MATERIALIZED VIEW ${quoteIdent(database)}.inner_mv ENGINE = MergeTree ORDER BY id COMMENT 'maps src TO nothing' AS SELECT id FROM ${quoteIdent(database)}.src`
         )
+        await waitForView(executor, database, 'inner_mv')
         const pulled = await pullSchema(fixture)
         expect(pulled.warnings).toEqual([
           `Materialized view "${database}.inner_mv" stores its rows in an inner table (it has no TO table), which the schema DSL does not support. Pull skipped the view and its inner table.`,

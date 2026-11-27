@@ -8,12 +8,14 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from chkit.cli.commands.migrate_errors import MigrateError
+from chkit.cli.commands.migrate_errors import MigrateError, recorded_statements_changed_error
 from chkit.cli.journal_store import MigrationRowState, OperationState, OperationStatus
 from chkit.cli.safety_markers import MigrationOperationSummary
+from chkit.core.sql_lexer import js_trim
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +24,8 @@ class RecoveryTargets:
 
     retry_target: str | None
     abandon_target: str | None
+    # ``--mark-applied`` / ``--mark-not-applied <migration>``: (migration, outcome).
+    mark_target: tuple[str, Literal["applied", "not-applied"]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +34,13 @@ class StatementIdentity:
     key: str
     # False for a statement without an ``-- operation:`` marker, matched by position only.
     marked: bool
+    # The ``statement_fingerprint`` of the statement; None when its SQL cannot
+    # be checked yet, because a plugin's on_before_apply may still rewrite it.
+    fingerprint: str | None = None
+    # The marker releases before #831 gave the statement, when it differs:
+    # they paired the n-th marker of the file with the n-th statement, and the
+    # journal names the marker they gave each statement they ran.
+    legacy: StatementIdentity | None = None
 
 
 class Marker(BaseModel):
@@ -50,6 +61,8 @@ class OperationMismatch(BaseModel):
     recorded: Marker
     # None when the edited file has no statement at that position.
     current: Marker | None
+    # The marker matches, but the statement's SQL is not the one that ran (#599).
+    sql_changed: bool = Field(..., serialization_alias="sqlChanged")
 
 
 class RecordedStatement(BaseModel):
@@ -74,6 +87,9 @@ class SharedMarkerMismatch(BaseModel):
 class RetryEditOk:
     completed: int
     unmarked_completed: int
+    # The unmarked ones the journal recorded without a fingerprint: matched by
+    # position only.
+    position_only_completed: int
     # 0-based index of the first statement that did not complete; None when all did.
     resume_index: int | None
     ok: bool = True
@@ -98,6 +114,9 @@ def resolve_recovery_targets(
     abandon: str | None,
     table: str | None = None,
     allow_destructive: bool = False,
+    mark_applied: str | None = None,
+    mark_not_applied: str | None = None,
+    cancel_lock_queries: bool = False,
 ) -> RecoveryTargets:
     """Read --retry and --abandon; usage errors surface before any connection."""
     retry_target = (
@@ -119,12 +138,50 @@ def resolve_recovery_targets(
                 "resets the journal state of one migration and applies nothing."
             )
             raise MigrateError("invalid_usage", msg)
-    return RecoveryTargets(retry_target=retry_target, abandon_target=abandon_target)
+    mark_target = _resolve_mark_target(
+        mark_applied,
+        mark_not_applied,
+        {
+            "--retry": retry is not None,
+            "--abandon": abandon is not None,
+            "--table": table is not None,
+            "--allow-destructive": allow_destructive,
+            "--cancel-lock-queries": cancel_lock_queries,
+        },
+    )
+    return RecoveryTargets(
+        retry_target=retry_target, abandon_target=abandon_target, mark_target=mark_target
+    )
+
+
+def _resolve_mark_target(
+    applied: str | None, not_applied: str | None, present: dict[str, bool]
+) -> tuple[str, Literal["applied", "not-applied"]] | None:
+    if applied is not None and not_applied is not None:
+        msg = (
+            "--mark-applied and --mark-not-applied cannot be combined: each records one "
+            "outcome of the stopped statement."
+        )
+        raise MigrateError("invalid_usage", msg)
+    flag = "--mark-applied" if applied is not None else "--mark-not-applied"
+    raw = applied if applied is not None else not_applied
+    if raw is None:
+        return None
+    migration = normalize_migration_name(raw, flag)
+    # Flags that mean nothing next to a mark, which only changes the journal.
+    conflicts = [name for name, given in present.items() if given]
+    if conflicts:
+        msg = (
+            f"{flag} cannot be combined with {', '.join(conflicts)}. It only records the "
+            "outcome of one statement in the journal and applies nothing."
+        )
+        raise MigrateError("invalid_usage", msg)
+    return migration, "applied" if applied is not None else "not-applied"
 
 
 def normalize_migration_name(raw: str, flag: str) -> str:
     """``name``, ``name.sql`` or a path to the file → ``name.sql``."""
-    base = re.split(r"[\\/]", raw.strip())[-1].strip()
+    base = js_trim(re.split(r"[\\/]", js_trim(raw))[-1])
     if base in {"", ".sql"}:
         msg = (
             f"{flag} requires a migration file name, for example "
@@ -135,19 +192,42 @@ def normalize_migration_name(raw: str, flag: str) -> str:
 
 
 def statement_identity(
-    operations: Sequence[MigrationOperationSummary], index: int
+    operations: Sequence[MigrationOperationSummary | None], index: int
 ) -> StatementIdentity:
     """The (type, key) the journal records for statement ``index``."""
-    if index >= len(operations):
+    operation = operations[index] if index < len(operations) else None
+    if operation is None:
         return StatementIdentity(type="sql_statement", key=f"statement:{index}", marked=False)
-    operation = operations[index]
     return StatementIdentity(type=operation.type, key=operation.key, marked=True)
 
 
 def statement_identities(
-    operations: Sequence[MigrationOperationSummary], statement_count: int
+    operations: Sequence[MigrationOperationSummary | None],
+    fingerprints: Sequence[str | None],
+    legacy_operations: Sequence[MigrationOperationSummary],
 ) -> list[StatementIdentity]:
-    return [statement_identity(operations, index) for index in range(statement_count)]
+    """One identity per statement; ``fingerprints`` has one entry per statement.
+
+    ``operations`` has the marker of each statement
+    (``extract_statement_operations``), ``legacy_operations`` the file's
+    markers in order, as releases before #831 paired them
+    (``extract_migration_operation_summaries``).
+    """
+    out: list[StatementIdentity] = []
+    for index, fingerprint in enumerate(fingerprints):
+        marker = statement_identity(operations, index)
+        legacy = statement_identity(legacy_operations, index)
+        differs = (legacy.type, legacy.key) != (marker.type, marker.key)
+        out.append(
+            StatementIdentity(
+                type=marker.type,
+                key=marker.key,
+                marked=marker.marked,
+                fingerprint=fingerprint,
+                legacy=legacy if differs else None,
+            )
+        )
+    return out
 
 
 def verify_retry_edit(
@@ -157,10 +237,40 @@ def verify_retry_edit(
     """Whether --retry may resume an in-progress migration with an edited file.
 
     apply skips completed statements and re-attaches a running async
-    statement by position, so each of them must keep its position and
-    operation marker. The journal records only type and key per statement,
-    not its SQL.
+    statement by position, so each of them must keep its position, operation
+    marker and, where the journal recorded its fingerprint, its SQL (#599). A
+    record from an older release has no fingerprint and is matched by position
+    and marker.
+
+    The records of a release before #831 name the markers it paired by order.
+    When the statements' own markers do not match them, every record is
+    checked against that pairing instead, as a whole, so a marker that several
+    statements share keeps its count (#831).
     """
+    own = _check_retry_edit(operations, identities)
+    if isinstance(own, RetryEditOk) or all(i.legacy is None for i in identities):
+        return own
+    legacy = _check_retry_edit(
+        operations,
+        [
+            i
+            if i.legacy is None
+            else StatementIdentity(
+                type=i.legacy.type,
+                key=i.legacy.key,
+                marked=i.legacy.marked,
+                fingerprint=i.fingerprint,
+            )
+            for i in identities
+        ],
+    )
+    return legacy if isinstance(legacy, RetryEditOk) else own
+
+
+def _check_retry_edit(
+    operations: Sequence[OperationState],
+    identities: Sequence[StatementIdentity],
+) -> RetryEditCheck:
     bound = sorted(
         (op for op in operations if _is_bound_to_position(op)),
         key=lambda op: op.operation_index,
@@ -168,13 +278,14 @@ def verify_retry_edit(
     mismatches: list[OperationMismatch] = []
     completed = 0
     unmarked_completed = 0
+    position_only_completed = 0
     for op in bound:
         current = (
             identities[op.operation_index]
             if op.operation_index < len(identities)
             else None
         )
-        if current is None or not _same_identity(current, op):
+        if current is None or not _same_identity(current, op) or not _same_sql(current, op):
             mismatches.append(
                 OperationMismatch(
                     statement=op.operation_index + 1,
@@ -186,14 +297,20 @@ def verify_retry_edit(
                         if current is None
                         else Marker(type=current.type, key=current.key)
                     ),
+                    sql_changed=current is not None and _same_identity(current, op),
                 )
             )
             continue
         if op.status != "completed":
             continue
         completed += 1
-        if not current.marked:
-            unmarked_completed += 1
+        if current.marked:
+            continue
+        unmarked_completed += 1
+        # A recorded fingerprint is checked here, or by apply once plugins have
+        # rewritten the statements.
+        if op.fingerprint == "":
+            position_only_completed += 1
     shared = _find_shared_marker_mismatches(operations, identities, mismatches)
     if mismatches or shared:
         return RetryEditMismatch(mismatches=mismatches, shared_markers=shared)
@@ -204,6 +321,7 @@ def verify_retry_edit(
     return RetryEditOk(
         completed=completed,
         unmarked_completed=unmarked_completed,
+        position_only_completed=position_only_completed,
         resume_index=resume_index,
     )
 
@@ -225,11 +343,12 @@ def retry_mismatch_error(
                 f"(async query_id {mismatch.query_id})"
             )
         )
-        found = (
-            f"the edited file has no statement {statement}"
-            if current is None
-            else f"the edited file has {current.type} {current.key} there"
-        )
+        if current is None:
+            found = f"the edited file has no statement {statement}"
+        elif mismatch.sql_changed:
+            found = "the edited file has different SQL there"
+        else:
+            found = f"the edited file has {current.type} {current.key} there"
         lines.append(f"  statement {statement}: {label}, but {found}")
     for shared in check.shared_markers:
         statements = _join_with_and(
@@ -264,7 +383,8 @@ def retry_mismatch_error(
         "running no longer match the edited file.\n"
         f"{joined}\n"
         "chkit skips completed statements and re-attaches running async statements "
-        "by position, so they must keep their position and operation marker."
+        "by position, so they must keep their position, operation marker and SQL "
+        "(comments and whitespace may change)."
         f"{shared_hint}{running_hint}"
         "\nRestore them, or discard the partial run so the next apply starts the "
         f"file over: chkit migrate --apply --abandon {migration}",
@@ -283,7 +403,11 @@ def rebase_in_progress_state(
     Completed statements stay recorded (--retry verified them). A failed or
     started statement stays only if the same operation still sits at its
     index, so a retry keeps its ``-- before-retry:`` compensation and query
-    id; any other record is dropped.
+    id; any other record is dropped. A record under the marker a release
+    before #831 gave the statement stays too when it is an attempt of this
+    statement: an async attempt --retry matched, or one the journal recorded
+    with the statement's SQL. Another statement's record never passes on its
+    compensation (#831).
     """
 
     def keep(op: OperationState) -> bool:
@@ -291,7 +415,14 @@ def rebase_in_progress_state(
             return True
         if op.operation_index >= len(identities):
             return False
-        return _same_identity(identities[op.operation_index], op)
+        current = identities[op.operation_index]
+        if _same_identity(current, op):
+            return True
+        if current.legacy is None or not _same_identity(current.legacy, op):
+            return False
+        return _is_bound_to_position(op) or (
+            op.fingerprint != "" and op.fingerprint == current.fingerprint
+        )
 
     return state.model_copy(
         update={
@@ -299,6 +430,102 @@ def rebase_in_progress_state(
             "applied_at": applied_at,
             "operations": [op for op in state.operations if keep(op)],
         }
+    )
+
+
+def split_changed_statements(
+    operations: Sequence[OperationState],
+    *,
+    legacy: Sequence[str],
+    current: Sequence[str],
+    positions_kept: bool,
+) -> list[int]:
+    """The statements (1-based) of an in-progress state that completed or
+    started at a position where the split before #562 and the current split of
+    the file give different statements.
+
+    A state recorded with the old split would resume at the wrong statements
+    there: skip one that never ran, or run one again.
+
+    The journal indexes the statements ``on_before_apply`` returns. They keep
+    the positions of the split only when the plugins returned them unchanged;
+    when a plugin added, removed, moved or rewrote any, the positions cannot be
+    matched, so every recorded statement counts as changed once the two splits
+    differ. A statement recorded with its fingerprint is checked by
+    ``recorded_statement_mismatches`` instead (#599).
+    """
+    if list(legacy) == list(current):
+        return []
+
+    def at(items: Sequence[str], index: int) -> str | None:
+        return items[index] if 0 <= index < len(items) else None
+
+    return sorted(
+        op.operation_index + 1
+        for op in operations
+        if op.status in {"completed", "started"}
+        and op.fingerprint == ""
+        and (
+            not positions_kept
+            or at(legacy, op.operation_index) != at(current, op.operation_index)
+        )
+    )
+
+
+def recorded_statement_mismatches(
+    operations: Sequence[OperationState], fingerprints: Sequence[str]
+) -> list[int]:
+    """Statements (1-based) recorded with a fingerprint they no longer have.
+
+    Those an in-progress state records as completed, or as a running async
+    statement, where the statement at that position of this run (one entry of
+    ``fingerprints`` per statement) has another fingerprint (#599). apply would
+    skip or re-attach them by position, though they are not the statements
+    that ran.
+    """
+    return sorted(
+        op.operation_index + 1
+        for op in operations
+        if _is_bound_to_position(op)
+        and op.fingerprint != ""
+        and (
+            fingerprints[op.operation_index]
+            if 0 <= op.operation_index < len(fingerprints)
+            else None
+        )
+        != op.fingerprint
+    )
+
+
+def assert_completed_statement(
+    state: MigrationRowState,
+    *,
+    migration: str,
+    index: int,
+    fingerprint: str,
+    cli_version: str,
+) -> None:
+    """Raise when statement ``index`` is recorded as completed with a
+    fingerprint the statement this run would skip does not have (#599).
+
+    Every skip checks the record it reads, not only the state the run started
+    with: a later read can return a version the first check never saw.
+    """
+    recorded = next(
+        (
+            op
+            for op in state.operations
+            if op.operation_index == index and op.status == "completed"
+        ),
+        None,
+    )
+    if recorded is None or recorded.fingerprint in ("", fingerprint):
+        return
+    raise recorded_statements_changed_error(
+        migration=migration,
+        statements=[index + 1],
+        recorded_by=state.chkit_version,
+        cli_version=cli_version,
     )
 
 
@@ -361,6 +588,16 @@ def _is_bound_to_position(op: OperationState) -> bool:
 
 def _same_identity(identity: StatementIdentity, op: OperationState) -> bool:
     return identity.type == op.operation_type and identity.key == op.operation_key
+
+
+def _same_sql(identity: StatementIdentity, op: OperationState) -> bool:
+    """A record without a fingerprint, or a statement that cannot be checked
+    yet, is matched by position and marker only."""
+    return (
+        op.fingerprint == ""
+        or identity.fingerprint is None
+        or identity.fingerprint == op.fingerprint
+    )
 
 
 def _marker_of(op: OperationState) -> Marker:

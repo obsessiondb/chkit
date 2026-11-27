@@ -18,6 +18,7 @@ chkit check [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--strict` | boolean | `false` | Force all check policies on, regardless of config |
+| `-t`, `--table <selector>` | string | — | Scope the drift and plugin checks to matching tables; pending and checksum checks still cover all migrations ([details](/cli/overview/#table-scope)) |
 
 Global flags documented on [CLI Overview](/cli/overview/#global-flags).
 
@@ -63,6 +64,10 @@ chkit check --strict --json
 # Exit code 0 = all checks pass
 # Exit code 1 = one or more checks failed
 ```
+
+### Migration data-copy warnings
+
+`check` warns about standalone `INSERT` and data-reading/exporting `SELECT` statements in pending migration files, excluding ordinary DDL definitions, `assert_backfill` SELECTs, `SELECT throwIf(...)` guards and SELECT barriers; this warning never changes the exit status. Text prints `Warning: copy.sql, statement 1: Data copies should usually run as resumable backfill jobs; small copies in migrations are acceptable.`; JSON includes the same message without the `Warning: ` prefix in its `warnings` string array, for example `{"warnings": ["copy.sql, statement 1: Data copies …"]}`.
 
 ## Examples
 

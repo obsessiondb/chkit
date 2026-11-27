@@ -1,7 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 
 import fixture from '../../../test/fixtures/sql-splitter.json'
-import { extractExecutableStatements, splitSqlStatements } from './sql-splitter.js'
+import {
+  extractExecutableStatements,
+  extractExecutableStatementsWithComments,
+  extractLegacyExecutableStatements,
+  splitSqlStatements,
+} from './sql-splitter.js'
 
 describe('splitSqlStatements', () => {
   test('splits multiple statements and re-appends the terminating semicolon', () => {
@@ -96,9 +101,10 @@ describe('extractExecutableStatements', () => {
   })
 
   // Contract relied on by migrate/apply.ts: `-- operation:` / `-- chkit-*`
-  // metadata comments are consumed separately (extractMigrationOperationSummaries
-  // reads the raw SQL); the executable stream must contain only real statements,
-  // with string-literal semicolons preserved.
+  // metadata comments are consumed separately (extractStatementOperations reads
+  // them per statement through extractExecutableStatementsWithComments, #831);
+  // the executable stream must contain only real statements, with
+  // string-literal semicolons preserved.
   test('drops migration-metadata comments and returns only executable statements', () => {
     const migration = [
       '-- chkit-migration-format: v1',
@@ -178,14 +184,20 @@ describe('extractExecutableStatements with comment-only statements', () => {
     ])
   })
 
-  test('keeps a `#` or `//` comment that holds a semicolon, so the text after it never runs alone', () => {
-    // ClickHouse reads the whole line as one comment; the splitter cuts it at the `;`.
+  test('reads a `#` or `//` comment that holds a semicolon as one comment, as ClickHouse does (#562)', () => {
     expect(extractExecutableStatements('// DROP TABLE a; DROP TABLE b;\nSELECT 1;')).toEqual([
+      '// DROP TABLE a; DROP TABLE b;\nSELECT 1;',
+    ])
+    expect(extractExecutableStatements('# old: DROP TABLE a; DROP TABLE b;\n')).toEqual([])
+  })
+
+  test('the legacy split keeps cutting such a comment at the semicolon, as before #562', () => {
+    expect(extractLegacyExecutableStatements('// DROP TABLE a; DROP TABLE b;\nSELECT 1;')).toEqual([
       '// DROP TABLE a;',
       'DROP TABLE b;',
       'SELECT 1;',
     ])
-    expect(extractExecutableStatements('# old: DROP TABLE a; DROP TABLE b;\n')).toEqual([
+    expect(extractLegacyExecutableStatements('# old: DROP TABLE a; DROP TABLE b;\n')).toEqual([
       '# old: DROP TABLE a;',
       'DROP TABLE b;',
     ])
@@ -224,6 +236,43 @@ describe('extractExecutableStatements shared fixture', () => {
   for (const { name, sql, statements } of fixture.cases) {
     test(name, () => {
       expect(extractExecutableStatements(sql)).toEqual(statements)
+    })
+    // The markers of each statement are read with the same split (#831).
+    test(`${name}: the statements that carry their comments are the same`, () => {
+      expect(extractExecutableStatementsWithComments(sql).map((statement) => statement.sql)).toEqual(statements)
+    })
+  }
+})
+
+describe('extractExecutableStatementsWithComments (#831)', () => {
+  test('gives each statement the comment lines before it, in runs that only whitespace separates', () => {
+    const sql = [
+      '-- header',
+      '',
+      '-- operation: a',
+      '-- before-retry: x',
+      'SELECT 1; -- after SQL',
+      '/* block */',
+      '-- operation: b',
+      'SELECT',
+      '-- inside',
+      '2;',
+      '-- trailing',
+    ].join('\n')
+    expect(extractExecutableStatementsWithComments(sql)).toEqual([
+      { sql: 'SELECT 1;', commentBlocks: [['-- header', '-- operation: a', '-- before-retry: x']] },
+      { sql: '/* block */\n\nSELECT\n\n2;', commentBlocks: [['-- operation: b'], ['-- inside']] },
+    ])
+  })
+})
+
+// The split before #562, which resume compares against: `legacyStatements`
+// where it differs from `statements`.
+describe('extractLegacyExecutableStatements shared fixture', () => {
+  for (const testCase of fixture.cases) {
+    const expected = 'legacyStatements' in testCase ? testCase.legacyStatements : testCase.statements
+    test(testCase.name, () => {
+      expect(extractLegacyExecutableStatements(testCase.sql)).toEqual(expected)
     })
   }
 })

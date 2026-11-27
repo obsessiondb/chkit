@@ -59,7 +59,7 @@ Migrate this destination with the [schema migration workflow](/tutorials/first-s
 ```ts
 // schema/events.ts
 import { table } from '@chkit/core'
-import { ingestionColumns } from '@chkit/plugin-ingest'
+import { ingestionColumns } from '@chkit/plugin-sync'
 
 export const eventVersions = table({
   database: 'analytics',
@@ -82,7 +82,7 @@ import {
   createClickHouseDestination, createClickHouseJournal,
   createStagedLoaderExecutor, definePipeline, defineStream,
   runIngestion, selectStreams, stagedLoader,
-} from '@chkit/plugin-ingest'
+} from '@chkit/plugin-sync'
 import { eventVersions } from './schema/events.js'
 
 const executor = createStagedLoaderExecutor({
@@ -135,7 +135,7 @@ try {
 
 ## Tune insert size when needed
 
-Start with the defaults. If measured request size or memory use requires smaller physical inserts, import `simpleLoader` from `@chkit/plugin-ingest` and set `loader: simpleLoader({ maxRowsPerInsert: 20_000 })` on the stream. This configures the same loader; it does not change mapping or checkpoint behavior.
+Start with the defaults. If measured request size or memory use requires smaller physical inserts, import `simpleLoader` from `@chkit/plugin-sync` and set `loader: simpleLoader({ maxRowsPerInsert: 20_000 })` on the stream. This configures the same loader; it does not change mapping or checkpoint behavior.
 
 `maxRowsPerInsert` must be a positive integer. Invalid values fail when the loader is instantiated for execution, not when its definition is imported. Keep sizing stable during recovery for the best native retry suppression.
 

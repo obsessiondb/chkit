@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -160,11 +161,44 @@ def test_onboarding_threads_all_flag_values_to_plugin(
     assert captured["org_name"] == "acme"
 
 
-def test_connect_rejects_unknown_value(
-    runner: CliRunner, isolated_cwd: Path
+def _usage_message(output: str) -> str:
+    """The usage error's text, without click's colors, box drawing and line wrapping."""
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", output)
+    return " ".join(re.sub(r"[│╭╮╰╯─]", " ", plain).split())
+
+
+# TS prints the same messages (packages/cli/src/test/short-flags.e2e.test.ts, #569).
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (
+            ["--yes", "--connect", "totally-bogus"],
+            "Invalid value for '--connect': 'totally-bogus' is not one of "
+            "'claim', 'account', 'clickhouse', 'later'.",
+        ),
+        (
+            ["--connect=CLAIM", "--yes"],
+            "Invalid value for '--connect': 'CLAIM' is not one of "
+            "'claim', 'account', 'clickhouse', 'later'.",
+        ),
+        (
+            ["--connect", "bogus", "foo"],
+            "Invalid value for '--connect': 'bogus' is not one of "
+            "'claim', 'account', 'clickhouse', 'later'.",
+        ),
+        (["foo", "--yes"], "Got unexpected extra argument(s) (foo)"),
+        (["--yes", "foo", "bar"], "Got unexpected extra argument(s) (foo bar)"),
+        (["--connect", "claim", "-", "--yes"], "Got unexpected extra argument(s) (-)"),
+    ],
+)
+def test_rejects_invalid_connect_and_extra_arguments_before_writing(
+    runner: CliRunner, isolated_cwd: Path, args: list[str], message: str
 ) -> None:
-    result = runner.invoke(app, ["init", "--yes", "--connect", "totally-bogus"])
+    result = runner.invoke(app, ["init", *args])
     assert result.exit_code != 0
+    assert message in _usage_message(result.output)
+    assert not (isolated_cwd / DEFAULT_CONFIG_FILE).exists()
+    assert not (isolated_cwd / "src").exists()
 
 
 def test_connect_accepts_account(runner: CliRunner, isolated_cwd: Path) -> None:
@@ -206,7 +240,7 @@ def test_try_import_returns_module_when_stub_present() -> None:
     captured: dict[str, Any] = {}
     _install_stub_plugin(captured=captured)
     module = _try_import_obsessiondb()
-    assert module is not None
+    assert isinstance(module, ModuleType)
     assert module.__name__ == OBSESSIONDB_PLUGIN_MODULE
 
 
@@ -217,7 +251,7 @@ def test_try_import_propagates_unrelated_module_not_found() -> None:
     def trigger() -> None:
         raise ModuleNotFoundError("No module named 'something_else'", name="something_else")
 
-    broken.__getattr__ = lambda _name: trigger()  # type: ignore[attr-defined,method-assign]
+    vars(broken)["__getattr__"] = lambda _name: trigger()
     sys.modules[OBSESSIONDB_PLUGIN_MODULE] = broken
     # _try_import_obsessiondb should succeed; the inner error surfaces only on use.
     module = _try_import_obsessiondb()

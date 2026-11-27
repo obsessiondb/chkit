@@ -1,0 +1,1 @@
+Unknown flags, missing values, unsupported short-flag bundles and values supplied to boolean flags fail with the TypeScript CLI messages, exit code 1 and JSON usage envelopes; a following `--` or another long flag cannot become a flag value.

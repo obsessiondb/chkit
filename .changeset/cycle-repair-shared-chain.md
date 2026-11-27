@@ -1,0 +1,5 @@
+---
+"chkit": patch
+---
+
+`generate` repairs temporary default cycles that share one long chain of column defaults, or whose breakers wait for one long chain of other changes, instead of keeping the order that `migrate` rejects with `Cyclic alias detected`.

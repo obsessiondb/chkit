@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+from chkit.core.sql_lexer import is_js_space
+
 _ESCAPES = {"0": 0, "a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, "e": 27}
 _WORD = re.compile(r"(?:\d+(?:\.\d*)?(?:[eE][+-]?\d+)?|[\w$]+|->|<=|>=|!=|<>|\|\||::|==)")
 _CLOSE = {")": "(", "]": "[", "}": "{"}
@@ -28,7 +30,8 @@ _QUOTED_IDENTIFIERS = {
 }
 
 
-def _string_literal(body: str) -> str:
+def string_literal(body: str) -> str:
+    """A string literal's body as the canonical literal of the bytes ClickHouse reads from it."""
     data = bytearray()
     i = 0
     while i < len(body):
@@ -81,7 +84,7 @@ def text_sql_tokens(sql: str) -> list[str]:
     i = 0
     while i < len(sql):
         char = sql[i]
-        if char.isspace():
+        if is_js_space(char):
             i += 1
             continue
         if sql.startswith("--", i):
@@ -113,7 +116,7 @@ def text_sql_tokens(sql: str) -> list[str]:
             if not closed:
                 raise ValueError("Unterminated SQL quote")
             raw = sql[start:i]
-            tokens.append(_string_literal(raw[1:-1]) if char == "'" else raw)
+            tokens.append(string_literal(raw[1:-1]) if char == "'" else raw)
             continue
         if char == "$":
             # ClickHouse reads $tag$...$tag$ as a raw string and stores it as '...'.
@@ -138,6 +141,37 @@ def text_sql_tokens(sql: str) -> list[str]:
     return tokens
 
 
+# Keywords that are operators after an operand (`a OR (b)`) but function names
+# in operand position (`or(a, b)`), and keywords that are never function names.
+_BINARY_KEYWORDS = {"and", "or", "in", "is", "like", "ilike", "between", "div", "mod", "regexp"}
+_PREFIX_KEYWORDS = {"not", "case", "when", "then", "else"}
+
+
+def _ends_operand(token: str | None) -> bool:
+    if token is None:
+        return False
+    if token in (")", "]", "}") or token[:1] in ("'", '"', "`"):
+        return True
+    word = token.lower()
+    # NOT and GLOBAL end an operand for what follows: `x NOT IN (...)`, `x GLOBAL IN (...)`.
+    return (
+        re.match(r"[\w$]", token) is not None
+        and word not in _BINARY_KEYWORDS
+        and not (word in _PREFIX_KEYWORDS and word != "not")
+    )
+
+
+def _is_call(tokens: list[str], i: int) -> bool:
+    """Whether `(` at tokens[i] calls the word before it rather than following a keyword."""
+    word = tokens[i - 1]
+    if not re.fullmatch(r"[^\W\d]\w*", word):
+        return False
+    lower = word.lower()
+    if lower in _PREFIX_KEYWORDS:
+        return False
+    return not (lower in _BINARY_KEYWORDS and _ends_operand(tokens[i - 2] if i >= 2 else None))
+
+
 def format_text_sql(tokens: list[str]) -> str:
     parts = []
     for i, token in enumerate(tokens):
@@ -146,7 +180,10 @@ def format_text_sql(tokens: list[str]) -> str:
             i == 0
             or token in (")", "]", "}", ",", ".")
             or previous in ("(", "[", "{", ".")
-            or (token == "(" and re.fullmatch(r"[^\W\d]\w*", previous))
+            or (token == "(" and _is_call(tokens, i))
+            # `[` after an operand subscripts it, as ClickHouse writes `lower(s)[1]`;
+            # after an operator or keyword it opens an array: `x IN [1]`, `NOT [1]`.
+            or (token == "[" and _ends_operand(previous) and previous.lower() != "not")
         )
         parts.append(("" if tight else " ") + token)
     return "".join(parts)

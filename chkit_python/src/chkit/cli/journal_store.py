@@ -25,22 +25,46 @@ import json
 import os
 import re
 import time
-from datetime import UTC, datetime
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, TypeVar
 
+import typer
 from pydantic import BaseModel, ConfigDict, Field
 
+from chkit import __version__
+from chkit.cli.create_table_columns import create_table_element_names
+from chkit.cli.logging_setup import debug
 from chkit.cli.migration_store import (
     ChecksumMismatch,
     MigrationJournal,
     MigrationJournalEntry,
     checksum_sql,
 )
-from chkit.clickhouse.client import ClickHouseClient, is_unknown_database_error
-from chkit.clickhouse.ddl_propagation import wait_for_table
-from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
+from chkit.clickhouse.client import (
+    ClickHouseClient,
+    QueryResult,
+    clickhouse_error_message,
+    is_unknown_database_error,
+)
+from chkit.clickhouse.control import STRICT_CONTROL_SETTINGS
+from chkit.clickhouse.ddl_propagation import (
+    MAX_RETRIES,
+    RETRY_DELAY_SECONDS,
+    wait_for_column,
+    wait_for_table,
+)
+from chkit.clickhouse.replicas import (
+    ReplicaFanout,
+    all_replicas,
+    resolve_replica_fanout_or_raise,
+)
+from chkit.core.identifier import quote_identifier
 from chkit.core.on_cluster import on_cluster_clause
+from chkit.core.sql_lexer import js_regex, js_trim
+
+_T = TypeVar("_T")
 
 OperationStatus = Literal["started", "completed", "failed"]
 
@@ -61,6 +85,49 @@ class OperationState(BaseModel):
     started_at: str = Field(..., alias="startedAt")
     finished_at: str | None = Field(..., alias="finishedAt")
     last_error: str = Field(..., alias="lastError")
+    # The ``statement_fingerprint`` of the statement this record is about, so a
+    # resume can tell it is still that statement (#599). Empty when it was not
+    # recorded: an older chkit wrote the row, or the journal has no column for
+    # it. Never part of a report.
+    fingerprint: str = Field(..., exclude=True)
+    # Whether this async record names a query id that only this attempt was
+    # submitted under, recorded before its submit (#767). Only that write sets
+    # it; every other write carries it as a read returned it. On a failed
+    # record it also means the server recorded the failure. A write stores it
+    # in the fingerprint (FENCED_FINGERPRINT_PREFIX), never on a completed
+    # record, so a journal without the fingerprint column never has it. Never
+    # part of a report.
+    attempt_fenced: bool = Field(default=False, alias="attemptFenced", exclude=True)
+
+
+# The prefix of the stored fingerprint of a fenced started or failed record (#767).
+# Releases from #599 on compare a started record's fingerprint with the
+# statement's before they resume, so an earlier release stops with
+# statement_split_changed instead of running before-retry SQL without
+# recording the attempt failed first. A read strips it again.
+FENCED_FINGERPRINT_PREFIX: Final[str] = "fenced-attempt;"
+
+
+def stored_fingerprint(op: OperationState) -> str:
+    """The fingerprint a write stores for ``op`` (#767)."""
+    if op.status != "completed" and op.attempt_fenced:
+        return f"{FENCED_FINGERPRINT_PREFIX}{op.fingerprint}"
+    return op.fingerprint
+
+
+def read_stored_fingerprint(stored: str) -> tuple[str, bool]:
+    """The fingerprint a read finds stored, and whether it was fenced (#767)."""
+    if stored.startswith(FENCED_FINGERPRINT_PREFIX):
+        return stored[len(FENCED_FINGERPRINT_PREFIX) :], True
+    return stored, False
+
+
+def operation_as_stored(op: OperationState, fingerprints: bool) -> OperationState:
+    """``op`` as a read returns it after a write with or without the fingerprint column (#767)."""
+    if not fingerprints:
+        return op.model_copy(update={"attempt_fenced": False})
+    fingerprint, fenced = read_stored_fingerprint(stored_fingerprint(op))
+    return op.model_copy(update={"fingerprint": fingerprint, "attempt_fenced": fenced})
 
 
 class MigrationRowState(BaseModel):
@@ -91,13 +158,99 @@ _OPERATIONS_TUPLE_TYPE: Final[str] = (
     "))"
 )
 
+# The ``operations`` tuple with its times as strings. A DateTime64 that
+# toJSONString renders follows the user's date_time_output_format
+# ('1794350634.552' with 'unix_timestamp'), while a CAST to String always
+# gives 'YYYY-MM-DD HH:MM:SS.mmm' (#672).
+_OPERATIONS_READ_TYPE: Final[str] = (
+    "Array(Tuple("
+    "operation_index Int32, "
+    "operation_key String, "
+    "operation_type String, "
+    "query_id String, "
+    "status String, "
+    "started_at String, "
+    "finished_at Nullable(String), "
+    "last_error String"
+    "))"
+)
+_OPERATIONS_SELECT: Final[str] = f"toJSONString(CAST(operations, '{_OPERATIONS_READ_TYPE}'))"
+
+# One fingerprint per entry of ``operations``, in the same order (#599). A
+# separate column, so the ``operations`` type older releases write stays the
+# same. Older releases name their INSERT columns, so a row they write gets
+# ``[]`` here: a fingerprint is only ever read from a row whose writer recorded
+# it for that very record.
+_FINGERPRINTS_COLUMN: Final[str] = "operation_fingerprints"
+_FINGERPRINTS_COLUMN_DEFINITION: Final[str] = f"{_FINGERPRINTS_COLUMN} Array(String) DEFAULT []"
+
+
+class EveryCopyRead(BaseModel):
+    """A statement's record read from every copy of the journal (#767)."""
+
+    covered: bool
+    op: OperationState | None
+
+
+def every_copy_read(
+    rows: list[dict[str, Any]],
+    find_op: Callable[[Any, Any], OperationState | None],
+) -> EveryCopyRead:
+    """Whether one read's per-replica rows cover the journal's replica set (#767).
+
+    A row without a replica name, or a member no row names, leaves the read
+    uncovered; otherwise the newest record among them is the record.
+    """
+    if not rows or any(not isinstance(row["replica"], str) or row["replica"] == "" for row in rows):
+        return EveryCopyRead(covered=False, op=None)
+    read = {row["replica"] for row in rows}
+    # Each server answers once: a duplicate reply (one server listed twice, or
+    # two that share a name) leaves the read uncovered.
+    if len(read) != len(rows):
+        return EveryCopyRead(covered=False, op=None)
+    member_lists = [_decode_members(row["members"]) for row in rows]
+    if any(members is None for members in member_lists):
+        return EveryCopyRead(covered=False, op=None)
+    members = {member for members in member_lists for member in members or []}
+    if not members or not members <= read:
+        return EveryCopyRead(covered=False, op=None)
+    present = [row for row in rows if int(row["present"]) > 0]
+    if not present:
+        return EveryCopyRead(covered=True, op=None)
+    newest = max(present, key=lambda row: str(row["applied_at"]))
+    return EveryCopyRead(
+        covered=True, op=find_op(newest["operations"], newest["operation_fingerprints"])
+    )
+
+
+def _decode_members(value: Any) -> list[str] | None:
+    """A JSON array of non-empty strings, or None when it is anything else.
+
+    The replica set comes as JSON text: the Workbench API returns every cell
+    as a string.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        decoded = json.loads(value)
+    except ValueError:
+        return None
+    if not isinstance(decoded, list) or any(
+        not isinstance(member, str) or member == "" for member in decoded
+    ):
+        return None
+    return decoded
+
+
+_SERVER_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
 
 class _UnknownDatabaseError(Exception):
     pass
 
 
 def resolve_journal_table_name() -> str:
-    candidate = (os.environ.get("CHKIT_JOURNAL_TABLE") or "").strip()
+    candidate = js_trim(os.environ.get("CHKIT_JOURNAL_TABLE") or "")
     if not candidate:
         return _DEFAULT_JOURNAL_TABLE
     if _JOURNAL_TABLE_PATTERN.match(candidate) is None:
@@ -132,8 +285,7 @@ def _parse_bool(value: Any) -> bool:
     return False
 
 
-def _parse_operations(value: Any) -> list[OperationState]:
-    """Decode the ``toJSONString(operations)`` cell into OperationState objects."""
+def _parse_json_list(value: Any) -> list[Any]:
     if value is None or value == "":
         return []
     decoded: Any = value
@@ -142,10 +294,24 @@ def _parse_operations(value: Any) -> list[OperationState]:
             decoded = json.loads(value)
         except json.JSONDecodeError:
             return []
-    if not isinstance(decoded, list):
+    return decoded if isinstance(decoded, list) else []
+
+
+def _parse_fingerprints(value: Any, operation_count: int) -> list[str]:
+    """The fingerprints count only when there is one per operation: a row an
+    older release wrote has ``[]``, and its operations then have none."""
+    decoded = _parse_json_list(value)
+    if len(decoded) != operation_count or not all(isinstance(item, str) for item in decoded):
         return []
+    return [str(item) for item in decoded]
+
+
+def _parse_operations(value: Any, fingerprints_value: Any = None) -> list[OperationState]:
+    """Decode the ``toJSONString(operations)`` cell into OperationState objects."""
+    decoded = _parse_json_list(value)
+    fingerprints = _parse_fingerprints(fingerprints_value, len(decoded))
     out: list[OperationState] = []
-    for raw in decoded:
+    for index, raw in enumerate(decoded):
         if not isinstance(raw, dict):
             continue
         out.append(
@@ -162,9 +328,15 @@ def _parse_operations(value: Any) -> list[OperationState]:
                     else str(raw["finished_at"])
                 ),
                 last_error=str(raw.get("last_error", "")),
+                **_fingerprint_fields(fingerprints[index] if index < len(fingerprints) else ""),
             )
         )
     return out
+
+
+def _fingerprint_fields(stored: str) -> dict[str, Any]:
+    fingerprint, fenced = read_stored_fingerprint(stored)
+    return {"fingerprint": fingerprint, "attempt_fenced": fenced}
 
 
 def _operation_to_tuple_literal(op: OperationState) -> str:
@@ -187,13 +359,18 @@ def _operations_array_literal(operations: list[OperationState]) -> str:
     return f"[{','.join(_operation_to_tuple_literal(op) for op in operations)}]"
 
 
+def _fingerprints_array_literal(operations: list[OperationState]) -> str:
+    quoted = ["'" + _escape_sql_string(stored_fingerprint(op)) + "'" for op in operations]
+    return f"[{','.join(quoted)}]"
+
+
 # ClickHouse errors by code, name and message. clickhouse-connect gives the code
 # and the name in the message; the ObsessionDB console API only the message.
 # Same as TS ``isClickHouseError``.
 _UNKNOWN_TABLE = (
     60,
     "UNKNOWN_TABLE",
-    re.compile(r"Unknown table expression identifier|Table \S+ does not exist"),
+    re.compile(js_regex(r"Unknown table expression identifier|Table \S+ does not exist")),
 )
 _UNKNOWN_IDENTIFIER = (
     47,
@@ -201,12 +378,27 @@ _UNKNOWN_IDENTIFIER = (
     re.compile(r"Unknown expression identifier|Missing columns"),
 )
 _READONLY = (164, "READONLY", re.compile(r"in readonly mode"))
+_ACCESS_DENIED = (497, "ACCESS_DENIED", re.compile(r"Not enough privileges"))
 
 
 def _is_clickhouse_error(error: BaseException, kind: tuple[int, str, re.Pattern[str]]) -> bool:
     code, name, message = kind
     text = str(error)
     return f"Code: {code}." in text or name in text or message.search(text) is not None
+
+
+def _fingerprint_column_warning(table: str, error: BaseException) -> str:
+    """The one line a run prints when it cannot add the fingerprint column, so
+    a user without ALTER on the journal knows the SQL check of --retry is off."""
+    lines = clickhouse_error_message(error).split("\n")
+    reason = js_trim(lines[0]).removesuffix(".")
+    return (
+        f"⚠ Could not add the {_FINGERPRINTS_COLUMN} column to {table} ({reason}), so this "
+        "run records no statement fingerprints: a later --retry or resume checks the "
+        'statements it completes by position and "-- operation:" marker only, not by '
+        f"their SQL. The next migration applied by a user that can ALTER {table} adds "
+        "the column."
+    )
 
 
 def _is_retryable_insert_race(error: BaseException) -> bool:
@@ -228,27 +420,56 @@ class JournalStore:
         "_bootstrapped",
         "_client",
         "_cluster",
+        "_columns_unreadable",
         "_database_missing",
+        "_database_name_read",
+        "_fanout_override",
+        "_fingerprint_column",
+        "_fingerprint_column_added",
         "_last_written",
+        "_newest_version",
         "_on_cluster",
         "_table",
         "_table_missing",
     )
 
     def __init__(
-        self, client: ClickHouseClient, cluster: str | None = None
+        self, client: ClickHouseClient, cluster: str | None = None,
+        *, fanout_override: ReplicaFanout | None = None,
     ) -> None:
         self._client: ClickHouseClient = client
         self._table: str = resolve_journal_table_name()
         self._cluster: str | None = cluster
+        self._fanout_override = fanout_override
         self._on_cluster: str = on_cluster_clause(cluster)
         self._bootstrapped: bool = False
         self._database_missing: bool = False
         # The database exists but the journal does not: reads see no rows, and
         # the first write creates it.
         self._table_missing: bool = False
+        # Whether the journal has the operation_fingerprints column (#599). It
+        # is False only once chkit saw that the column is missing, in a journal
+        # an older release created: this run then reads and writes it as that
+        # release does. Any other failure to tell stops the run instead, so
+        # fingerprints that were recorded are never read as missing.
+        self._fingerprint_column: bool = False
+        self._fingerprint_column_added: bool = False
+        # The user may not read system.columns; the column is then read from
+        # the journal's definition in system.tables.
+        self._columns_unreadable: bool = False
+        # currentDatabase(), once it answered.
+        self._database_name_read: str | None = None
         # Read-your-writes: the last row version this store wrote per migration.
         self._last_written: dict[str, MigrationRowState] = {}
+        # The newest applied_at version per migration that this store read or
+        # wrote. Each write takes a newer one (#672): ReplacingMergeTree keeps
+        # the newest version and the replicated read either row of a tie, so a
+        # write stamped by a clock that stalls, steps back or runs behind the
+        # writer of the version it read would otherwise be lost.
+        self._newest_version: dict[str, datetime] = {}
+
+    def _query(self, statement: str, settings: dict[str, Any] | None = None) -> QueryResult:
+        return self._client.query(statement, {**(settings or {}), "default_format": "JSONStrings"})
 
     @property
     def database_missing(self) -> bool:
@@ -258,7 +479,7 @@ class JournalStore:
     def table_name(self) -> str:
         return self._table
 
-    def _create_table_sql(self) -> str:
+    def _create_table_sql(self, database: str) -> str:
         # In cluster mode the journal must be consistent across every node, so
         # it uses a replicated engine with a no-``{shard}`` Keeper path (one
         # cluster-wide replication group) created ``ON CLUSTER``. ``{uuid}`` is
@@ -270,7 +491,10 @@ class JournalStore:
         # unique cluster-wide — per-shard ``{replica}`` naming (the common
         # multi-shard layout) would otherwise collide. The read path already
         # uses SYNC REPLICA + FINAL + sequential consistency. Single-node/Cloud
-        # keeps the plain engine.
+        # keeps the plain engine. The table is named in its database: the client
+        # retries a statement that fails with UNKNOWN_DATABASE without the
+        # database, which would otherwise create the journal in the server's
+        # default database (#493).
         engine = (
             "ReplicatedReplacingMergeTree("
             "'/clickhouse/tables/{uuid}/chkit_journal', "
@@ -279,19 +503,21 @@ class JournalStore:
             else "ReplacingMergeTree(applied_at)"
         )
         return (
-            f"CREATE TABLE IF NOT EXISTS {self._table}{self._on_cluster} (\n"
+            f"CREATE TABLE IF NOT EXISTS {quote_identifier(database)}.{self._table}"
+            f"{self._on_cluster} (\n"
             f"    name String,\n"
             f"    applied_at DateTime64(3, 'UTC'),\n"
             f"    checksum String,\n"
             f"    chkit_version String,\n"
             f"    migration_completed Bool DEFAULT true,\n"
-            f"    operations {_OPERATIONS_TUPLE_TYPE} DEFAULT []\n"
+            f"    operations {_OPERATIONS_TUPLE_TYPE} DEFAULT [],\n"
+            f"    {_FINGERPRINTS_COLUMN_DEFINITION}\n"
             f") ENGINE = {engine}\n"
             f"ORDER BY (name)\n"
             f"SETTINGS index_granularity = 1"
         )
 
-    def _ensure_table(self, *, create: bool) -> None:  # noqa: PLR0911
+    def _ensure_table(self, *, create: bool) -> None:
         """Make sure the journal can be read or, with ``create``, written.
 
         Only a write creates the journal or adds the columns an old one lacks,
@@ -300,22 +526,20 @@ class JournalStore:
         if self._bootstrapped or (self._table_missing and not create):
             return
         try:
-            self._client.query(
+            self._query(
                 f"SELECT name, migration_completed, operations FROM {self._table} LIMIT 0"
             )
-            self._wait_for_every_replica()
-            self._bootstrapped = True
-            self._table_missing = False
-            return
         except Exception as exc:
             if is_unknown_database_error(exc):
                 self._database_missing = True
                 self._bootstrapped = True
                 return
             if _is_clickhouse_error(exc, _UNKNOWN_IDENTIFIER):
-                # The journal predates per-operation tracking.
-                self._ensure_schema_upgraded()
+                # The journal predates per-operation tracking. Every replica
+                # must have it before its ALTERs run (#700).
                 self._wait_for_every_replica()
+                self._ensure_schema_upgraded()
+                self._fingerprint_column = self._detect_fingerprint_column()
                 self._bootstrapped = True
                 return
             if not create:
@@ -323,29 +547,103 @@ class JournalStore:
                     raise
                 if self._exists_on_another_replica():
                     self._wait_for_every_replica()
+                    self._fingerprint_column = self._detect_fingerprint_column()
                     self._bootstrapped = True
                     return
                 self._table_missing = True
                 return
-        try:
-            self._client.execute(self._create_table_sql())
-        except Exception as exc:
-            if is_unknown_database_error(exc):
-                self._database_missing = True
-                self._bootstrapped = True
-                return
-            raise
+        else:
+            # Only the probe's own error is read above: a failure of the
+            # waits after it stops the run (#700).
+            self._wait_for_every_replica()
+            self._fingerprint_column = self._detect_fingerprint_column()
+            self._bootstrapped = True
+            self._table_missing = False
+            return
+        self._create_journal_table()
         self._wait_for_every_replica()
+        # Another process, maybe an older release, may have created it first.
+        self._fingerprint_column = self._detect_fingerprint_column()
         self._bootstrapped = True
         self._table_missing = False
+
+    def _while_database_propagates(self, what: str, run: Callable[[], _T]) -> _T:
+        """Run ``run``, retrying it while it reaches a replica without the database.
+
+        The probe found the database, so UNKNOWN_DATABASE here means the
+        request reached a replica that has not applied ``CREATE DATABASE`` yet
+        (#493): retry until it has. A database that never arrives stops the
+        run, so the state being written is never dropped.
+        """
+        for attempt in range(1, MAX_RETRIES + 2):
+            try:
+                return run()
+            except Exception as exc:
+                if not is_unknown_database_error(exc):
+                    raise
+                if attempt > MAX_RETRIES:
+                    # The server's message is left out, so the error never
+                    # reads as a missing database itself; it stays the cause.
+                    msg = (
+                        f"Cannot {what}: its database is still missing on the replica "
+                        f"that received the request after {attempt} attempts. Re-run "
+                        "chkit once the database has reached every replica."
+                    )
+                    raise RuntimeError(msg) from exc
+                debug(
+                    "journal",
+                    f"database not yet on this replica — retrying to {what} "
+                    f"(attempt {attempt})",
+                )
+                time.sleep(RETRY_DELAY_SECONDS)
+        raise AssertionError("unreachable")
+
+    def _create_journal_table(self) -> None:
+        self._while_database_propagates(
+            f"create the journal table {self._table}",
+            lambda: self._client.execute(self._create_table_sql(self._database_name())),
+        )
+
+    def _database_name(self) -> str:
+        """currentDatabase(), read once it answers."""
+        if self._database_name_read is None:
+            self._database_name_read = self._while_database_propagates(
+                f"read the database of {self._table}", self._current_database
+            )
+        return self._database_name_read
+
+    def _qualified_table(self) -> str:
+        """The journal as ``database.table``.
+
+        The client retries a statement that fails with UNKNOWN_DATABASE
+        without the database, so every journal INSERT and ALTER names it, or
+        one that reaches a replica without the database would write a journal
+        in the server's default database (#700).
+        """
+        return f"{quote_identifier(self._database_name())}.{self._table}"
+
+    def _replica_fanout(self) -> ReplicaFanout | None:
+        """The replicas to wait for.
+
+        A probe that fails for another reason than a missing cluster or a
+        user that cannot query it stops the run, rather than skip the waits
+        that keep journal writes off a replica without the journal (#700).
+        """
+        # Explicit recovery supplies attested UUID coverage, including one server.
+        if self._fanout_override is not None:
+            return self._fanout_override if self._fanout_override.replicas > 1 else None
+        return self._while_database_propagates(
+            "discover the replicas of the journal",
+            lambda: resolve_replica_fanout_or_raise(self._client, self._cluster),
+        )
 
     def _exists_on_another_replica(self) -> bool:
         # On a multi-replica target, the replica that answered the probe may
         # not have applied another process's CREATE yet.
-        fanout = resolve_replica_fanout(self._client, self._cluster)
+        fanout = self._replica_fanout()
         if fanout is None:
             return False
-        rows = self._client.query(
+        rows = self._query(
             f"SELECT count() AS replicas FROM {all_replicas(fanout, 'system.tables')} "
             f"WHERE database = currentDatabase() AND name = '{self._table}'"
         ).rows
@@ -358,11 +656,162 @@ class JournalStore:
         fails while one of them does not have the table yet, e.g. right after
         the CREATE above or another process's. A single replica needs no wait.
         """
-        if resolve_replica_fanout(self._client, self._cluster) is None:
+        if self._replica_fanout() is None:
             return
-        rows = self._client.query("SELECT currentDatabase() AS database").rows
-        database = str(rows[0]["database"]) if rows else "default"
-        wait_for_table(self._client, database, self._table, cluster=self._cluster)
+        wait_for_table(self._client, self._database_name(), self._table, cluster=self._cluster)
+
+    def _current_database(self) -> str:
+        rows = self._query("SELECT currentDatabase() AS database").rows
+        return str(rows[0].get("database", "default")) if rows else "default"
+
+    def _detect_fingerprint_column(self) -> bool:
+        """Whether the journal has the fingerprint column.
+
+        Only a server that says the column is missing makes it False; any
+        other error stops the run. On several replicas, the column counts when
+        any replica has it (one that lags may not yet), and then every replica
+        must get it, because reads and writes name it.
+        """
+        fanout = self._replica_fanout()
+        if fanout is None:
+            try:
+                self._query(f"SELECT {_FINGERPRINTS_COLUMN} FROM {self._table} LIMIT 0")
+            except Exception as exc:
+                if not _is_clickhouse_error(exc, _UNKNOWN_IDENTIFIER):
+                    raise
+                return False
+            return True
+        try:
+            rows = self._query(
+                f"SELECT count() AS replicas FROM {all_replicas(fanout, 'system.columns')} "
+                f"WHERE database = currentDatabase() AND table = '{self._table}' "
+                f"AND name = '{_FINGERPRINTS_COLUMN}'"
+            ).rows
+        except Exception as exc:
+            if not _is_clickhouse_error(exc, _ACCESS_DENIED):
+                raise
+            debug(
+                "journal",
+                "cannot read system.columns — reading the journal definition from "
+                f"system.tables: {clickhouse_error_message(exc)}",
+            )
+            self._columns_unreadable = True
+            return self._detect_fingerprint_column_from_tables(fanout)
+        if not rows or int(rows[0]["replicas"]) == 0:
+            return False
+        wait_for_column(
+            self._client,
+            self._database_name(),
+            self._table,
+            _FINGERPRINTS_COLUMN,
+            cluster=self._cluster,
+        )
+        return True
+
+    def _replicas_with_fingerprint_column(self, fanout: ReplicaFanout) -> tuple[int, int]:
+        """How many replicas list the journal, and how many define the column.
+
+        Read from each replica's CREATE statement in system.tables, for a user
+        that cannot read system.columns (#402): it answers per replica, as
+        system.columns does. A probe through the journal itself cannot,
+        because a remote query takes its columns from one replica, and
+        ``hasColumnInTable`` is folded into a constant on the replica that runs
+        the query. The CREATE statement is read whatever identifier quoting the
+        user's settings choose; one chkit cannot read stops the run.
+        """
+        rows = self._query(
+            "SELECT hostName() AS replica, create_table_query FROM "
+            f"{all_replicas(fanout, 'system.tables')} "
+            f"WHERE database = currentDatabase() AND name = '{self._table}'"
+        ).rows
+        replicas: set[str] = set()
+        with_column: set[str] = set()
+        for row in rows:
+            replica = str(row["replica"])
+            replicas.add(replica)
+            names = create_table_element_names(str(row["create_table_query"]))
+            if names is None:
+                msg = (
+                    f"Cannot tell whether the journal table {self._table} has the "
+                    f"{_FINGERPRINTS_COLUMN} column: cannot read its definition on replica "
+                    f"{replica}."
+                )
+                raise RuntimeError(msg)
+            if _FINGERPRINTS_COLUMN in names:
+                with_column.add(replica)
+        return len(replicas), len(with_column)
+
+    def _detect_fingerprint_column_from_tables(self, fanout: ReplicaFanout) -> bool:
+        """``_detect_fingerprint_column`` without system.columns.
+
+        The column is missing only when every replica lists the journal
+        without it; when a replica does not list the journal, chkit cannot
+        tell, and stops rather than read recorded fingerprints as missing. A
+        column some replicas have is waited for.
+        """
+        replicas, with_column = self._replicas_with_fingerprint_column(fanout)
+        if with_column > 0:
+            self._wait_for_fingerprint_column_in_tables(fanout)
+            return True
+        if replicas < fanout.replicas:
+            msg = (
+                f"Cannot tell whether the journal table {self._table} has the "
+                f"{_FINGERPRINTS_COLUMN} column: {replicas} of {fanout.replicas} replicas "
+                "list it. Re-run chkit once every replica has the table."
+            )
+            raise RuntimeError(msg)
+        debug("journal", f"no replica has the {_FINGERPRINTS_COLUMN} column")
+        return False
+
+    def _wait_for_fingerprint_column_in_tables(self, fanout: ReplicaFanout) -> None:
+        for attempt in range(MAX_RETRIES + 1):
+            _, with_column = self._replicas_with_fingerprint_column(fanout)
+            if with_column >= fanout.replicas:
+                return
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_DELAY_SECONDS)
+        msg = f"waitForColumn: {self._table}.{_FINGERPRINTS_COLUMN} not yet visible"
+        raise RuntimeError(msg)
+
+    def _wait_for_fingerprint_column(self, fanout: ReplicaFanout) -> None:
+        """Wait until every replica has the fingerprint column, after this run added it."""
+        if self._columns_unreadable:
+            self._wait_for_fingerprint_column_in_tables(fanout)
+            return
+        wait_for_column(
+            self._client,
+            self._database_name(),
+            self._table,
+            _FINGERPRINTS_COLUMN,
+            cluster=self._cluster,
+        )
+
+    def _ensure_fingerprint_column(self) -> None:
+        """Add the fingerprint column to a journal an older release created.
+
+        On the first write of a run. A user that cannot ALTER the journal
+        still migrates, without fingerprints, as before (#599).
+        """
+        if self._fingerprint_column or self._fingerprint_column_added:
+            return
+        self._fingerprint_column_added = True
+        try:
+            self._client.execute(
+                f"ALTER TABLE {self._qualified_table()}{self._on_cluster} "
+                f"ADD COLUMN IF NOT EXISTS {_FINGERPRINTS_COLUMN_DEFINITION}"
+            )
+        except Exception as exc:
+            debug(
+                "journal",
+                f"could not add {_FINGERPRINTS_COLUMN} — recording no fingerprints: "
+                f"{clickhouse_error_message(exc)}",
+            )
+            typer.echo(_fingerprint_column_warning(self._table, exc), err=True)
+            return
+        fanout = self._replica_fanout()
+        if fanout is not None:
+            self._wait_for_fingerprint_column(fanout)
+        self._fingerprint_column = True
 
     def _ensure_schema_upgraded(self) -> None:
         # Old journal tables predate per-operation tracking. Add the columns
@@ -371,12 +820,16 @@ class JournalStore:
         # replica converges on the new column set in the same DDL round-trip.
         try:
             self._client.execute(
-                f"ALTER TABLE {self._table}{self._on_cluster} "
+                f"ALTER TABLE {self._qualified_table()}{self._on_cluster} "
                 f"ADD COLUMN IF NOT EXISTS migration_completed Bool DEFAULT true"
             )
             self._client.execute(
-                f"ALTER TABLE {self._table}{self._on_cluster} "
+                f"ALTER TABLE {self._qualified_table()}{self._on_cluster} "
                 f"ADD COLUMN IF NOT EXISTS operations {_OPERATIONS_TUPLE_TYPE} DEFAULT []"
+            )
+            self._client.execute(
+                f"ALTER TABLE {self._qualified_table()}{self._on_cluster} "
+                f"ADD COLUMN IF NOT EXISTS {_FINGERPRINTS_COLUMN_DEFINITION}"
             )
         except Exception as exc:
             # A read-only user cannot run the ALTER (#402). Same message as TS.
@@ -396,15 +849,20 @@ class JournalStore:
         ``applied_at`` in milliseconds as the row version, which is what
         ``ReplacingMergeTree(applied_at)`` keeps too.
         """
-        fanout = resolve_replica_fanout(self._client, self._cluster)
+        fingerprints = self._fingerprint_column
+        fanout = self._replica_fanout()
+        fingerprint_select = f"toJSONString({_FINGERPRINTS_COLUMN})"
         if fanout is None:
+            fingerprint_column = (
+                f", {fingerprint_select} AS {_FINGERPRINTS_COLUMN}" if fingerprints else ""
+            )
             sql = (
-                f"SELECT name, applied_at, checksum, chkit_version, "
-                f"migration_completed, toJSONString(operations) AS operations "
+                f"SELECT name, toString(applied_at) AS applied_at, checksum, chkit_version, "
+                f"migration_completed, {_OPERATIONS_SELECT} AS operations{fingerprint_column} "
                 f"FROM {self._table} FINAL WHERE {where} ORDER BY name{limit}"
             )
             try:
-                return self._client.query(
+                return self._query(
                     f"{sql} SETTINGS select_sequential_consistency = 1"
                 ).rows
             except Exception as exc:
@@ -412,12 +870,15 @@ class JournalStore:
                 # reads, so there is no write of its own to wait for.
                 if not _is_clickhouse_error(exc, _READONLY):
                     raise
-                return self._client.query(sql).rows
-        return self._client.query(
-            "SELECT name, latest.1 AS applied_at, latest.2 AS checksum, "
+                return self._query(sql).rows
+        # The fingerprints come from the same row version as the operations.
+        latest = f", latest.6 AS {_FINGERPRINTS_COLUMN}" if fingerprints else ""
+        versioned = f", {fingerprint_select}" if fingerprints else ""
+        return self._query(
+            "SELECT name, toString(latest.1) AS applied_at, latest.2 AS checksum, "
             "latest.3 AS chkit_version, latest.4 AS migration_completed, "
-            "latest.5 AS operations FROM (SELECT name, argMax(tuple(applied_at, "
-            "checksum, chkit_version, migration_completed, toJSONString(operations)), "
+            f"latest.5 AS operations{latest} FROM (SELECT name, argMax(tuple(applied_at, "
+            f"checksum, chkit_version, migration_completed, {_OPERATIONS_SELECT}{versioned}), "
             "applied_at) AS latest FROM clusterAllReplicas("
             f"'{_escape_sql_string(fanout.cluster)}', currentDatabase(), '{self._table}') "
             f"GROUP BY name) WHERE {where} ORDER BY name{limit}"
@@ -459,6 +920,20 @@ class JournalStore:
         ]
         return MigrationJournal(applied=applied)
 
+    def lock_target(self) -> tuple[str, str, ReplicaFanout | None] | None:
+        """Where the migrate lock writes its claims (#716).
+
+        The journal (created if missing) as (database, table, replicas); None
+        while the database does not exist.
+        """
+        if self._database_missing:
+            self._database_missing = False
+            self._bootstrapped = False
+        self._ensure_table(create=True)
+        if self._database_missing:
+            return None
+        return self._database_name(), self._table, self._replica_fanout()
+
     def append_entry(self, entry: MigrationJournalEntry, *, chkit_version: str) -> None:
         """Flip migration_completed=true; preserve any existing operations[]."""
         existing = self.read_migration_state(entry.name)
@@ -473,6 +948,123 @@ class JournalStore:
             )
         )
 
+    def read_operation_on_every_copy(
+        self, migration_name: str, statement_index: int
+    ) -> EveryCopyRead:
+        """The statement's record, read in one query from every copy of the journal (#767).
+
+        ``covered`` is false when that read cannot be shown to cover every
+        copy: a replicated journal with a replica the read did not reach, or
+        with replicas it cannot name, or a journal that is not replicated on a
+        target with several replicas or without a declared cluster (#802).
+        """
+        self._ensure_table(create=False)
+        if self._database_missing or self._table_missing:
+            return EveryCopyRead(covered=True, op=None)
+        database = self._database_name()
+        rows = self._query(
+            "SELECT engine FROM system.tables WHERE database = currentDatabase() "
+            f"AND name = '{self._table}'"
+        ).rows
+        replicated = not rows or bool(re.match(r"^(Replicated|Shared)", str(rows[0]["engine"])))
+        # A journal that is not replicated is one copy only on a single server,
+        # and only a declared cluster can show that (#802): behind a load
+        # balancer each server lists itself alone in its own clusters, so a
+        # cluster chkit guesses proves nothing about the others.
+        override = self._fanout_override
+        declared_cluster = override.cluster if override is not None else self._cluster
+        if not replicated and declared_cluster is None:
+            return EveryCopyRead(covered=False, op=None)
+        fingerprints = (
+            f"toJSONString({_FINGERPRINTS_COLUMN})" if self._fingerprint_column else "'[]'"
+        )
+        name = _escape_sql_string(migration_name)
+        # Each server answers for itself, in the same query that reads its
+        # copy's newest version of the record. (A scalar subquery would run on
+        # the server that receives the query only.) The topology is read fresh
+        # for this read, never from an earlier probe: a cluster that does not
+        # exist, or that the user may not read, fails it.
+        latest = (
+            "(SELECT count() AS present, argMax(tuple(toString(applied_at), "
+            f"{_OPERATIONS_SELECT}, {fingerprints}), applied_at) AS latest FROM "
+            f"{self._qualified_table()} WHERE name = '{name}') AS j"
+        )
+        columns = (
+            "j.present AS present, j.latest.1 AS applied_at, j.latest.2 AS operations, "
+            "j.latest.3 AS operation_fingerprints"
+        )
+        # A replicated journal: every replica in the table's replica set, named
+        # by the set itself, must answer. One that is not replicated is one
+        # copy only on a single server: every server of the cluster answers by
+        # its server UUID, and there must be one.
+        per_copy = (
+            "SELECT r.replica_name AS replica, toJSONString(mapKeys(r.replica_is_active)) "
+            "AS members, "
+            f"{columns} FROM system.replicas AS r CROSS JOIN {latest} WHERE r.database = "
+            f"'{_escape_sql_string(database)}' AND r.table = '{self._table}'"
+            if replicated
+            else "SELECT toString(serverUUID()) AS replica, toJSONString([toString(serverUUID())]) "
+            f"AS members, {columns} FROM {latest}"
+        )
+        cluster = declared_cluster if declared_cluster is not None else "default"
+        # Every server of the cluster answers, or the read fails: an
+        # unavailable one is never skipped, and no limit cuts the reply short.
+        copies = self._query(
+            "SELECT replica, members, present, applied_at, operations, operation_fingerprints "
+            f"FROM clusterAllReplicas('{_escape_sql_string(cluster)}', view({per_copy}))",
+            settings={**STRICT_CONTROL_SETTINGS, "skip_unavailable_shards": 0},
+        ).rows
+        # Not replicated: exactly one server, named by its UUID.
+        if not replicated and (
+            len(copies) != 1 or not _SERVER_UUID.match(str(copies[0]["replica"]))
+        ):
+            return EveryCopyRead(covered=False, op=None)
+
+        def find_op(operations: Any, fingerprints_value: Any) -> OperationState | None:
+            return next(
+                (
+                    op
+                    for op in _parse_operations(operations, fingerprints_value)
+                    if op.operation_index == statement_index
+                ),
+                None,
+            )
+
+        return every_copy_read(copies, find_op)
+
+    def stores_attempt_fences(self) -> bool:
+        """Whether the journal stores an async attempt's fence (#767).
+
+        It has, or this run adds, the operation_fingerprints column. A journal
+        not created yet gets it with the table.
+        """
+        self._ensure_table(create=False)
+        if self._database_missing or self._table_missing:
+            return True
+        self._ensure_fingerprint_column()
+        return self._fingerprint_column
+
+    def read_stored_operation(
+        self, migration_name: str, statement_index: int
+    ) -> OperationState | None:
+        """One statement's record as the journal's server returns it (#767).
+
+        Without the last write this process made: what an async submit requires.
+        """
+        self._ensure_table(create=False)
+        if self._database_missing or self._table_missing:
+            return None
+        self._try_sync_replica()
+        rows = self._journal_rows(
+            f"name = '{_escape_sql_string(migration_name)}'", limit=" LIMIT 1"
+        )
+        if not rows:
+            return None
+        operations = _parse_operations(
+            rows[0].get("operations"), rows[0].get(_FINGERPRINTS_COLUMN)
+        )
+        return next((op for op in operations if op.operation_index == statement_index), None)
+
     def read_migration_state(self, migration_name: str) -> MigrationRowState | None:
         """Return the latest row for ``migration_name`` (including in-progress)."""
         self._ensure_table(create=False)
@@ -486,13 +1078,16 @@ class JournalStore:
         if not rows:
             return written
         row = rows[0]
+        self._note_version(migration_name, str(row["applied_at"]))
         state = MigrationRowState(
             name=str(row["name"]),
             applied_at=str(row["applied_at"]),
             checksum=str(row["checksum"]),
             chkit_version=str(row["chkit_version"]),
             migration_completed=_parse_bool(row.get("migration_completed")),
-            operations=_parse_operations(row.get("operations")),
+            operations=_parse_operations(
+                row.get("operations"), row.get(_FINGERPRINTS_COLUMN)
+            ),
         )
         # Each request can land on a different replica, and SYSTEM SYNC REPLICA
         # on one request does not make the next one read our write. Never hand a
@@ -506,6 +1101,17 @@ class JournalStore:
 
     def write_migration_state(self, state: MigrationRowState) -> None:
         """Upsert one migration row with INSERT race retry (5 x backoff)."""
+        # The release that wrote the state last. migrate checks a state another
+        # release wrote before it resumes it, so the statement positions in a
+        # state this release wrote are always this release's split (#562).
+        if state.chkit_version != __version__:
+            state = state.model_copy(update={"chkit_version": __version__})
+        floor = self._newest_version.get(state.name)
+        if floor is not None:
+            version = max(_row_version(state.applied_at), floor + timedelta(milliseconds=1))
+            if version != _row_version(state.applied_at):
+                applied_at = version.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
+                state = state.model_copy(update={"applied_at": applied_at})
         if self._database_missing:
             self._database_missing = False
             self._bootstrapped = False
@@ -514,18 +1120,51 @@ class JournalStore:
             # Nothing to journal until the migration creates the database; the
             # INSERT would otherwise fall back to the server's default database.
             return
+        self._ensure_fingerprint_column()
+        self._insert_state(state, fingerprints=self._fingerprint_column)
+        # As a read returns it, so a fence counts only where it was stored.
+        self._last_written[state.name] = state.model_copy(
+            update={
+                "operations": [
+                    operation_as_stored(op, self._fingerprint_column) for op in state.operations
+                ]
+            }
+        )
+        self._note_version(state.name, state.applied_at)
+        self._try_sync_replica()
+
+    def _note_version(self, name: str, applied_at: str) -> None:
+        version = _row_version(applied_at)
+        newest = self._newest_version.get(name)
+        self._newest_version[name] = version if newest is None else max(newest, version)
+
+    def _insert_state(self, state: MigrationRowState, *, fingerprints: bool) -> None:
+        fingerprint_column = f", {_FINGERPRINTS_COLUMN}" if fingerprints else ""
+        fingerprint_value = (
+            f", {_fingerprints_array_literal(state.operations)}" if fingerprints else ""
+        )
         sql = (
-            f"INSERT INTO {self._table} "
+            f"INSERT INTO {self._qualified_table()} "
             f"(name, applied_at, checksum, chkit_version, "
-            f"migration_completed, operations) VALUES ("
+            # Acknowledged once written on every transport, never as an
+            # asynchronous insert, so what follows a journal write runs after it
+            # is stored (#767).
+            f"migration_completed, operations{fingerprint_column}) SETTINGS async_insert = 0 "
+            "VALUES ("
             f"'{_escape_sql_string(state.name)}', "
             f"'{_escape_sql_string(state.applied_at)}', "
             f"'{_escape_sql_string(state.checksum)}', "
             f"'{_escape_sql_string(state.chkit_version)}', "
             f"{'true' if state.migration_completed else 'false'}, "
             f"{_operations_array_literal(state.operations)}"
+            f"{fingerprint_value}"
             f")"
         )
+        self._while_database_propagates(
+            f"write to {self._table}", lambda: self._execute_insert(sql)
+        )
+
+    def _execute_insert(self, sql: str) -> None:
         for attempt in range(1, _INSERT_RACE_MAX_ATTEMPTS + 1):
             try:
                 self._client.execute(sql)
@@ -537,8 +1176,6 @@ class JournalStore:
                 ):
                     raise
                 time.sleep(attempt * _INSERT_RACE_BASE_DELAY_MS / 1000)
-        self._last_written[state.name] = state
-        self._try_sync_replica()
 
 
 def find_checksum_mismatches_against_disk(

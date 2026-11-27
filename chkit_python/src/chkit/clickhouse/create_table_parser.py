@@ -17,9 +17,11 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from chkit.core.identifier import unquote_identifiers
 from chkit.core.key_clause import split_top_level_comma
 from chkit.core.model import TableConstraintDefinition
 from chkit.core.projection import normalize_projection_index
+from chkit.core.sql_lexer import js_regex, js_trim
 from chkit.core.sql_normalizer import normalize_sql_fragment
 from chkit.core.sql_scan import find_quote_end, find_top_level_sql_pattern, is_quote_char
 
@@ -50,58 +52,74 @@ class ProjectionDefinitionShape:
 _SETTINGS_RE = re.compile(r"\bSETTINGS\b", re.IGNORECASE)
 _SETTINGS_STOP = re.compile(r"\bCOMMENT\b|;", re.IGNORECASE)
 _TTL_RE = re.compile(r"\bTTL\b(.*?)(?:\bSETTINGS\b|;|$)", re.IGNORECASE | re.DOTALL)
-_ENGINE_AFTER_BODY_RE = re.compile(r"\s*ENGINE\s*=", re.IGNORECASE)
+_ENGINE_AFTER_BODY_RE = re.compile(js_regex(r"\s*ENGINE\s*="), re.IGNORECASE)
 
-_ENGINE_START = re.compile(r"\bENGINE\s*=\s*", re.IGNORECASE)
+_ENGINE_START = re.compile(js_regex(r"\bENGINE\s*=\s*"), re.IGNORECASE)
 _ENGINE_STOP = re.compile(
-    r"\bPRIMARY\s+KEY\b|\bORDER\s+BY\b|\bPARTITION\s+BY\b|\bUNIQUE\s+KEY\b"
-    r"|\bSAMPLE\s+BY\b|\bTTL\b|\bSETTINGS\b|\bCOMMENT\b|;|$",
+    js_regex(
+        r"\bPRIMARY\s+KEY\b|\bORDER\s+BY\b|\bPARTITION\s+BY\b|\bUNIQUE\s+KEY\b"
+        r"|\bSAMPLE\s+BY\b|\bTTL\b|\bSETTINGS\b|\bCOMMENT\b|;|$"
+    ),
     re.IGNORECASE,
 )
 
-_PRIMARY_KEY_START = re.compile(r"\bPRIMARY\s+KEY\b", re.IGNORECASE)
+_PRIMARY_KEY_START = re.compile(js_regex(r"\bPRIMARY\s+KEY\b"), re.IGNORECASE)
 _PRIMARY_KEY_STOP = re.compile(
-    r"\bORDER\s+BY\b|\bPARTITION\s+BY\b|\bUNIQUE\s+KEY\b|\bSAMPLE\s+BY\b"
-    r"|\bTTL\b|\bSETTINGS\b|;|$",
+    js_regex(
+        r"\bORDER\s+BY\b|\bPARTITION\s+BY\b|\bUNIQUE\s+KEY\b|\bSAMPLE\s+BY\b"
+        r"|\bTTL\b|\bSETTINGS\b|;|$"
+    ),
     re.IGNORECASE,
 )
 
-_ORDER_BY_START = re.compile(r"\bORDER\s+BY\b", re.IGNORECASE)
+_ORDER_BY_START = re.compile(js_regex(r"\bORDER\s+BY\b"), re.IGNORECASE)
 _ORDER_BY_STOP = re.compile(
-    r"\bPRIMARY\s+KEY\b|\bPARTITION\s+BY\b|\bUNIQUE\s+KEY\b|\bSAMPLE\s+BY\b"
-    r"|\bTTL\b|\bSETTINGS\b|;|$",
+    js_regex(
+        r"\bPRIMARY\s+KEY\b|\bPARTITION\s+BY\b|\bUNIQUE\s+KEY\b|\bSAMPLE\s+BY\b"
+        r"|\bTTL\b|\bSETTINGS\b|;|$"
+    ),
     re.IGNORECASE,
 )
 
-_PARTITION_BY_START = re.compile(r"\bPARTITION\s+BY\b", re.IGNORECASE)
+_PARTITION_BY_START = re.compile(js_regex(r"\bPARTITION\s+BY\b"), re.IGNORECASE)
 _PARTITION_BY_STOP = re.compile(
-    r"\bPRIMARY\s+KEY\b|\bORDER\s+BY\b|\bUNIQUE\s+KEY\b|\bSAMPLE\s+BY\b"
-    r"|\bTTL\b|\bSETTINGS\b|;|$",
+    js_regex(
+        r"\bPRIMARY\s+KEY\b|\bORDER\s+BY\b|\bUNIQUE\s+KEY\b|\bSAMPLE\s+BY\b"
+        r"|\bTTL\b|\bSETTINGS\b|;|$"
+    ),
     re.IGNORECASE,
 )
 
-_UNIQUE_KEY_START = re.compile(r"\bUNIQUE\s+KEY\b", re.IGNORECASE)
+_UNIQUE_KEY_START = re.compile(js_regex(r"\bUNIQUE\s+KEY\b"), re.IGNORECASE)
 _UNIQUE_KEY_STOP = re.compile(
-    r"\bPRIMARY\s+KEY\b|\bORDER\s+BY\b|\bPARTITION\s+BY\b|\bSAMPLE\s+BY\b"
-    r"|\bTTL\b|\bSETTINGS\b|;|$",
+    js_regex(
+        r"\bPRIMARY\s+KEY\b|\bORDER\s+BY\b|\bPARTITION\s+BY\b|\bSAMPLE\s+BY\b"
+        r"|\bTTL\b|\bSETTINGS\b|;|$"
+    ),
     re.IGNORECASE,
 )
 
 _PROJECTION_RE = re.compile(
-    r"^\s*PROJECTION\s+(?:`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*))\s*\((.*)\)\s*$",
+    js_regex(
+        r"^\s*PROJECTION\s+(`(?:[^`\\]|\\.|``)+`|[A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)\s*$"
+    ),
     re.IGNORECASE | re.DOTALL,
 )
 
 _CONSTRAINT_RE = re.compile(
-    r"^\s*CONSTRAINT\s+(?:`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*))\s+(CHECK|ASSUME)\s+(.+?)\s*$",
+    js_regex(
+        r"^\s*CONSTRAINT\s+(`(?:[^`\\]|\\.|``)+`|[A-Za-z_][A-Za-z0-9_]*)\s+(CHECK|ASSUME)\s+(.+?)\s*$"
+    ),
     re.IGNORECASE | re.DOTALL,
 )
 
 # Index-only projections have no SELECT body, so they must be matched before
 # the parenthesized SELECT form.
 _INDEX_PROJECTION_RE = re.compile(
-    r"^\s*PROJECTION\s+(?:`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*))"
-    r"\s+INDEX\s+(.+?)\s+TYPE\s+([A-Za-z_][A-Za-z0-9_]*)\s*$",
+    js_regex(
+        r"^\s*PROJECTION\s+(`(?:[^`\\]|\\.|``)+`|[A-Za-z_][A-Za-z0-9_]*)"
+        r"\s+INDEX\s+(.+?)\s+TYPE\s+([A-Za-z_][A-Za-z0-9_]*)\s*$"
+    ),
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -127,7 +145,7 @@ def _parse_clause(
     after = options[start.end() :]
     stop = find_top_level_sql_pattern(after, stop_pattern)
     raw = after[: stop.start()] if stop is not None else after
-    raw = raw.strip()
+    raw = js_trim(raw)
     if not raw:
         return None
     return raw if preserve_whitespace else normalize_sql_fragment(raw)
@@ -170,7 +188,7 @@ def _extract_create_table_body(query: str | None) -> str | None:
     bounds = _find_column_list_bounds(query)
     if bounds is None:
         return None
-    body = query[bounds[0] + 1 : bounds[1]].strip()
+    body = js_trim(query[bounds[0] + 1 : bounds[1]])
     return body or None
 
 
@@ -195,7 +213,7 @@ def parse_settings_from_create_table_query(query: str | None) -> dict[str, str]:
         return {}
     tail = options[match.end() :]
     stop = find_top_level_sql_pattern(tail, _SETTINGS_STOP)
-    raw = (tail[: stop.start()] if stop is not None else tail).strip()
+    raw = js_trim(tail[: stop.start()] if stop is not None else tail)
     if not raw:
         return {}
     out: dict[str, str] = {}
@@ -203,8 +221,8 @@ def parse_settings_from_create_table_query(query: str | None) -> dict[str, str]:
         eq = item.find("=")
         if eq == -1:
             continue
-        key = item[:eq].strip()
-        value = item[eq + 1 :].strip()
+        key = js_trim(item[:eq])
+        value = js_trim(item[eq + 1 :])
         if not key:
             continue
         out[key] = value
@@ -217,7 +235,7 @@ def parse_ttl_from_create_table_query(query: str | None) -> str | None:
     match = _TTL_RE.search(_extract_table_options(query))
     if match is None:
         return None
-    raw = match.group(1).strip()
+    raw = js_trim(match.group(1))
     if not raw:
         return None
     return normalize_sql_fragment(raw)
@@ -253,9 +271,9 @@ def parse_projections_from_create_table_query(
     for part in split_top_level_comma(body):
         index_match = _INDEX_PROJECTION_RE.match(part)
         if index_match is not None:
-            name = (index_match.group(1) or index_match.group(2) or "").strip()
-            index = normalize_projection_index(index_match.group(3) or "")
-            type_text = (index_match.group(4) or "").strip()
+            name = js_trim(unquote_identifiers(index_match.group(1) or ""))
+            index = normalize_projection_index(index_match.group(2) or "")
+            type_text = js_trim(index_match.group(3) or "")
             if not name or not index or not type_text:
                 continue
             projections.append(
@@ -266,8 +284,8 @@ def parse_projections_from_create_table_query(
         match = _PROJECTION_RE.match(part)
         if match is None:
             continue
-        name = (match.group(1) or match.group(2) or "").strip()
-        query_text = normalize_sql_fragment((match.group(3) or "").strip())
+        name = js_trim(unquote_identifiers(match.group(1) or ""))
+        query_text = normalize_sql_fragment(js_trim(match.group(2) or ""))
         if not name or not query_text:
             continue
         projections.append(ProjectionDefinitionShape(name=name, query=query_text))
@@ -286,11 +304,11 @@ def parse_constraints_from_create_table_query(
         match = _CONSTRAINT_RE.match(part)
         if match is None:
             continue
-        name = (match.group(1) or match.group(2) or "").strip()
-        expression = normalize_sql_fragment(match.group(4) or "")
+        name = js_trim(unquote_identifiers(match.group(1) or ""))
+        expression = normalize_sql_fragment(match.group(3) or "")
         if not name or not expression:
             continue
-        if (match.group(3) or "").upper() == "CHECK":
+        if (match.group(2) or "").upper() == "CHECK":
             constraints.append(TableConstraintDefinition(name=name, check=expression))
         else:
             constraints.append(TableConstraintDefinition(name=name, assume=expression))

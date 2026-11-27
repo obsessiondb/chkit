@@ -11,6 +11,7 @@ import {
   type IntrospectedTable,
 } from '@chkit/clickhouse'
 import {
+  identifierName,
   isTrivia,
   tokenizeSQL,
   type DictionaryDefinition,
@@ -172,19 +173,44 @@ function parseRefreshSettings(segment: string): Record<string, string | number> 
   return out
 }
 
-function parseDependsOn(segment: string): Array<{ database: string; name: string }> {
-  const out: Array<{ database: string; name: string }> = []
-  for (const entry of segment.split(',')) {
-    const trimmed = entry.trim()
-    if (!trimmed) continue
-    const parts = trimmed.split('.').map((part) => part.replace(/^[`"]|[`"]$/g, '').trim())
-    if (parts.length === 1 && parts[0]) {
-      out.push({ database: 'default', name: parts[0] })
-    } else if (parts.length === 2 && parts[0] && parts[1]) {
-      out.push({ database: parts[0], name: parts[1] })
+/**
+ * The `DEPENDS ON [db.]name, ...` list, read with the SQL lexer so a quoted
+ * name is unescaped and the commas, dots and keywords inside it stay part of
+ * the name. Only the part before the first top-level `AS` is searched.
+ */
+function parseDependsOn(query: string): Array<{ database: string; name: string }> {
+  const tokens = tokenizeSQL(query).filter((token) => !isTrivia(token))
+  const isWord = (i: number, word: string): boolean =>
+    tokens[i]?.kind === 'identifier' && tokens[i]?.text.toUpperCase() === word
+  const nameAt = (i: number): string | undefined => {
+    const token = tokens[i]
+    return token ? identifierName(token)?.trim() : undefined
+  }
+  let depth = 0
+  for (let i = 0; i < tokens.length; i++) {
+    const text = tokens[i]?.text
+    if (text === '(') depth++
+    else if (text === ')') depth--
+    if (depth !== 0) continue
+    if (isWord(i, 'AS')) break
+    if (!isWord(i, 'DEPENDS') || !isWord(i + 1, 'ON')) continue
+    const out: Array<{ database: string; name: string }> = []
+    let j = i + 2
+    while (true) {
+      const first = nameAt(j)
+      if (tokens[j + 1]?.text === '.') {
+        const name = nameAt(j + 2)
+        if (first && name) out.push({ database: first, name })
+        j += 3
+      } else {
+        if (first) out.push({ database: 'default', name: first })
+        j += 1
+      }
+      if (tokens[j]?.text !== ',') return out
+      j++
     }
   }
-  return out
+  return []
 }
 
 /**
@@ -226,13 +252,8 @@ export function parseRefreshClause(
   const randomizeMatch = new RegExp(`\\bRANDOMIZE\\s+FOR\\s+(${INTERVAL_TOKEN})`, 'i').exec(cleaned)
   if (randomizeMatch?.[1]) refresh.randomize = normalizeInterval(randomizeMatch[1])
 
-  // DEPENDS ON runs until the next known keyword or end of refresh block.
-  const dependsMatch =
-    /\bDEPENDS\s+ON\s+([\s\S]*?)(?=\bSETTINGS\b|\bAPPEND\b|\bTO\b|\bEMPTY\b|\bAS\b|$)/i.exec(cleaned)
-  if (dependsMatch?.[1]) {
-    const deps = parseDependsOn(dependsMatch[1])
-    if (deps.length > 0) refresh.dependsOn = deps
-  }
+  const deps = parseDependsOn(cleaned)
+  if (deps.length > 0) refresh.dependsOn = deps
 
   const settingsMatch =
     /\bSETTINGS\s+([\s\S]*?)(?=\bAPPEND\b|\bTO\b|\bEMPTY\b|\bAS\b|$)/i.exec(cleaned)

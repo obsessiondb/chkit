@@ -443,12 +443,13 @@ describe('@chkit/cli snapshot rebuild', () => {
       await symlink(fixture.dir, link)
       await writeFile(
         fixture.configPath,
-        `import { codegen } from '${CODEGEN_PLUGIN_ENTRY}'\n\nexport default {\n  schema: './schema.ts',\n  outDir: './chkit',\n  migrationsDir: './chkit/migrations',\n  metaDir: './chkit/meta',\n  plugins: [codegen()],\n}\n`,
+        `import { codegen } from '${CODEGEN_PLUGIN_ENTRY}'\n\nconst scopeProbe = { manifest: { name: 'scope-probe', apiVersion: 1 }, extendCommands: [{ command: 'codegen', flags: [{ name: '--table', type: 'string', description: 'Table selector' }] }] }\n\nexport default {\n  schema: './schema.ts',\n  outDir: './chkit',\n  migrationsDir: './chkit/migrations',\n  metaDir: './chkit/meta',\n  plugins: [codegen(), { plugin: scopeProbe }],\n}\n`,
         'utf8',
       )
 
-      // --table imports the schema from the working directory, then codegen imports it
-      // from the config's directory, which the --config path spells through the link.
+      // --table (which only a command that declares it takes, here through the probe)
+      // imports the schema from the working directory, then codegen imports it from the
+      // config's directory, which the --config path spells through the link.
       const result = runCliInDir(fixture.dir, ['codegen', '--table', 'app.users', '--config', join(link, 'clickhouse.config.ts')], {
         XDG_CONFIG_HOME: join(fixture.dir, 'xdg'),
       })

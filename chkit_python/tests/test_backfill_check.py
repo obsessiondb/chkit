@@ -269,11 +269,11 @@ def test_list_remote_submissions_lists_submitted_plans_without_a_local_run(
     write_json(
         backfill_paths(state_dir, ran_locally).run_path,
         BackfillRunState(
-            planId=ran_locally,
+            plan_id=ran_locally,
             target=TARGET,
             status="completed",
-            startedAt="2026-01-01T00:00:00.000Z",
-            updatedAt="2026-01-01T00:00:00.000Z",
+            started_at="2026-01-01T00:00:00.000Z",
+            updated_at="2026-01-01T00:00:00.000Z",
         ),
     )
 
@@ -340,10 +340,10 @@ def _with_obsessiondb(config: ChxResolvedConfig) -> ChxResolvedConfig:
 
 def _write_run(state_dir: Path, status: BackfillRunStatus) -> None:
     run = BackfillRunState(
-        planId=PLAN_ID,
+        plan_id=PLAN_ID,
         target=TARGET,
         status=status,
-        startedAt="2026-01-01T00:00:00.000Z",
-        updatedAt="2026-01-01T00:00:00.000Z",
+        started_at="2026-01-01T00:00:00.000Z",
+        updated_at="2026-01-01T00:00:00.000Z",
     )
     write_json(backfill_paths(state_dir, PLAN_ID).run_path, run)

@@ -1,9 +1,34 @@
 import { describe, expect, test } from 'bun:test'
 
+import fixture from '../../../test/fixtures/quoted-escapes.json'
 import { identifierName, isTrivia, stringLiteralValue, tokenizeSQL, type SQLToken } from './sql-lexer.js'
 
 function kinds(sql: string): Array<[SQLToken['kind'], string]> {
   return tokenizeSQL(sql).map((token) => [token.kind, token.text])
+}
+
+// Where a `$tag$` opener at `i` ends: the first later occurrence of the same
+// `$tag$`, found by searching the rest of the input (the lexer before #585).
+function searchedHeredocEnd(sql: string, i: number): number | undefined {
+  const opener = /^\$[A-Za-z0-9_]*\$/.exec(sql.slice(i))?.[0]
+  if (opener === undefined) return undefined
+  const close = sql.indexOf(opener, i + opener.length)
+  return close === -1 ? undefined : close + opener.length
+}
+
+// A deterministic linear congruential generator, so a failure reproduces.
+function seededRandom(seed: number): () => number {
+  let state = seed
+  return () => {
+    state = (state * 1103515245 + 12345) % 2147483648
+    return state / 2147483648
+  }
+}
+
+function elapsedMs(run: () => unknown): number {
+  const start = performance.now()
+  run()
+  return performance.now() - start
 }
 
 describe('tokenizeSQL', () => {
@@ -109,6 +134,38 @@ describe('tokenizeSQL', () => {
     ])
   })
 
+  test('ends each heredoc at the first later occurrence of its $tag$ (#585)', () => {
+    const pieces = ['$', '$$', '$a$', '$b$', '$a_1$', 'a', '_', '1', ' ', '\n']
+    pieces.push("'", '`', '/*', '*/', '--', ';', 'é', '𝔸')
+    const random = seededRandom(585)
+    for (let n = 0; n < 3000; n += 1) {
+      const length = Math.floor(random() * 40)
+      const sql = Array.from({ length }, () => pieces[Math.floor(random() * pieces.length)]).join('')
+      for (const token of tokenizeSQL(sql)) {
+        if (sql[token.start] !== '$') continue
+        const heredocEnd = token.kind === 'string' ? token.end : undefined
+        expect({ sql, start: token.start, heredocEnd }).toEqual({
+          sql,
+          start: token.start,
+          heredocEnd: searchedHeredocEnd(sql, token.start),
+        })
+      }
+    }
+  })
+
+  test('lexes many distinct unclosed $tag$ openers in linear time (#585)', () => {
+    const count = 16_000
+    // Same shape and length; only the openers make the lexer look for a closer.
+    const openers = Array.from({ length: count }, (_, k) => `$t${k}$`).join(' ')
+    const names = Array.from({ length: count }, (_, k) => `_t${k}_`).join(' ')
+    tokenizeSQL(openers.slice(0, 1000))
+    // The fastest of three runs, so a pause in one does not set the bound.
+    const baseline = Math.min(...[1, 2, 3].map(() => elapsedMs(() => tokenizeSQL(names))))
+    const withOpeners = elapsedMs(() => tokenizeSQL(openers))
+    // A search per opener to the end of the input makes this 100x the baseline or more.
+    expect(withOpeners).toBeLessThan(10 * baseline + 250)
+  })
+
   test('reads a digit-led run as a name when word characters continue the number (#231)', () => {
     expect(kinds('app.1m_rollup')).toEqual([
       ['identifier', 'app'],
@@ -195,5 +252,23 @@ describe('identifierName / stringLiteralValue', () => {
     expect(a && stringLiteralValue(a)).toBe("it's")
     expect(b && stringLiteralValue(b)).toBe("a'b")
     expect(c && stringLiteralValue(c)).toBe("x'y")
+  })
+
+  // test/fixtures/quoted-escapes.json is shared with chkit-py and checked
+  // against the server by quoted-escapes.e2e.test.ts (#639).
+  test('reads escapes in quoted names and strings as ClickHouse does', () => {
+    const read = fixture.cases.map(({ sql }) => {
+      const tokens = tokenizeSQL(sql)
+      const token = tokens[0] as SQLToken
+      expect(tokens).toHaveLength(1)
+      return { sql, value: token.kind === 'string' ? stringLiteralValue(token) : identifierName(token) }
+    })
+    expect(read).toEqual(fixture.cases.map(({ sql, value }) => ({ sql, value })))
+  })
+
+  test('keeps an invalid \\x escape as written', () => {
+    const [name, , str] = tokenizeSQL("`a\\xZZ` 'a\\x4'")
+    expect(name && identifierName(name)).toBe('a\\xZZ')
+    expect(str && stringLiteralValue(str)).toBe('a\\x4')
   })
 })

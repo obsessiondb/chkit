@@ -1,0 +1,22 @@
+DESCRIPTION >
+    Two nodes: the first filters, the second aggregates over it by name.
+
+NODE filtered
+SQL >
+    SELECT event_time, event_type, user_id, amount
+    FROM events e
+    WHERE e.user_id IN (SELECT user_id FROM users FINAL WHERE is_deleted = 0)
+
+NODE aggregated
+SQL >
+    SELECT
+        toStartOfHour(event_time) AS hour,
+        event_type,
+        uniqState(user_id) AS users,
+        argMaxState(amount, event_time) AS last_amount,
+        sum(amount) AS total
+    FROM filtered
+    GROUP BY hour, event_type
+
+TYPE materialized
+DATASOURCE hourly_users

@@ -81,7 +81,9 @@ Use Python schema modules and `clickhouse.config.py`, then run the same `generat
 | --- | --- |
 | [`@chkit/plugin-codegen`](https://www.npmjs.com/package/@chkit/plugin-codegen) | Generate TypeScript row types and Zod schemas |
 | [`@chkit/plugin-pull`](https://www.npmjs.com/package/@chkit/plugin-pull) | Pull a live schema into local definitions |
+| [`@chkit/plugin-tinybird`](https://www.npmjs.com/package/@chkit/plugin-tinybird) | Import a Tinybird project as a chkit schema and typed queries |
 | [`@chkit/plugin-backfill`](https://www.npmjs.com/package/@chkit/plugin-backfill) | Run checkpointed SQL backfills for data migrations (beta) |
+| [`@chkit/plugin-sync`](https://www.npmjs.com/package/@chkit/plugin-sync) | Sync API data into ClickHouse with journaled checkpoints (beta) |
 | [`@chkit/plugin-obsessiondb`](https://www.npmjs.com/package/@chkit/plugin-obsessiondb) | Connect to ObsessionDB and run schema commands remotely |
 
 Register plugins in `clickhouse.config.ts`. See the [plugin documentation](https://chkit.obsessiondb.com/plugins/overview/) for setup.

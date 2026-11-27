@@ -1,9 +1,9 @@
-import { mkdir } from 'node:fs/promises'
+import { mkdir, readFile } from 'node:fs/promises'
 import { join, relative } from 'node:path'
 import process from 'node:process'
 
 import { assertServerIndexGranularity, type ClickHouseExecutor, type ClickHouseSettings } from '@chkit/clickhouse'
-import { configuredIndexGranularity, type ResolvedChxConfig } from '@chkit/core'
+import { configuredIndexGranularity, statementFingerprint, type ResolvedChxConfig } from '@chkit/core'
 
 import {
   defineFlags,
@@ -15,9 +15,10 @@ import {
   type TableScope,
 } from '../../plugins.js'
 import { resolveDirs } from '../../runtime/config.js'
+import { emitJson } from '../../runtime/json-output.js'
 import { debug } from '../../runtime/debug.js'
-import { GLOBAL_FLAGS } from '../../runtime/global-flags.js'
-import { createJournalStore } from '../../runtime/journal-store.js'
+import { GLOBAL_FLAGS, TABLE_FLAG } from '../../runtime/global-flags.js'
+import { createJournalStore, type MigrationRowState } from '../../runtime/journal-store.js'
 import {
   findChecksumMismatches,
   listMigrations,
@@ -29,9 +30,13 @@ import { resolveTableScope, tableKeysFromDefinitions } from '../../runtime/table
 
 import { abandonMigrationState, abandonReport, readAbandonableState } from './abandon.js'
 import { applyMigration } from './apply.js'
+import { markReport, markUnderLock, readStoppedStatement, renderMarkText, type MarkTarget } from './mark-outcome.js'
+import { findPendingNonSelectBarriers } from './barrier.js'
 import { scanDestructive } from './destructive.js'
 import { findEmptyMigrations } from './empty.js'
-import { emptyMigrationsError, MigrateError } from './errors.js'
+import { emptyMigrationsError, journalChangedError, MigrateError, nonSelectBarrierError } from './errors.js'
+import { assertNotInterrupted, withInterrupt, type InterruptLock } from './interrupt.js'
+import { acquireMigrateLock, guardExecutor, migrateLockDisabled, type LockTarget, type MigrateLock } from './lock.js'
 import {
   emitAbandonJson,
   emitApplySummaryJson,
@@ -60,9 +65,13 @@ import {
 import { resolveRecoveryTargets } from './recovery.js'
 import { resolveRetry, type RetryResolution } from './retry.js'
 import { filterPendingByScope } from './scope.js'
-import { parseSettingFlags } from './settings.js'
+import { assertInsertSettingsChangeable, insertSettingsOverrideWarning, parseSettingFlags } from './settings.js'
+import { extractExecutableStatements, extractStatementOperations } from '../../runtime/safety-markers.js'
+import { createQueryTracker, queryTrackingDisabled, type QueryContext, type QueryIdentity, type QueryTracker } from './query-intents.js'
+import { abandonRecovery, assertCancellationClear, assertCancellationUnfinished, cancelPredecessor, freshRecoveryExecutor, finishRecovery, expandRecoveryPlan, markCancellationPending, settleCompensation, prepareCancellation, resolveQueryIdentity } from './cancellation.js'
 
 const MIGRATE_FLAGS = defineFlags([
+  TABLE_FLAG,
   { name: '--apply', type: 'boolean', description: 'Apply pending migrations on ClickHouse (no prompt)' },
   { name: '--execute', type: 'boolean', description: 'Alias for --apply' },
   { name: '--allow-destructive', type: 'boolean', description: 'Allow destructive migrations tagged with risk=danger' },
@@ -79,11 +88,30 @@ const MIGRATE_FLAGS = defineFlags([
     placeholder: '<migration>',
   },
   {
+    name: '--mark-applied',
+    type: 'string',
+    description: 'Record that the statement which stopped with async_outcome_unknown ran, so the next apply continues after it (journal only; previews without --apply)',
+    placeholder: '<migration>',
+  },
+  {
+    name: '--mark-not-applied',
+    type: 'string',
+    description: 'Record that the statement which stopped with async_outcome_unknown did not run, so the next apply runs it again (journal only; previews without --apply)',
+    placeholder: '<migration>',
+  },
+  {
+    name: '--break-lock',
+    type: 'string',
+    description: 'Release the migrate lock claim of a run that is no longer running, then take the lock',
+    placeholder: '<claim>',
+  },
+  {
     name: '--setting',
     type: 'string[]',
     description: 'ClickHouse query setting sent with each migration statement, e.g. max_table_size_to_drop=0 (repeatable)',
     placeholder: '<name=value>',
   },
+  { name: '--cancel-lock-queries', type: 'boolean', description: 'Cancel the tracked queries of the stopped --break-lock run before recovery (requires --apply)' },
 ] as const)
 
 export const migrateCommand: ChxPluginCommand = {
@@ -117,7 +145,27 @@ interface MigrateContext {
   pendingAll: string[]
   retryTarget: string | undefined
   abandonTarget: string | undefined
+  markTarget: MarkTarget | undefined
+  /** Runs `fn` holding the migrate lock (#716). */
+  withLock: WithLock
+  queryTracker: () => QueryTracker | undefined
+  /** Whether this run applies without the migrate lock because the target database did not exist (#767). */
+  locklessBootstrap: () => boolean
+  completeRecovery?: () => Promise<void>
+  /** Aborted by a first Ctrl-C while `withLock` runs: no new statement starts. */
+  signal: AbortSignal
+  /** --cancel-lock-queries was passed. */
+  cancelQueries: boolean
+  /** Fails while a stopped run's recovery is unfinished; read-only, no lock. */
+  assertRecoveryClear: () => Promise<void>
 }
+
+/**
+ * `selectedFiles` are the migrations this run applies; `abandon` names the
+ * migration --abandon resets, which also releases it from unfinished recovery.
+ */
+type WithLock = <T>(fn: () => Promise<T>, options?: WithLockOptions) => Promise<T>
+interface WithLockOptions { selectedFiles?: readonly string[]; abandon?: string }
 
 interface ScopeResolution {
   /** --table matched no table, so no migration is selected. */
@@ -136,7 +184,7 @@ interface PendingPlan extends ScopeResolution {
 type AbandonContext = Pick<
   MigrateContext,
   'jsonMode' | 'executeRequested' | 'journalStore' | 'tableScope' | 'appliedNames' | 'files' | 'metaDir'
->
+> & { withLock?: WithLock }
 
 /** How --abandon asks before it changes the journal without --apply. */
 interface AbandonPrompt {
@@ -153,6 +201,7 @@ const TERMINAL_PROMPT: AbandonPrompt = {
 async function cmdMigrate(runCtx: ChxPluginCommandContext): Promise<undefined | number> {
   const ctx = await prepareMigration(runCtx)
   if (ctx.abandonTarget !== undefined) return runAbandon(ctx, ctx.abandonTarget)
+  if (ctx.markTarget !== undefined) return runMarkOutcome(ctx, ctx.markTarget)
   // A migration generated for another index_granularity default would create
   // tables unlike the ones chkit planned for (#466).
   await assertServerIndexGranularity(ctx.db, configuredIndexGranularity(ctx.config))
@@ -161,13 +210,20 @@ async function cmdMigrate(runCtx: ChxPluginCommandContext): Promise<undefined | 
   if (checksumExit !== undefined) return checksumExit
 
   const plan = await resolvePendingPlan(ctx)
-  if (plan.pending.length === 0) return renderNothingPending(ctx, plan)
+  if (plan.pending.length === 0) {
+    // Only a recovery needs the lock with nothing to apply: it may still finish.
+    if (ctx.cancelQueries) return ctx.withLock(async () => renderNothingPending(ctx, plan))
+    if (ctx.executeRequested) await ctx.assertRecoveryClear()
+    return renderNothingPending(ctx, plan)
+  }
 
   const planExit = await renderPlan(ctx, plan)
   if (planExit !== undefined) return planExit
 
   const emptyExit = runEmptyMigrationGate(ctx, plan.emptyMigrations)
   if (emptyExit !== undefined) return emptyExit
+
+  await runBarrierGate(ctx, plan.pending)
 
   const confirmExit = await runConfirmGate(ctx)
   if (confirmExit !== undefined) return confirmExit
@@ -185,9 +241,15 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
   const executeRequested = f['--apply'] === true || f['--execute'] === true
   const allowDestructive = f['--allow-destructive'] === true
   const settings = parseSettingFlags(f['--setting'])
+  const overrideWarning = insertSettingsOverrideWarning(settings)
+  if (overrideWarning) console.error(overrideWarning)
   const tableSelector = f['--table']
   const jsonMode = f['--json'] === true
-  const { retryTarget, abandonTarget } = resolveRecoveryTargets(flags)
+  const { retryTarget, abandonTarget, markTarget } = resolveRecoveryTargets(flags)
+  const cancelQueries = f['--cancel-lock-queries'] === true
+  if (cancelQueries && (f['--apply'] !== true || !f['--break-lock'] || abandonTarget !== undefined || migrateLockDisabled() || queryTrackingDisabled())) {
+    throw new MigrateError('invalid_usage', '--cancel-lock-queries requires explicit --apply, --break-lock <claim>, an enabled migrate lock and query tracking, and no --abandon.')
+  }
 
   const { migrationsDir, metaDir } = resolveDirs(config)
   debug(
@@ -199,11 +261,131 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
   if (!pluginContext.hasExecutor) {
     throw new Error('clickhouse config is required for migrate (journal is stored in ClickHouse)')
   }
-  const db = pluginContext.executor
-  const journalStore = createJournalStore(db, config.clickhouse?.cluster)
-  // --abandon only changes the journal and rejects --table, so it does not
-  // read snapshot.json: a conflicted snapshot cannot block it.
-  const snapshot = abandonTarget === undefined
+  // Every request of the run, journal writes included, first checks that
+  // the run still holds the migrate lock, once it took it (#716).
+  let heldLock: MigrateLock | undefined
+  let queryTracker: QueryTracker | undefined
+  let locklessBootstrap = false
+  let completeRecovery: (() => Promise<void>) | undefined
+  const rawDb = cancelQueries ? freshRecoveryExecutor(pluginContext.executor) : pluginContext.executor
+  const initialIdentity = cancelQueries ? await resolveQueryIdentity(rawDb, config.clickhouse?.cluster) : undefined
+  const recoveryCluster = initialIdentity?.cluster
+  if (initialIdentity && !recoveryCluster) throw new MigrateError('migrate_cancellation_failed', 'Explicit recovery requires an attested cluster.')
+  const interrupt = new AbortController()
+  const db = guardExecutor(rawDb, () => {
+    heldLock?.assertHeld()
+    assertNotInterrupted(interrupt.signal)
+  })
+  const journalStore = createJournalStore(db, config.clickhouse?.cluster, initialIdentity && recoveryCluster
+    ? { cluster: recoveryCluster, replicas: initialIdentity.serverUUIDs.length } : undefined)
+  const breakLock = f['--break-lock']
+  // Progress lines go to stderr in --json mode, so stdout stays one JSON document.
+  const log = jsonMode ? (line: string) => console.error(line) : (line: string) => console.log(line)
+  // With query tracking off, ordinary runs skip the recovery barrier entirely.
+  const checkRecoveryClear = async (target: LockTarget | null, allowedClaim?: string, identity?: QueryIdentity) => {
+    if (target === null || (queryTrackingDisabled() && !cancelQueries)) return
+    await assertCancellationClear(rawDb, target, allowedClaim, identity)
+  }
+  const withLock: WithLock = async (fn, options = {}) => {
+    const lock: InterruptLock = {}
+    return await withInterrupt(interrupt, lock, () => withLockHeld(fn, options, lock))
+  }
+  const withLockHeld = async <T>(fn: () => Promise<T>, { selectedFiles = [], abandon }: WithLockOptions, interruptLock: InterruptLock): Promise<T> => {
+    // Every run that writes passes here first, interactive or not (#790).
+    await assertInsertSettingsChangeable(rawDb, settings)
+    if (migrateLockDisabled()) {
+      console.error('⚠ CHKIT_MIGRATE_LOCK is off: this run takes no migrate lock, so a concurrent migrate can apply the same statements.')
+      const target = await journalStore.lockTarget()
+      if (abandon === undefined) await checkRecoveryClear(target)
+      const result = await fn()
+      interrupt.signal.throwIfAborted()
+      if (abandon !== undefined && target !== null && !queryTrackingDisabled()) await abandonRecovery(rawDb, target, abandon)
+      return result
+    }
+    const target = await journalStore.lockTarget()
+    if (target === null) {
+      if (cancelQueries) throw new MigrateError('migrate_cancellation_failed', 'The database/journal does not exist; cancellation cannot be verified.')
+      console.error(
+        '⚠ The target database does not exist yet, so the journal cannot hold the migrate lock: this run takes none. ' +
+          'Do not start another migrate against this target until it finishes.',
+      )
+      locklessBootstrap = true
+      try {
+        return await fn()
+      } finally {
+        locklessBootstrap = false
+      }
+    }
+    const heartbeatDb = rawDb.openConcurrent?.()
+    try {
+      let identity: QueryIdentity | undefined = initialIdentity
+      if (!identity && !queryTrackingDisabled() && rawDb.commandTracked && rawDb.queryControl) {
+        try { identity = await resolveQueryIdentity(rawDb, config.clickhouse?.cluster) }
+        catch (error) {
+          if (cancelQueries) throw error
+          debug('migrate:queries', `query tracking unavailable: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+      if (cancelQueries && !identity) throw new MigrateError('migrate_cancellation_failed', 'This executor cannot safely track/cancel queries.')
+      let cancellation = cancelQueries && identity && breakLock ? await prepareCancellation(rawDb, target, identity, breakLock) : undefined
+      if (cancellation) {
+        const contexts: QueryContext[] = []
+        for (const file of selectedFiles) {
+          const state = await journalStore.readMigrationState(file)
+          if (state?.operations.some((op) => op.status !== 'completed' && op.queryId !== '')) throw new MigrateError('migrate_cancellation_failed', `Explicit recovery cannot attach the historical async attempt in ${file}. Finish async recovery before using --cancel-lock-queries.`)
+          const sql = await readFile(join(migrationsDir, file), 'utf8')
+          const summaries = extractStatementOperations(sql)
+          for (const [statementIndex, forwardSQL] of extractExecutableStatements(sql).entries()) {
+            const operation = summaries[statementIndex]
+            if (operation && operation.mode !== 'sync') throw new MigrateError('migrate_cancellation_failed', 'Explicit recovery requires a fully synchronous selected migration plan.')
+            contexts.push({ migration: file, statementIndex, forwardSQL, beforeRetry: operation?.beforeRetry ?? null })
+          }
+        }
+        cancellation = await expandRecoveryPlan(rawDb, target, cancellation, contexts)
+      }
+      if (abandon === undefined) await checkRecoveryClear(target, cancellation?.claim, cancellation?.identity)
+      const migrationHooks = pluginRuntime.plugins.some((item) => item.plugin.hooks?.onBeforeApply || item.plugin.hooks?.onAfterApply)
+      if (cancelQueries && migrationHooks) throw new MigrateError('migrate_cancellation_failed', 'Cancellation cannot cover arbitrary migration plugin hooks.')
+      const trackedIdentity = migrationHooks ? undefined : identity
+      const lock = await acquireMigrateLock(rawDb, target, {
+        breakLock: cancellation?.claim ?? breakLock, log, heartbeatDb, queryTracking: trackedIdentity,
+        ...(cancellation ? { takeover: { claim: cancellation.claim, holder: cancellation.holder, beforeRelease: () => markCancellationPending(rawDb, target, cancellation),
+          resumePending: (reservations) => assertCancellationUnfinished(rawDb, target, cancellation, reservations),
+        } } : {}),
+      })
+      heldLock = lock
+      interruptLock.claim = lock.claimId
+      try {
+        if (abandon === undefined) await checkRecoveryClear(target, cancellation?.claim, cancellation?.identity)
+        // The recovery steps' requests go through rawDb, past the guard.
+        interrupt.signal.throwIfAborted()
+        const recovery = cancellation ? await cancelPredecessor(rawDb, target, cancellation, lock) : undefined
+        completeRecovery = recovery ? async () => { interrupt.signal.throwIfAborted(); await finishRecovery(rawDb, target, recovery, lock); completeRecovery = undefined } : undefined
+        queryTracker = trackedIdentity ? createQueryTracker({ db: rawDb, target, identity: trackedIdentity, lock, signal: interrupt.signal, ...(cancellation && recovery ? { recovery: { targets: [...recovery.obligations, ...cancellation.extra].map((item) => item.target), sources: [...recovery.obligations, ...cancellation.extra].flatMap((item) => item.source ? [item.source] : []), statements: [...recovery.obligations, ...cancellation.extra], afterCompensation: (table) => settleCompensation(rawDb, target, cancellation, table, lock) } } : {}), log }) : undefined
+        const result = await fn()
+        await completeRecovery?.()
+        interrupt.signal.throwIfAborted()
+        if (abandon !== undefined && !queryTrackingDisabled()) await abandonRecovery(rawDb, target, abandon, lock)
+        return result
+      } catch (error) {
+        // A step that retries or wraps the guard's error (a poll loop, a
+        // statement error) reports the lost lock, with its code (#716).
+        lock.assertHeld()
+        throw error
+      } finally {
+        heldLock = undefined
+        queryTracker = undefined
+        completeRecovery = undefined
+        await lock.release()
+        interruptLock.released = !lock.releaseFailed
+      }
+    } finally {
+      await heartbeatDb?.close()
+    }
+  }
+  // --abandon and --mark-(not-)applied only change the journal and reject
+  // --table, so they do not read snapshot.json: a conflicted snapshot cannot block them.
+  const snapshot = abandonTarget === undefined && markTarget === undefined
     ? await readSnapshot(metaDir, { indexGranularity: configuredIndexGranularity(config) })
     : null
   const tableScope = resolveTableScope(tableSelector, tableKeysFromDefinitions(snapshot?.definitions ?? []))
@@ -225,6 +407,8 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
       `--retry: no migration file named ${retryTarget} in ${migrationsDir}. To reset the journal state of a migration whose file was deleted, use chkit migrate --abandon ${retryTarget}.`,
     )
   }
+  // Reading the journal can upgrade its schema, a write (#790).
+  if (executeRequested) await assertInsertSettingsChangeable(rawDb, settings)
   const journal = await journalStore.readJournal()
   const appliedNames = new Set(journal.applied.map((entry) => entry.name))
   const pendingAll = files.filter((file) => !appliedNames.has(file))
@@ -250,6 +434,14 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
     pendingAll,
     retryTarget,
     abandonTarget,
+    markTarget,
+    withLock,
+    cancelQueries,
+    assertRecoveryClear: async () => { await checkRecoveryClear(await journalStore.lockTarget()) },
+    queryTracker: () => queryTracker,
+    signal: interrupt.signal,
+    locklessBootstrap: () => locklessBootstrap,
+    completeRecovery: async () => { await completeRecovery?.() },
   }
 }
 
@@ -286,17 +478,65 @@ export async function runAbandon(
       console.log('Abandon cancelled by user.')
       return 0
     }
-    await abandonMigrationState(state, { journalStore })
+    await abandonUnderLock(ctx, migration, state)
     console.log(`Abandoned in-progress migration ${migration}.`)
     return 0
   }
 
-  await abandonMigrationState(state, { journalStore })
+  await abandonUnderLock(ctx, migration, state)
   if (jsonMode) {
     emitAbandonJson({ mode: 'execute', scope: tableScope, abandon: report })
     return 0
   }
   renderAbandonText(report, { ...textInput, performed: true })
+  return 0
+}
+
+/**
+ * Resets the state the user saw, holding the migrate lock, so --abandon
+ * never rewrites a migration that a running apply is recording (#716).
+ */
+async function abandonUnderLock(ctx: AbandonContext, migration: string, state: MigrationRowState): Promise<void> {
+  const { journalStore, appliedNames } = ctx
+  const withLock = ctx.withLock ?? ((fn) => fn())
+  await withLock(async () => {
+    const current = await readAbandonableState({ migration, appliedNames }, { journalStore })
+    if (current.appliedAt !== state.appliedAt) {
+      throw journalChangedError(`the journal state of ${migration} is no longer the one shown`)
+    }
+    await abandonMigrationState(current, { journalStore })
+  }, { abandon: migration })
+}
+
+/**
+ * --mark-applied / --mark-not-applied <migration>: record the operator's
+ * outcome for the one statement that stopped with async_outcome_unknown, so
+ * the next apply continues from it without running the statements the journal
+ * records as completed again. Refuses while that attempt runs on any replica.
+ * Without --apply it only previews. Runs before every other gate and applies nothing.
+ */
+async function runMarkOutcome(
+  ctx: Pick<MigrateContext, 'jsonMode' | 'executeRequested' | 'journalStore' | 'tableScope' | 'appliedNames' | 'db' | 'withLock' | 'files' | 'migrationsDir'>,
+  target: MarkTarget,
+): Promise<number> {
+  const flag = target.outcome === 'applied' ? 'mark-applied' : 'mark-not-applied'
+  const log = ctx.jsonMode ? (line: string) => console.error(line) : (line: string) => console.log(line)
+  const deps = { db: ctx.db, journalStore: ctx.journalStore, log }
+  const statements = ctx.files.includes(target.migration)
+    ? extractExecutableStatements(await readFile(join(ctx.migrationsDir, target.migration), 'utf8'))
+    : []
+  const sqlByFingerprint = new Map(statements.map((statement) => [statementFingerprint(statement), statement]))
+  const input = { migration: target.migration, appliedNames: ctx.appliedNames, flag, sqlByFingerprint }
+  const shown = await readStoppedStatement(input, deps)
+  const report = markReport(target, shown.op)
+  if (ctx.executeRequested) {
+    await ctx.withLock(() => markUnderLock(target, shown, input, deps))
+  }
+  if (ctx.jsonMode) {
+    emitJson('migrate', { mode: ctx.executeRequested ? 'execute' : 'plan', scope: ctx.tableScope, mark: report })
+    return 0
+  }
+  renderMarkText(report, ctx.executeRequested)
   return 0
 }
 
@@ -322,14 +562,22 @@ async function runChecksumGate(ctx: MigrateContext): Promise<number | undefined>
  * nothing is pending, so every run reports what it did.
  */
 async function resolvePendingPlan(ctx: MigrateContext): Promise<PendingPlan> {
-  const { migrationsDir, retryTarget, journalStore, appliedNames } = ctx
+  const { migrationsDir, retryTarget, journalStore, appliedNames, pluginRuntime } = ctx
   const scope = await resolvePendingScope(ctx)
   const emptyMigrations = await findEmptyMigrations(migrationsDir, scope.pending)
+  const pluginsRewriteStatements = pluginRuntime.plugins.some((item) => item.plugin.hooks?.onBeforeApply !== undefined)
   const retry =
     retryTarget === undefined
       ? undefined
       : await resolveRetry(
-          { migration: retryTarget, migrationsDir, pending: scope.pending, emptyMigrations, appliedNames },
+          {
+            migration: retryTarget,
+            migrationsDir,
+            pending: scope.pending,
+            emptyMigrations,
+            appliedNames,
+            pluginsRewriteStatements,
+          },
           { journalStore },
         )
   return { ...scope, emptyMigrations, retry }
@@ -345,7 +593,8 @@ async function resolvePendingScope(ctx: MigrateContext): Promise<ScopeResolution
 }
 
 /** Nothing to apply: say why, with what --retry did. */
-function renderNothingPending(ctx: MigrateContext, plan: PendingPlan): number {
+export async function renderNothingPending(ctx: Pick<MigrateContext, 'jsonMode' | 'mode' | 'tableScope' | 'completeRecovery'>, plan: Pick<PendingPlan, 'noScopeMatch' | 'retry'>): Promise<number> {
+  await ctx.completeRecovery?.()
   const { jsonMode, mode, tableScope } = ctx
   const input = { jsonMode, mode, scope: tableScope, retry: plan.retry }
   if (plan.noScopeMatch) emitNoScopeMatch(input)
@@ -382,6 +631,19 @@ function runEmptyMigrationGate(ctx: MigrateContext, emptyMigrations: string[]): 
     return 1
   }
   throw emptyMigrationsError(emptyMigrations)
+}
+
+/**
+ * Gate: refuse to apply when a pending file marks a statement other than a
+ * SELECT `mode=barrier` (#634), before any migration runs; a plan-only run
+ * does not check.
+ */
+async function runBarrierGate(ctx: MigrateContext, pending: string[]): Promise<void> {
+  const { executeRequested, jsonMode, migrationsDir } = ctx
+  const applyPossible = executeRequested || (!jsonMode && !isBackgroundOrCI())
+  if (!applyPossible) return
+  const barriers = await findPendingNonSelectBarriers(migrationsDir, pending)
+  if (barriers.length > 0) throw nonSelectBarrierError(barriers)
 }
 
 /** Gate 2: in plan mode, stop unless the user confirms an interactive apply. */
@@ -437,8 +699,48 @@ async function runDestructiveGate(ctx: MigrateContext, pending: string[]): Promi
   return undefined
 }
 
-/** Apply each pending migration, journal it, and emit the final summary. */
+/**
+ * Apply each pending migration holding the migrate lock (#716), journal it,
+ * and emit the final summary.
+ */
 async function applyPending(ctx: MigrateContext, plan: PendingPlan): Promise<number> {
+  return await ctx.withLock(async () => await applyPlan(ctx, await replanUnderLock(ctx, plan)), { selectedFiles: plan.pending })
+}
+
+/**
+ * The plan again, from the journal as it is now that this run holds the
+ * lock: a run that held it meanwhile may have applied some of the pending
+ * migrations, which this run then skips. Anything the plan the user saw does
+ * not cover stops the run.
+ */
+async function replanUnderLock(ctx: MigrateContext, plan: PendingPlan): Promise<PendingPlan> {
+  const journal = await ctx.journalStore.readJournal()
+  const appliedNames = new Set(journal.applied.map((entry) => entry.name))
+  const mismatches = await findChecksumMismatches(ctx.migrationsDir, journal)
+  if (mismatches.length > 0) {
+    throw journalChangedError(`the journal now records ${mismatches.map((item) => item.name).join(', ')} with another checksum`)
+  }
+  const current = await resolvePendingPlan({
+    ...ctx,
+    journal,
+    appliedNames,
+    pendingAll: ctx.files.filter((file) => !appliedNames.has(file)),
+  })
+  const added = current.pending.filter((file) => !plan.pending.includes(file))
+  if (added.length > 0) throw journalChangedError(`${added.join(', ')} became pending`)
+  if (JSON.stringify(current.retry) !== JSON.stringify(plan.retry)) {
+    throw journalChangedError(`--retry ${ctx.retryTarget} now resolves differently`)
+  }
+  const skipped = plan.pending.filter((file) => !current.pending.includes(file))
+  if (skipped.length > 0) {
+    const line = `Skipping ${skipped.join(', ')}: another migrate run applied ${skipped.length === 1 ? 'it' : 'them'} meanwhile.`
+    if (ctx.jsonMode) console.error(line)
+    else console.log(line)
+  }
+  return current
+}
+
+async function applyPlan(ctx: MigrateContext, plan: PendingPlan): Promise<number> {
   const { jsonMode, migrationsDir, db, journalStore, pluginRuntime, config, tableScope, flags, settings } = ctx
   const { pending, undeterminedScope, retry } = plan
   // Progress lines go to stderr in --json mode, so stdout stays one JSON document.
@@ -457,6 +759,9 @@ async function applyPending(ctx: MigrateContext, plan: PendingPlan): Promise<num
       migrationsDir,
       file,
       settings,
+      queryTracker: ctx.queryTracker(),
+      locklessBootstrap: ctx.locklessBootstrap(),
+      signal: ctx.signal,
       retry: retry?.action === 'resume' && retry.migration === file ? retry : undefined,
       log,
     })
@@ -464,6 +769,7 @@ async function applyPending(ctx: MigrateContext, plan: PendingPlan): Promise<num
     if (!jsonMode) renderApplied(file)
   }
 
+  await ctx.completeRecovery?.()
   if (jsonMode) {
     emitApplySummaryJson({ scope: tableScope, applied: appliedNow, undeterminedScope, retry })
     return 0

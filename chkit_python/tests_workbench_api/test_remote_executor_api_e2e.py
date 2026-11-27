@@ -25,9 +25,9 @@ from datetime import UTC, datetime
 from typing import Any, TypeVar
 
 from chkit.cli.commands.migrate_async_apply import (
+    ATTEMPT_RECORD_MARKER,
     AsyncApplyInput,
     apply_async_statement,
-    make_deterministic_query_id,
 )
 from chkit.cli.journal_store import MigrationRowState, OperationState
 from chkit.clickhouse.client import QueryResult, QueryStatus
@@ -42,6 +42,22 @@ T = TypeVar("T")
 _SLOW_ROWS = 20
 _READS = 6
 _MIGRATION_CHECKSUM = "c1"
+
+
+def test_the_api_forwards_query_settings_to_clickhouse() -> None:
+    """Every write sends async_insert = 0 and wait_for_async_insert = 1 in the
+    request's settings (#804), so the API must hand them to ClickHouse. Two
+    values, so a profile default can't pass."""
+    remote = _connect()
+
+    def read(value: int) -> str:
+        rows = remote.query(
+            "SELECT toString(toUInt8(getSetting('async_insert'))) AS v",
+            settings={"async_insert": value},
+        ).rows
+        return str(rows[0]["v"])
+
+    assert [read(0), read(1)] == ["0", "1"]
 
 
 def test_submission_keeps_its_id_and_reads_running_on_every_replica() -> None:
@@ -105,9 +121,7 @@ def test_rerun_attaches_to_attempt_a_lost_run_left_running() -> None:
     table = f"`{database}`.`{name}`"
     operation_key = f"table:{database}.{name}"
     migration_name = f"20990101000000_{name}.sql"
-    query_id = make_deterministic_query_id(
-        database, "_chkit_migrations", migration_name, 0
-    )
+    query_id = str(uuid.uuid4())
     outcome: list[str] = []
     # The attempt of a run that lost its connection while the statement ran.
     worker = threading.Thread(
@@ -148,7 +162,11 @@ def test_rerun_attaches_to_attempt_a_lost_run_left_running() -> None:
                 "status": "started",
                 "startedAt": "2026-10-02 00:00:00.000",
                 "finishedAt": None,
-                "lastError": "",
+                # A record this release wrote before the submit: fenced, under an
+                # id of its own (#767). A record of an earlier release would stop
+                # the run.
+                "lastError": ATTEMPT_RECORD_MARKER,
+                "attemptFenced": True,
             }
         )
         journal = _MemoryJournal(
@@ -173,6 +191,7 @@ def test_rerun_attaches_to_attempt_a_lost_run_left_running() -> None:
                 migration_name=migration_name,
                 migration_checksum=_MIGRATION_CHECKSUM,
                 statement_index=0,
+                fingerprint="",
                 operation_type="load_table_data",
                 operation_key=operation_key,
                 before_retry=f"TRUNCATE TABLE {table}",
@@ -273,10 +292,20 @@ class _RecordingRemote:
         return self._inner.submit(statement, query_id=query_id)
 
     def query_status(
-        self, query_id: str, *, after_time: str | None = None, every_replica: bool = False
+        self,
+        query_id: str,
+        *,
+        after_time: str | None = None,
+        every_replica: bool = False,
+        running_only: bool = False,
+        include_before_start: bool = False,
     ) -> QueryStatus:
         return self._inner.query_status(
-            query_id, after_time=after_time, every_replica=every_replica
+            query_id,
+            after_time=after_time,
+            every_replica=every_replica,
+            running_only=running_only,
+            include_before_start=include_before_start,
         )
 
 
@@ -287,6 +316,11 @@ class _MemoryJournal:
 
     def read_migration_state(self, _name: str) -> MigrationRowState | None:
         return self.state
+
+    def read_stored_operation(self, _name: str, index: int) -> OperationState | None:
+        if self.state is None:
+            return None
+        return next((op for op in self.state.operations if op.operation_index == index), None)
 
     def write_migration_state(self, state: MigrationRowState) -> None:
         self.writes.append(state)

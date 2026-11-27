@@ -24,7 +24,7 @@ having to fake a ``clickhouse_connect`` Client object.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
@@ -34,6 +34,12 @@ from chkit.clickhouse.client import (
     ClickHouseJsonQueryResult,
     QueryResult,
     QueryStatus,
+    query_log_outcome,
+)
+from chkit.clickhouse.control import (
+    STRICT_CONTROL_SETTINGS,
+    remaining_control_seconds,
+    run_control_request,
 )
 from chkit.clickhouse.introspect import (
     IntrospectedTable,
@@ -42,6 +48,7 @@ from chkit.clickhouse.introspect import (
     list_table_details,
 )
 from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
+from chkit.core.jsnum import js_math_round
 from chkit_plugin_obsessiondb.credentials import Credentials
 from chkit_plugin_obsessiondb.workbench_api import (
     WorkbenchExecuteResult,
@@ -65,6 +72,43 @@ def _coerce_wire_settings(
         elif isinstance(value, (str, int, float)):
             coerced[key] = value
     return coerced or None
+
+
+# A write is stored when it returns: no asynchronous INSERT, and one that a
+# table's own async_insert setting still makes asynchronous waits for its flush
+# (#804), as the direct connection sends (#790). TS DURABLE_INSERT_SETTINGS.
+_DURABLE_INSERT_SETTINGS: dict[str, int] = {"async_insert": 0, "wait_for_async_insert": 1}
+
+_SETTING_ROWS_SQL = (
+    "SELECT name, value, toString(readonly) AS readonly FROM system.settings "
+    "WHERE name IN ('readonly', 'async_insert', 'wait_for_async_insert')"
+)
+
+
+def _durable_insert_settings(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """The durable-insert settings the user's profile lets a write send. A
+    setting the user cannot change (a constraint) is left out when it already
+    has that value, as ClickHouse rejects any change of it, also on DDL. Fixed
+    at another value, the write is refused. A readonly = 1 user gets the
+    server's own error, which refuses its writes. TS ``durableInsertSettings``."""
+    by_name = {str(row["name"]): row for row in rows}
+    mode = by_name.get("readonly")
+    if mode is not None and str(mode["value"]) == "1":
+        return {}
+    out: dict[str, Any] = {}
+    for name, value in _DURABLE_INSERT_SETTINGS.items():
+        row = by_name.get(name)
+        if row is None:
+            continue
+        if str(row["readonly"]) == "0":
+            out[name] = value
+        elif str(row["value"]) != str(value):
+            msg = (
+                f"Setting {name} is fixed at {row['value']} for this ClickHouse user, "
+                f"and chkit writes need {name} = {value} to be stored when they return."
+            )
+            raise RuntimeError(msg)
+    return out
 
 
 def _row_to_dict(row: Any, column_names: Sequence[str]) -> dict[str, Any]:
@@ -110,7 +154,8 @@ def _raise_if_error(result: WorkbenchExecuteResult) -> None:
 class RemoteClickHouseClient:
     """Drop-in replacement for :class:`chkit.clickhouse.client.ClickHouseClient`."""
 
-    __slots__ = ("_credentials", "_database", "_service_slug")
+    __slots__ = ("_credentials", "_database", "_service_slug", "_setting_rows")
+    query_control_cluster: str = "default"
 
     def __init__(
         self,
@@ -122,6 +167,7 @@ class RemoteClickHouseClient:
         self._credentials: Credentials = credentials
         self._service_slug: str = service_slug
         self._database: str = database
+        self._setting_rows: list[dict[str, Any]] | None = None
 
     # ---- context manager parity ----
 
@@ -139,14 +185,84 @@ class RemoteClickHouseClient:
     def database(self) -> str:
         return self._database
 
+    def _write_settings(self, settings: dict[str, Any] | None) -> dict[str, Any]:
+        """Sent with writes (execute, insert, submit) under the caller's
+        settings, as the direct connection sends. The service user's settings
+        are looked up on the first write (concurrent first writes may each look
+        them up); a failed lookup is not cached. TS ``writeSettings``."""
+        if self._setting_rows is None:
+            self._setting_rows = self.query(_SETTING_ROWS_SQL).rows
+        # Defaults a caller's own value replaces, placed after the caller's
+        # other settings so that a settings profile among them cannot change
+        # them (#790).
+        own = settings or {}
+        return {
+            **{key: value for key, value in own.items() if key not in _DURABLE_INSERT_SETTINGS},
+            **_durable_insert_settings(self._setting_rows),
+            **{key: value for key, value in own.items() if key in _DURABLE_INSERT_SETTINGS},
+        }
+
     # ---- ClickHouseClient surface ----
+
+    def execute_tracked(
+        self,
+        statement: str,
+        check: Callable[[], None],
+        before_attempt: Callable[[], str],
+        settings: dict[str, Any] | None = None,
+    ) -> None:
+        # Looked up first: no request may come between the last check and the send.
+        sent = self._write_settings(settings)
+        check()
+        query_id = before_attempt()
+        check()
+        wire_settings = _coerce_wire_settings(sent) or {}
+        wire_settings.pop("query_id", None)
+        result = workbench_query_execute(
+            self._credentials,
+            service_slug=self._service_slug,
+            query=statement,
+            query_id=query_id,
+            settings=wire_settings or None,
+        )
+        _raise_if_error(result)
+
+    def query_control(
+        self, statement: str, timeout_ms: float, *, query_id: str | None = None,
+        settings: dict[str, Any] | None = None,
+    ) -> QueryResult:
+        def request(deadline: float) -> QueryResult:
+            result = workbench_query_execute(
+                self._credentials,
+                service_slug=self._service_slug,
+                query=statement,
+                timeout=remaining_control_seconds(deadline),
+                query_id=query_id,
+                settings=_coerce_wire_settings({
+                    **{key: value for key, value in (settings or {}).items() if key != "query_id"},
+                    **STRICT_CONTROL_SETTINGS,
+                }),
+            )
+            _raise_if_error(result)
+            if result.truncated:
+                raise RuntimeError(
+                    "Cancellation control result was truncated; complete proof is required"
+                )
+            return QueryResult(
+                column_names=[col.name for col in result.meta],
+                rows=normalize_query_data(result),
+            )
+
+        # The shared deadline bounds connection setup, the entire response and
+        # error enrichment, rather than only inactivity between socket reads.
+        return run_control_request(request, timeout_ms)
 
     def execute(self, statement: str, settings: dict[str, Any] | None = None) -> None:
         result = workbench_query_execute(
             self._credentials,
             service_slug=self._service_slug,
             query=statement,
-            settings=_coerce_wire_settings(settings),
+            settings=_coerce_wire_settings(self._write_settings(settings)),
         )
         _raise_if_error(result)
 
@@ -179,15 +295,25 @@ class RemoteClickHouseClient:
         statement: str,
         query_id: str | None = None,
         settings: dict[str, Any] | None = None,
+        *,
+        before_send: Callable[[], None] | None = None,
     ) -> str:
+        # The settings are resolved first, so no request comes between the
+        # cancel check and the send. Never start a request after the caller
+        # gave up on it, and stop one still connecting before its first bytes
+        # (#767), as the native driver does. QUERY_TIMEOUT bounds the connect (10 s).
+        wire_settings = _coerce_wire_settings(self._write_settings(settings))
+        if before_send is not None:
+            before_send()
         # The API takes the id as a top-level field and ignores a query_id
         # setting, which would leave the query under a random id.
         result = workbench_query_execute(
             self._credentials,
             service_slug=self._service_slug,
             query=statement,
-            settings=_coerce_wire_settings(settings),
+            settings=wire_settings,
             query_id=query_id,
+            guard=before_send,
         )
         _raise_if_error(result)
         return query_id or result.query_id or "submitted"
@@ -238,15 +364,20 @@ class RemoteClickHouseClient:
         after_time: str | None = None,
         every_replica: bool = False,
         running_only: bool = False,
+        include_before_start: bool = False,
     ) -> QueryStatus:
         """Mirror of :meth:`ClickHouseClient.query_status`, proxied via workbench."""
         # after_time bounds the query's start, as in the native client. A
         # string compared with a DateTime column may carry neither fractional
         # seconds nor a zone (TYPE_MISMATCH), so an ISO 8601 bound such as
         # '2026-10-02T16:22:23.641Z' goes through parseDateTimeBestEffort.
+        # event_date prunes query_log's partitions: the entry is logged no
+        # earlier than the query started. A day of slack covers a session
+        # time zone other than the server's; toDate32, as a Date before 1970 wraps around.
         after_filter = (
             " AND query_start_time >= "
             f"parseDateTimeBestEffort({_quote_string(after_time)})"
+            f" AND event_date >= toDate32(parseDateTimeBestEffort({_quote_string(after_time)})) - 1"
             if after_time
             else ""
         )
@@ -275,30 +406,27 @@ class RemoteClickHouseClient:
             )
         if running_only:
             return QueryStatus(status="unknown")
+        types = (
+            "'QueryFinish', 'ExceptionWhileProcessing', 'ExceptionBeforeStart'"
+            if include_before_start
+            else "'QueryFinish', 'ExceptionWhileProcessing'"
+        )
+        # With ExceptionBeforeStart, every entry of the id is read: a rejected
+        # duplicate delivery logs one early, which must not hide the
+        # QueryFinish of the attempt that ran (#767).
         log = self.query(
-            "SELECT type, written_rows, written_bytes, query_duration_ms, exception "
+            "SELECT type, written_rows, written_bytes, query_duration_ms, exception, "
+            "exception_code, toString(serverUUID()) AS server, "
+            "toString(event_time_microseconds) AS event_at "
             f"FROM {source('system.query_log')} "
             f"WHERE user = currentUser() AND query_id = '{query_id}'"
-            "  AND type IN ('QueryFinish', 'ExceptionWhileProcessing')"
+            f"  AND type IN ({types})"
             f"{after_filter}"
-            " ORDER BY event_time DESC LIMIT 1"
+            " ORDER BY event_time DESC"
+            f"{'' if include_before_start else ' LIMIT 1'}"
             f"{read_settings}"
         )
-        if not log.rows:
-            return QueryStatus(status="unknown")
-        row = log.rows[0]
-        if str(row.get("type")) == "QueryFinish":
-            return QueryStatus(
-                status="finished",
-                written_rows=_safe_int(row.get("written_rows")),
-                written_bytes=_safe_int(row.get("written_bytes")),
-                duration_ms=_safe_int(row.get("query_duration_ms")),
-            )
-        return QueryStatus(
-            status="failed",
-            duration_ms=_safe_int(row.get("query_duration_ms")),
-            error=str(row.get("exception") or "") or None,
-        )
+        return query_log_outcome(log.rows)
 
 
 def _render_sql_literal(value: Any) -> str:
@@ -343,7 +471,7 @@ def _quote_string(value: str) -> str:
 
 def _elapsed_ms(value: Any) -> int | None:
     try:
-        return round(float(value) * 1000)
+        return int(js_math_round(float(value) * 1000))
     except (TypeError, ValueError):
         return None
 

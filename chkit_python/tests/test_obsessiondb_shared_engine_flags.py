@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -20,7 +19,15 @@ from typer.testing import CliRunner
 from chkit.cli.main import app
 from chkit.cli.table_scope import TableScope
 from chkit.core import parse_flags
-from chkit.core.model import ChxUserConfig, resolve_config, table
+from chkit.core.flags import FlagDef
+from chkit.core.model import (
+    ChxUserConfig,
+    MigrationOperation,
+    MigrationPlan,
+    _RiskSummary,
+    resolve_config,
+    table,
+)
 from chkit.plugins import ChxOnPlanCreatedContext, ChxOnSchemaLoadedContext
 from chkit_plugin_obsessiondb import obsessiondb, resolve_strip_behavior
 from chkit_plugin_obsessiondb.plugin import _ObsessionDBHooks
@@ -60,7 +67,7 @@ def _config(url: str) -> Any:
     )
 
 
-def _override_flag_defs() -> list[dict[str, Any]]:
+def _override_flag_defs() -> list[FlagDef]:
     extensions = obsessiondb().extend_commands or []
     entry = next(e for e in extensions if "generate" in e.get("command", []))
     flags = entry["flags"]
@@ -125,7 +132,7 @@ def test_on_schema_loaded_honors_parsed_override_flags_for_storage_policy() -> N
             command="generate",
             table_scope=TableScope(enabled=False),
             config=_config(LOCAL_URL),
-            flags=parse_flags(["--force-shared-engines"], flag_defs),
+            flags=dict(parse_flags(["--force-shared-engines"], flag_defs)),
             definitions=definitions,
             json_mode=True,
         )
@@ -135,7 +142,7 @@ def test_on_schema_loaded_honors_parsed_override_flags_for_storage_policy() -> N
             command="generate",
             table_scope=TableScope(enabled=False),
             config=_config("https://my-cluster.obsessiondb.com:8443"),
-            flags=parse_flags(["--no-shared-engines"], flag_defs),
+            flags=dict(parse_flags(["--no-shared-engines"], flag_defs)),
             definitions=definitions,
             json_mode=True,
         )
@@ -194,13 +201,17 @@ def test_an_obsessiondb_target_gives_every_merge_tree_table_storage_policy_s3() 
 
 def test_an_obsessiondb_target_rejects_a_plan_that_changes_storage_policy() -> None:
     hooks = _ObsessionDBHooks()
-    plan = SimpleNamespace(
+    plan = MigrationPlan(
         operations=[
-            SimpleNamespace(
+            MigrationOperation(
                 type="alter_table_modify_setting",
                 key="table:app.events:setting:storage_policy",
+                risk="caution",
+                sql="ALTER TABLE app.events MODIFY SETTING storage_policy = 'hot_cold';",
             )
-        ]
+        ],
+        risk_summary=_RiskSummary(caution=1),
+        rename_suggestions=[],
     )
 
     def run(url: str) -> Any:
