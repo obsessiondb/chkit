@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
-import { definePipeline, defineStream, runIngestion, selectStreams } from '@chkit/plugin-ingest'
-import { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-ingest/testing'
+import { definePipeline, defineStream, runIngestion, selectStreams } from '@chkit/plugin-sync'
+import { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-sync/testing'
 
 import type { SlackReaderConfig } from '../config.js'
 import { readMessages, slackMessagesRaw } from '../sources/messages.js'

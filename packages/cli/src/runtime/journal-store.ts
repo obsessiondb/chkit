@@ -4,6 +4,7 @@ import {
   allReplicas,
   isUnknownDatabaseError,
   resolveReplicaFanoutOrThrow,
+  STRICT_CONTROL_SETTINGS,
   waitForColumn,
   waitForTable,
   type ClickHouseExecutor,
@@ -34,6 +35,42 @@ export interface OperationState {
    * recorded: an older chkit wrote the row, or the journal has no column for it.
    */
   fingerprint: string
+  /**
+   * Whether this async record names a query id that only this attempt was
+   * submitted under, recorded before its submit (#767). Only that write sets
+   * it; every other write carries it as a read returned it. On a failed
+   * record it also means the server recorded the failure. A write stores it
+   * in the fingerprint (FENCED_FINGERPRINT_PREFIX), never on a completed
+   * record, so a journal without the fingerprint column never has it.
+   */
+  attemptFenced?: boolean
+}
+
+/**
+ * The prefix of the stored fingerprint of a fenced started or failed record (#767).
+ * Releases from #599 on compare a started record's fingerprint with the
+ * statement's before they resume, so an earlier release stops with
+ * statement_split_changed instead of running before-retry SQL without
+ * recording the attempt failed first. A read strips it again.
+ */
+const FENCED_FINGERPRINT_PREFIX = 'fenced-attempt;'
+
+/** The fingerprint a write stores for `op` (#767). */
+function storedFingerprint(op: OperationState): string {
+  return op.status !== 'completed' && op.attemptFenced === true ? `${FENCED_FINGERPRINT_PREFIX}${op.fingerprint}` : op.fingerprint
+}
+
+/** The fingerprint a read finds stored, and whether it was fenced (#767). */
+function readStoredFingerprint(stored: string): Pick<OperationState, 'fingerprint' | 'attemptFenced'> {
+  return stored.startsWith(FENCED_FINGERPRINT_PREFIX)
+    ? { fingerprint: stored.slice(FENCED_FINGERPRINT_PREFIX.length), attemptFenced: true }
+    : { fingerprint: stored }
+}
+
+/** `op` as a read returns it after a write with or without the fingerprint column (#767). */
+export function operationAsStored(op: OperationState, fingerprints: boolean): OperationState {
+  const { attemptFenced: _attemptFenced, ...rest } = op
+  return fingerprints ? { ...rest, ...readStoredFingerprint(storedFingerprint(op)) } : rest
 }
 
 export interface MigrationRowState {
@@ -48,6 +85,25 @@ export interface MigrationRowState {
 export interface JournalStore {
   readJournal(): Promise<MigrationJournal>
   readMigrationState(migrationName: string): Promise<MigrationRowState | null>
+  /**
+   * One statement's record as the journal's server returns it, without the
+   * last write this process made (#767): what an async submit requires.
+   */
+  readStoredOperation(migrationName: string, statementIndex: number): Promise<OperationState | undefined>
+  /**
+   * Whether the journal stores an async attempt's fence (#767): it has, or
+   * this run adds, the operation_fingerprints column. A journal not created
+   * yet gets it with the table.
+   */
+  storesAttemptFences(): Promise<boolean>
+  /**
+   * The statement's record, read in one query from every copy of the journal
+   * (#767). `covered` is false when that read cannot be shown to cover every
+   * copy: a replicated journal with a replica the read did not reach, or with
+   * replicas it cannot name, or a journal that is not replicated on a target
+   * with several replicas or without a declared cluster (#802).
+   */
+  readOperationOnEveryCopy(migrationName: string, statementIndex: number): Promise<EveryCopyRead>
   writeMigrationState(state: MigrationRowState): Promise<void>
   appendEntry(entry: MigrationJournalEntry): Promise<void>
   /**
@@ -70,6 +126,18 @@ export function resolveJournalTableName(): string {
     )
   }
   return candidate
+}
+
+export type EveryCopyRead = { covered: false } | { covered: true; op: OperationState | undefined }
+
+export interface CopyRow extends Record<string, unknown> {
+  replica: string
+  /** The replica set as JSON text: the Workbench API returns every cell as a string. */
+  members: string
+  present: number | string
+  applied_at: string
+  operations: string
+  operation_fingerprints: string
 }
 
 interface MigrationRow extends Record<string, unknown> {
@@ -209,7 +277,7 @@ function operationsArrayLiteral(operations: OperationState[]): string {
 }
 
 function fingerprintsArrayLiteral(operations: OperationState[]): string {
-  return `[${operations.map((op) => `'${escapeSqlString(op.fingerprint)}'`).join(',')}]`
+  return `[${operations.map((op) => `'${escapeSqlString(storedFingerprint(op))}'`).join(',')}]`
 }
 
 function operationFromTuple(row: OperationTupleRow, fingerprint: string): OperationState {
@@ -222,7 +290,7 @@ function operationFromTuple(row: OperationTupleRow, fingerprint: string): Operat
     startedAt: row.started_at,
     finishedAt: row.finished_at,
     lastError: row.last_error,
-    fingerprint,
+    ...readStoredFingerprint(fingerprint),
   }
 }
 
@@ -236,6 +304,45 @@ function parseBool(value: unknown): boolean {
 // `operations` is selected via `toJSONString(...)`, so it arrives as a JSON
 // string from every executor. Tolerate an already-decoded array too (mocks /
 // any future typed executor) and degrade to [] on anything unparseable.
+/**
+ * Whether the per-replica rows of one read cover every replica of the
+ * journal's replica set, and the newest record among them (#767). A row
+ * without a replica name, or a member no row names, leaves the read uncovered.
+ */
+export function everyCopyRead(
+  rows: CopyRow[],
+  findOp: (operations: unknown, fingerprints: unknown) => OperationState | undefined,
+): EveryCopyRead {
+  if (rows.length === 0 || rows.some((row) => typeof row.replica !== 'string' || row.replica === '')) return { covered: false }
+  const read = new Set(rows.map((row) => row.replica))
+  // Each server answers once: a duplicate reply (one server listed twice, or
+  // two that share a name) leaves the read uncovered.
+  if (read.size !== rows.length) return { covered: false }
+  const memberLists = rows.map((row) => decodeMembers(row.members))
+  if (memberLists.some((list) => list === undefined)) return { covered: false }
+  const members = new Set(memberLists.flatMap((list) => list ?? []))
+  if (members.size === 0 || [...members].some((member) => !read.has(member))) return { covered: false }
+  const newest = rows
+    .filter((row) => Number(row.present) > 0)
+    .reduce<CopyRow | undefined>((best, row) => (best === undefined || row.applied_at > best.applied_at ? row : best), undefined)
+  return { covered: true, op: newest ? findOp(newest.operations, newest.operation_fingerprints) : undefined }
+}
+
+/** A JSON array of non-empty strings, or undefined when it is anything else. */
+function decodeMembers(value: unknown): string[] | undefined {
+  if (typeof value !== 'string') return undefined
+  let decoded: unknown
+  try {
+    decoded = JSON.parse(value)
+  } catch {
+    return undefined
+  }
+  if (!Array.isArray(decoded) || decoded.some((member) => typeof member !== 'string' || member === '')) return undefined
+  return decoded as string[]
+}
+
+const SERVER_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
 function parseOperations(value: unknown, fingerprintsValue: unknown): OperationState[] {
   const decoded = parseJsonArray(value)
   const fingerprints = parseFingerprints(fingerprintsValue, decoded.length)
@@ -273,7 +380,13 @@ function rowVersion(appliedAt: string): number {
   return Date.parse(/(Z|[+-]\d{2}:?\d{2})$/.test(iso) ? iso : `${iso}Z`)
 }
 
-export function createJournalStore(db: ClickHouseExecutor, cluster?: string): JournalStore {
+export function createJournalStore(executor: ClickHouseExecutor, cluster?: string, fanoutOverride?: ReplicaFanout): JournalStore {
+  const db: ClickHouseExecutor = {
+    ...executor,
+    query<T>(sql: string, settings?: Parameters<ClickHouseExecutor['query']>[1]) {
+      return executor.query<T>(sql, { ...settings, default_format: 'JSONStrings' })
+    },
+  }
   const journalTable = resolveJournalTableName()
   debug('journal', `journal table: ${journalTable}${process.env.CHKIT_JOURNAL_TABLE ? ' (from CHKIT_JOURNAL_TABLE)' : ''}${cluster ? ` (ON CLUSTER ${cluster})` : ''}`)
   // In cluster mode the journal must be consistent across every node, so it uses
@@ -462,6 +575,8 @@ SETTINGS index_granularity = 1`
    * journal (#700).
    */
   async function replicaFanout(): Promise<ReplicaFanout | undefined> {
+    // Explicit recovery supplies attested UUID coverage, including one server.
+    if (fanoutOverride) return fanoutOverride.replicas > 1 ? fanoutOverride : undefined
     return await whileDatabasePropagates('discover the replicas of the journal', () =>
       resolveReplicaFanoutOrThrow(db, cluster),
     )
@@ -676,7 +791,9 @@ SETTINGS index_granularity = 1`
   async function insertState(state: MigrationRowState, fingerprints: boolean): Promise<void> {
     const fingerprintColumnName = fingerprints ? `, ${FINGERPRINTS_COLUMN}` : ''
     const fingerprintValue = fingerprints ? `, ${fingerprintsArrayLiteral(state.operations)}` : ''
-    const insertSql = `INSERT INTO ${await qualifiedJournal()} (name, applied_at, checksum, chkit_version, migration_completed, operations${fingerprintColumnName}) VALUES ('${escapeSqlString(state.name)}', '${escapeSqlString(state.appliedAt)}', '${escapeSqlString(state.checksum)}', '${escapeSqlString(state.chkitVersion)}', ${state.migrationCompleted ? 'true' : 'false'}, ${operationsArrayLiteral(state.operations)}${fingerprintValue})`
+    // Acknowledged once written on every transport, never as an asynchronous
+    // insert, so what follows a journal write runs after it is stored (#767).
+    const insertSql = `INSERT INTO ${await qualifiedJournal()} (name, applied_at, checksum, chkit_version, migration_completed, operations${fingerprintColumnName}) SETTINGS async_insert = 0 VALUES ('${escapeSqlString(state.name)}', '${escapeSqlString(state.appliedAt)}', '${escapeSqlString(state.checksum)}', '${escapeSqlString(state.chkitVersion)}', ${state.migrationCompleted ? 'true' : 'false'}, ${operationsArrayLiteral(state.operations)}${fingerprintValue})`
     await whileDatabasePropagates(`write to ${journalTable}`, () => pRetry(() => db.command(insertSql), {
       retries: 4,
       minTimeout: 0,
@@ -735,6 +852,65 @@ SETTINGS index_granularity = 1`
       }
     },
 
+    async readOperationOnEveryCopy(migrationName: string, statementIndex: number): Promise<EveryCopyRead> {
+      await ensureTable(false)
+      if (_databaseMissing || tableMissing) return { covered: true, op: undefined }
+      const database = await databaseName()
+      const [table] = await db.query<{ engine: string }>(
+        `SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = '${journalTable}'`,
+      )
+      const replicated = table === undefined || /^(Replicated|Shared)/.test(table.engine)
+      // A journal that is not replicated is one copy only on a single server,
+      // and only a declared cluster can show that (#802): behind a load
+      // balancer each server lists itself alone in its own clusters, so a
+      // cluster chkit guesses proves nothing about the others.
+      const declaredCluster = fanoutOverride?.cluster ?? cluster
+      if (!replicated && declaredCluster === undefined) return { covered: false }
+      const fingerprints = fingerprintColumn ? `toJSONString(${FINGERPRINTS_COLUMN})` : `'[]'`
+      const name = escapeSqlString(migrationName)
+      // Each server answers for itself, in the same query that reads its
+      // copy's newest version of the record. (A scalar subquery would run on
+      // the server that receives the query only.) The topology is read fresh
+      // for this read, never from an earlier probe: a cluster that does not
+      // exist, or that the user may not read, fails it.
+      const latest = `(SELECT count() AS present, argMax(tuple(toString(applied_at), ${OPERATIONS_SELECT}, ${fingerprints}), applied_at) AS latest FROM ${await qualifiedJournal()} WHERE name = '${name}') AS j`
+      const columns = 'j.present AS present, j.latest.1 AS applied_at, j.latest.2 AS operations, j.latest.3 AS operation_fingerprints'
+      // A replicated journal: every replica in the table's replica set, named
+      // by the set itself, must answer. One that is not replicated is one
+      // copy only on a single server: every server of the cluster answers by
+      // its server UUID, and there must be one.
+      const perCopy = replicated
+        ? `SELECT r.replica_name AS replica, toJSONString(mapKeys(r.replica_is_active)) AS members, ${columns} FROM system.replicas AS r CROSS JOIN ${latest} WHERE r.database = '${escapeSqlString(database)}' AND r.table = '${journalTable}'`
+        : `SELECT toString(serverUUID()) AS replica, toJSONString([toString(serverUUID())]) AS members, ${columns} FROM ${latest}`
+      // Every server of the cluster answers, or the read fails: an
+      // unavailable one is never skipped, and no limit cuts the reply short.
+      const rows = await db.query<CopyRow>(
+        `SELECT replica, members, present, applied_at, operations, operation_fingerprints FROM clusterAllReplicas('${escapeSqlString(declaredCluster ?? 'default')}', view(${perCopy}))`,
+        { ...STRICT_CONTROL_SETTINGS, skip_unavailable_shards: 0 },
+      )
+      // Not replicated: exactly one server, named by its UUID.
+      if (!replicated && (rows.length !== 1 || !SERVER_UUID.test(String(rows[0]?.replica)))) return { covered: false }
+      return everyCopyRead(rows, (operations, fingerprintsValue) =>
+        parseOperations(operations, fingerprintsValue).find((op) => op.operationIndex === statementIndex),
+      )
+    },
+
+    async storesAttemptFences(): Promise<boolean> {
+      await ensureTable(false)
+      if (_databaseMissing || tableMissing) return true
+      await ensureFingerprintColumn()
+      return fingerprintColumn
+    },
+
+    async readStoredOperation(migrationName: string, statementIndex: number): Promise<OperationState | undefined> {
+      await ensureTable(false)
+      if (_databaseMissing || tableMissing) return undefined
+      await trySyncReplica()
+      const [row] = await journalRows(`name = '${escapeSqlString(migrationName)}'`, ' LIMIT 1')
+      if (!row) return undefined
+      return parseOperations(row.operations, row.operation_fingerprints).find((op) => op.operationIndex === statementIndex)
+    },
+
     async readMigrationState(migrationName: string): Promise<MigrationRowState | null> {
       await ensureTable(false)
       if (_databaseMissing || tableMissing) return null
@@ -790,7 +966,8 @@ SETTINGS index_granularity = 1`
       }
       await ensureFingerprintColumn()
       await insertState(state, fingerprintColumn)
-      lastWritten.set(state.name, state)
+      // As a read returns it, so a fence counts only where it was stored.
+      lastWritten.set(state.name, { ...state, operations: state.operations.map((op) => operationAsStored(op, fingerprintColumn)) })
       noteVersion(state.name, state.appliedAt)
       await trySyncReplica()
     },

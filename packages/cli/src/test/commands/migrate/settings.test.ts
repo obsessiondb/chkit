@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 
-import { parseSettingFlags } from '../../../commands/migrate/settings.js'
+import type { ClickHouseExecutor } from '@chkit/clickhouse'
+
+import { assertInsertSettingsChangeable, insertSettingsOverrideWarning, parseSettingFlags } from '../../../commands/migrate/settings.js'
 
 describe('migrate --setting parsing (#321)', () => {
   test('no --setting yields no settings', () => {
@@ -31,5 +33,76 @@ describe('migrate --setting parsing (#321)', () => {
         `--setting ${name} is not allowed: ${name} is a ClickHouse HTTP parameter, not a query setting.`,
       )
     }
+  })
+
+  test('async_insert, wait_for_async_insert and profile are kept as written (#790)', () => {
+    expect(parseSettingFlags(['async_insert=TRUE', 'wait_for_async_insert = 0', 'profile=bulk'])).toEqual({
+      async_insert: 'TRUE',
+      wait_for_async_insert: '0',
+      profile: 'bulk',
+    })
+  })
+})
+
+describe('migrate --setting insert overrides warning (#790)', () => {
+  test('values equal to chkit\'s defaults, in any spelling, warn about nothing', () => {
+    expect(insertSettingsOverrideWarning(undefined)).toBeUndefined()
+    expect(insertSettingsOverrideWarning({ max_threads: '1', profile: 'bulk' })).toBeUndefined()
+    expect(insertSettingsOverrideWarning({ async_insert: 'FALSE', wait_for_async_insert: '1' })).toBeUndefined()
+    expect(insertSettingsOverrideWarning({ async_insert: '0', wait_for_async_insert: 'true' })).toBeUndefined()
+  })
+
+  test('one line names each overridden setting as written, with the guarantee it turns off', () => {
+    expect(insertSettingsOverrideWarning({ async_insert: 'True' })).toBe(
+      'Warning: --setting overrides what every migration write sets by default: async_insert=True (an INSERT is queued as an asynchronous insert, which migrate cannot cancel).',
+    )
+    expect(insertSettingsOverrideWarning({ wait_for_async_insert: '0', async_insert: '1' })).toBe(
+      'Warning: --setting overrides what every migration write sets by default: async_insert=1 (an INSERT is queued as an asynchronous insert, which migrate cannot cancel); wait_for_async_insert=0 (an asynchronous INSERT can be journaled as applied before its rows are stored).',
+    )
+  })
+})
+
+describe('migrate refuses a user whose insert settings are fixed (#790)', () => {
+  const executor = (rows: Array<{ name: string; value: string; readonly: number }>) =>
+    ({ query: async () => rows }) as unknown as ClickHouseExecutor
+  const changeable = [
+    { name: 'readonly', value: '0', readonly: 0 },
+    { name: 'async_insert', value: '1', readonly: 0 },
+    { name: 'wait_for_async_insert', value: '0', readonly: 0 },
+  ]
+
+  test('changeable settings, settings already at chkit\'s values, or a readonly = 1 user pass', async () => {
+    await assertInsertSettingsChangeable(executor(changeable))
+    await assertInsertSettingsChangeable(executor([{ name: 'async_insert', value: '0', readonly: 1 }, { name: 'wait_for_async_insert', value: '1', readonly: 1 }]))
+    await assertInsertSettingsChangeable(executor([{ name: 'readonly', value: '1', readonly: 1 }, { name: 'async_insert', value: '1', readonly: 1 }]))
+  })
+
+  test('a failed read stops the run, unless the database does not exist yet', async () => {
+    const failing = (error: Error) => ({ query: async () => { throw error } }) as unknown as ClickHouseExecutor
+    await expect(assertInsertSettingsChangeable(failing(new Error('denied')))).rejects.toThrow('denied')
+    await assertInsertSettingsChangeable(failing(Object.assign(new Error('UNKNOWN_DATABASE'), { code: '81' })))
+  })
+
+  for (const [name, value, durable] of [['async_insert', '1', '0'], ['wait_for_async_insert', '0', '1']] as const) {
+    test(`${name} fixed at ${value} is refused with insert_settings_fixed`, async () => {
+      const rows = changeable.map((row) => (row.name === name ? { name, value, readonly: 1 } : row))
+      await expect(assertInsertSettingsChangeable(executor(rows))).rejects.toMatchObject({
+        code: 'insert_settings_fixed',
+        message: `Setting ${name} is fixed at ${value} for this ClickHouse user, and chkit migrate needs ${name} = ${durable} so that a statement it records as applied is stored. Nothing ran.`,
+      })
+    })
+  }
+
+  test('an override is checked as sent, and chkit\'s default as its journal writes send it', async () => {
+    const fixedAt = (name: string, value: string) => changeable.map((row) => (row.name === name ? { name, value, readonly: 1 } : row))
+    await assertInsertSettingsChangeable(executor(fixedAt('async_insert', '0')), { async_insert: 'false' })
+    await expect(assertInsertSettingsChangeable(executor(fixedAt('async_insert', '0')), { async_insert: '1' })).rejects.toMatchObject({
+      code: 'insert_settings_fixed',
+      message: 'Setting async_insert is fixed at 0 for this ClickHouse user, so --setting async_insert=1 cannot apply. Nothing ran.',
+    })
+    await expect(assertInsertSettingsChangeable(executor(fixedAt('wait_for_async_insert', '0')), { wait_for_async_insert: 'false' })).rejects.toMatchObject({
+      code: 'insert_settings_fixed',
+      message: 'Setting wait_for_async_insert is fixed at 0 for this ClickHouse user, and chkit migrate needs wait_for_async_insert = 1 so that a statement it records as applied is stored. Nothing ran.',
+    })
   })
 })

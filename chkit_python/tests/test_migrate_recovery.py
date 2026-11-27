@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import pytest
 from typer.testing import CliRunner
@@ -40,6 +41,7 @@ from chkit.cli.commands.migrate_errors import (
     in_progress_checksum_mismatch_error,
 )
 from chkit.cli.commands.migrate_output import format_retry_notice, render_abandon_text
+from chkit.cli.commands.migrate_query_intents import QueryContext, QueryTracker
 from chkit.cli.commands.migrate_recovery import (
     Marker,
     OperationMismatch,
@@ -60,12 +62,13 @@ from chkit.cli.commands.migrate_recovery import (
     verify_retry_edit,
 )
 from chkit.cli.commands.migrate_retry import RetryNoop, RetryResume, resolve_retry
-from chkit.cli.journal_store import MigrationRowState, OperationState
+from chkit.cli.journal_store import EveryCopyRead, MigrationRowState, OperationState
 from chkit.cli.main import app
 from chkit.cli.migration_store import MigrationJournalEntry, checksum_sql
 from chkit.cli.safety_markers import (
     MigrationOperationSummary,
     extract_migration_operation_summaries,
+    extract_statement_operations,
 )
 from chkit.cli.table_scope import TableScope
 from chkit.clickhouse.client import QueryResult, QueryStatus
@@ -138,6 +141,8 @@ def summary(type_: str, key: str) -> MigrationOperationSummary:
 @dataclass
 class FakeStore:
     state: MigrationRowState | None = None
+    # Whether the journal stores an async attempt's fence (#767).
+    fences: bool = True
     reads: list[str] = field(default_factory=list)
     writes: list[MigrationRowState] = field(default_factory=list)
     appended: list[MigrationJournalEntry] = field(default_factory=list)
@@ -145,6 +150,17 @@ class FakeStore:
     def read_migration_state(self, name: str) -> MigrationRowState | None:
         self.reads.append(name)
         return self.state
+
+    def read_stored_operation(self, _name: str, index: int) -> OperationState | None:
+        if self.state is None:
+            return None
+        return next((op for op in self.state.operations if op.operation_index == index), None)
+
+    def stores_attempt_fences(self) -> bool:
+        return self.fences
+
+    def read_operation_on_every_copy(self, name: str, index: int) -> EveryCopyRead:
+        return EveryCopyRead(covered=True, op=self.read_stored_operation(name, index))
 
     def write_migration_state(self, state: MigrationRowState) -> None:
         self.writes.append(state)
@@ -212,7 +228,7 @@ def test_statement_identity_uses_marker_or_position() -> None:
     assert statement_identity(operations, 1) == StatementIdentity(
         type="sql_statement", key="statement:1", marked=False
     )
-    assert len(statement_identities(operations, [None, None])) == 2
+    assert len(statement_identities(operations, [None, None], operations)) == 2
 
 
 def test_verify_retry_edit_accepts_kept_completed_prefix() -> None:
@@ -243,7 +259,7 @@ def test_verify_retry_edit_rejects_missing_statement() -> None:
 
 def test_verify_retry_edit_matches_unmarked_statements_by_position() -> None:
     result = verify_retry_edit(
-        [op(0, "completed"), op(1, "completed")], statement_identities([], [None, None, None])
+        [op(0, "completed"), op(1, "completed")], statement_identities([], [None, None, None], [])
     )
     assert result == RetryEditOk(completed=2, unmarked_completed=2, position_only_completed=2, resume_index=2)
 
@@ -408,6 +424,144 @@ def test_rebase_in_progress_state_keeps_completed_and_unchanged() -> None:
             "operations": [op(0, "completed", A), op(1, "failed", B)],
         }
     )
+
+
+# Releases before #831 paired the n-th marker with the n-th statement, and the
+# journal names the marker they gave each statement. After an upgrade, a
+# --retry of such an in-progress migration still matches those records.
+def _order_paired_file(failing: str) -> str:
+    return "\n".join(
+        [
+            "CREATE TABLE db.a (id UInt64) ENGINE = MergeTree ORDER BY id;",
+            "-- operation: load_table_data key=table:db.a risk=caution mode=async",
+            "INSERT INTO db.a SELECT number FROM numbers(10);",
+            failing,
+        ]
+    )
+
+
+def _file_identities(sql: str) -> list[StatementIdentity]:
+    return statement_identities(
+        extract_statement_operations(sql),
+        [None for _ in extract_executable_statements(sql)],
+        extract_migration_operation_summaries(sql),
+    )
+
+
+# What the earlier release recorded: statement 1 ran as the load, statement 2 unmarked.
+_ORDER_PAIRED_RECORDS = [op(0, "completed", LOAD, query_id="q-0"), op(1, "completed"), op(2, "failed")]
+
+
+def test_order_paired_statements_keep_their_own_markers_now() -> None:
+    assert [(i.type, i.key) for i in _file_identities(_order_paired_file("SELECT 2;"))] == [
+        ("sql_statement", "statement:0"),
+        (LOAD.type, LOAD.key),
+        ("sql_statement", "statement:2"),
+    ]
+
+
+def test_retry_accepts_completed_statements_under_the_marker_they_were_recorded_with() -> None:
+    result = verify_retry_edit(_ORDER_PAIRED_RECORDS, _file_identities(_order_paired_file("SELECT 2;")))
+    assert result == RetryEditOk(
+        completed=2, unmarked_completed=1, position_only_completed=1, resume_index=2
+    )
+
+
+def test_retry_refuses_a_recorded_marker_neither_pairing_gives_the_statement() -> None:
+    result = verify_retry_edit(
+        [op(0, "completed", A)], _file_identities(_order_paired_file("SELECT 2;"))
+    )
+    assert isinstance(result, RetryEditMismatch)
+
+
+def test_retry_checks_the_order_pairing_as_a_whole_so_a_shared_marker_keeps_its_count() -> None:
+    shared = "-- operation: alter_table_modify_column key=table:db.t:column:f risk=caution"
+    # The REMOVE DEFAULT that completed was deleted; only the MODIFY after it is left.
+    sql = "\n".join(["SELECT 0;", shared, "ALTER TABLE db.t MODIFY COLUMN f UInt64;"])
+    result = verify_retry_edit(
+        [op(0, "completed", MODIFY_F), op(1, "completed", MODIFY_F), op(2, "failed", MODIFY_F)],
+        _file_identities(sql),
+    )
+    assert isinstance(result, RetryEditMismatch)
+
+
+def test_rebase_drops_a_failed_record_only_the_order_pairing_matches() -> None:
+    sql = "\n".join(
+        [
+            "-- operation: load_table_data key=table:db.a risk=caution",
+            "-- INSERT INTO db.a SELECT bad;",
+            "/* replacement */",
+            "-- operation: load_table_data key=table:db.b risk=caution",
+            "-- before-retry: TRUNCATE TABLE db.b",
+            "INSERT INTO db.b SELECT 1;",
+        ]
+    )
+    state = in_progress([op(0, "failed", LOAD)], checksum="old")
+    rebased = rebase_in_progress_state(
+        state, checksum="new", identities=_file_identities(sql), applied_at="T"
+    )
+    assert rebased.operations == []
+
+
+def test_rebase_keeps_a_failed_attempt_of_the_same_sql_under_the_order_pairing() -> None:
+    sql = "\n".join(
+        [
+            "SELECT 0;",
+            "-- operation: load_table_data key=table:db.a risk=caution",
+            "-- before-retry: TRUNCATE TABLE db.a",
+            "INSERT INTO db.a SELECT number FROM numbers(10);",
+            "-- edited",
+        ]
+    )
+    fingerprints = [statement_fingerprint(s) for s in extract_executable_statements(sql)]
+    failed = op(1, "failed").model_copy(update={"fingerprint": fingerprints[1]})
+    state = in_progress([op(0, "completed", LOAD), failed], checksum="old")
+    identities = statement_identities(
+        extract_statement_operations(sql), fingerprints, extract_migration_operation_summaries(sql)
+    )
+    check = verify_retry_edit(state.operations, identities)
+    assert isinstance(check, RetryEditOk)
+    assert check.resume_index == 1
+    rebased = rebase_in_progress_state(state, checksum="new", identities=identities, applied_at="T")
+    assert rebased.operations == [op(0, "completed", LOAD), failed]
+    # A record of other SQL is another statement's attempt.
+    other = failed.model_copy(update={"fingerprint": "other"})
+    rebased_other = rebase_in_progress_state(
+        state.model_copy(update={"operations": [other]}),
+        checksum="new",
+        identities=identities,
+        applied_at="T",
+    )
+    assert rebased_other.operations == []
+
+
+def test_rebase_keeps_a_started_attempt_recorded_under_the_order_pairing() -> None:
+    state = in_progress([op(0, "started", LOAD, query_id="q-0")], checksum="old")
+    rebased = rebase_in_progress_state(
+        state,
+        checksum="new",
+        identities=_file_identities(_order_paired_file("SELECT 2;")),
+        applied_at="T",
+    )
+    assert rebased.operations == [op(0, "started", LOAD, query_id="q-0")]
+
+
+@pytest.mark.parametrize("fenced", [True, False])
+def test_rebase_in_progress_state_carries_the_attempt_fence_as_read(fenced: bool) -> None:
+    """#767 (Codex review of #770): a --retry re-key carries each started
+    record's fence as the journal returned it, so it never makes an unfenced
+    record trusted, nor drops the fence of one this release wrote."""
+    started = op(0, "started", LOAD, query_id="q-0").model_copy(
+        update={"attempt_fenced": fenced}
+    )
+    rebased = rebase_in_progress_state(
+        in_progress([started], checksum="old"),
+        checksum="new",
+        identities=identities(LOAD),
+        applied_at="T",
+    )
+    assert rebased.operations == [started]
+    assert rebased.operations[0].attempt_fenced is fenced
 
 
 def test_has_statement_progress() -> None:
@@ -1035,6 +1189,7 @@ def _apply(
     retry: RetryResume | None = None,
     runtime: _FakeRuntime | None = None,
     log: Callable[[str], None] | None = None,
+    query_tracker: QueryTracker | None = None,
 ) -> MigrationJournalEntry:
     return apply_migration(
         ApplyMigrationInput(
@@ -1047,8 +1202,251 @@ def _apply(
             file="m.sql",
             retry=retry,
             log=log or (lambda _line: None),
+            query_tracker=query_tracker,
         )
     )
+
+
+def test_sync_retry_tracks_compensation_and_forward_separately(tmp_path: Path) -> None:
+    statement = "INSERT INTO db.a SELECT 1;"
+    before_retry = "TRUNCATE TABLE db.a"
+    sql = (
+        "-- operation: load_table_data key=table:db.a risk=safe mode=sync\n"
+        f"-- before-retry: {before_retry}\n{statement}"
+    )
+    store = FakeStore(in_progress([op(0, "failed", LOAD)], checksum=checksum_sql(sql)))
+    client = _RecordingClient()
+    tracker = MagicMock()
+    phases: list[str] = []
+
+    def command(context: QueryContext, phase: str, text: str, settings: Any) -> None:
+        assert context == QueryContext("m.sql", 0, statement, before_retry)
+        assert settings is None
+        assert store.state is not None
+        assert store.state.operations[0].status == ("failed" if phase == "compensation" else "started")
+        assert text == (before_retry if phase == "compensation" else statement)
+        phases.append(phase)
+
+    tracker.command.side_effect = command
+    _apply(_write(tmp_path, sql), client, store, query_tracker=tracker)
+    assert phases == ["compensation", "forward"]
+    assert client.calls == []
+    assert store.state is not None
+    assert store.state.migration_completed is True
+
+
+class _ModeOnlyEditClient(_RecordingClient):
+    """Answers the recorded async attempt's check; records the journal at each command."""
+
+    def __init__(self, store: FakeStore, status: QueryStatus) -> None:
+        super().__init__()
+        self._store = store
+        self._status = status
+        self.checks: list[tuple[str, str | None, bool]] = []
+        self.record_at_command: list[OperationState | None] = []
+
+    def query(self, sql: str, settings: dict[str, Any] | None = None) -> QueryResult:
+        _ = settings
+        return QueryResult(column_names=["x"], rows=[{"x": 1}] if "system.tables" in sql else [])
+
+    def query_status(
+        self,
+        query_id: str,
+        *,
+        after_time: str | None = None,
+        every_replica: bool = False,
+        running_only: bool = False,
+        include_before_start: bool = False,
+    ) -> QueryStatus:
+        assert every_replica
+        self.checks.append((query_id, after_time, running_only))
+        return self._status
+
+    def execute(self, statement: str, settings: dict[str, Any] | None = None) -> None:
+        state = self._store.state
+        self.record_at_command.append(state.operations[0] if state is not None else None)
+        super().execute(statement, settings)
+
+
+def _mode_only_edit(
+    tmp_path: Path, status: QueryStatus, *, last_error: str | None = None
+) -> tuple[FakeStore, _ModeOnlyEditClient, Callable[[], MigrationJournalEntry], str]:
+    """#767 (Codex review of #770, rounds 1 and 2): a mode-only async to sync
+    edit with --retry resolves the recorded async attempt before the sync path
+    runs anything."""
+    statement = "INSERT INTO db.a SELECT 1;"
+    original = (
+        "-- operation: load_table_data key=table:db.a risk=safe mode=async\n"
+        f"-- before-retry: TRUNCATE TABLE db.a\n{statement}\n"
+    )
+    edited = original.replace("mode=async", "mode=sync")
+    attempt = op(0, "started", LOAD, query_id="fenced-query-id").model_copy(
+        update={
+            "last_error": last_error
+            or "submitted under its own query id; a retry reads its outcome from "
+            "system.query_log",
+            "fingerprint": statement_fingerprint(statement),
+            "attempt_fenced": True,
+        }
+    )
+    store = FakeStore(in_progress([attempt], checksum=checksum_sql(original)))
+    client = _ModeOnlyEditClient(store, status)
+    directory = _write(tmp_path, edited)
+    retry = _retry_for(edited, previous=checksum_sql(original))
+    return store, client, lambda: _apply(directory, cast(Any, client), store, retry=retry), statement
+
+
+def test_a_mode_only_edit_records_an_attempt_that_finished_as_completed_and_runs_nothing(
+    tmp_path: Path,
+) -> None:
+    store, client, run, _statement = _mode_only_edit(
+        tmp_path, QueryStatus(status="finished", written_rows=1, duration_ms=10)
+    )
+    run()
+    assert client.calls == []
+    assert client.checks[0] == ("fenced-query-id", "2026-09-28T23:11:10.000Z", False)
+    assert store.state is not None
+    assert (store.state.operations[0].status, store.state.operations[0].query_id) == (
+        "completed", "fenced-query-id"
+    )
+    assert store.state.migration_completed is True
+
+
+def test_a_mode_only_edit_journals_a_server_rejection_before_its_before_retry_sql(
+    tmp_path: Path,
+) -> None:
+    _store, client, run, statement = _mode_only_edit(
+        tmp_path,
+        QueryStatus(status="failed", error="Code: 60. UNKNOWN_TABLE", before_start=True),
+    )
+    run()
+    assert client.calls == ["TRUNCATE TABLE db.a", statement]
+    recorded = client.record_at_command[0]
+    assert recorded is not None
+    assert (recorded.status, recorded.query_id, recorded.last_error, recorded.attempt_fenced) == (
+        "failed", "fenced-query-id", "Code: 60. UNKNOWN_TABLE", True
+    )
+
+
+def test_a_mode_only_edit_stops_with_async_outcome_unknown_without_an_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+    store, client, run, _statement = _mode_only_edit(tmp_path, QueryStatus(status="unknown"))
+    with pytest.raises(MigrateError) as info:
+        run()
+    assert info.value.code == "async_outcome_unknown"
+    assert "query_id fenced-query-id" in info.value.message
+    assert client.calls == []
+    assert store.writes == []
+
+
+class _NoOutcomeAsyncClient(_RecordingClient):
+    """No replica runs the recorded async attempt; nothing is ever submitted."""
+
+    def query(self, _sql: str) -> QueryResult:
+        return QueryResult(
+            column_names=["now_ms", "database"],
+            rows=[{"now_ms": "1700000000000", "database": "db"}],
+        )
+
+    def query_status(
+        self, _query_id: str, *, every_replica: bool = False, running_only: bool = False
+    ) -> QueryStatus:
+        _ = (every_replica, running_only)
+        return QueryStatus(status="unknown")
+
+    def submit(self, *_args: Any, **_kwargs: Any) -> str:
+        msg = "never submitted"
+        raise AssertionError(msg)
+
+
+def test_an_async_statement_without_a_readable_outcome_keeps_async_outcome_unknown(
+    tmp_path: Path,
+) -> None:
+    """#767: the stop keeps its code through apply_migration's statement
+    error, so --json reports async_outcome_unknown."""
+    statement = "INSERT INTO db.a SELECT 1;"
+    sql = f"-- operation: load_table_data key=table:db.a risk=safe mode=async\n{statement}\n"
+    attempt = op(0, "started", LOAD, query_id="legacy-query-id").model_copy(
+        update={"fingerprint": statement_fingerprint(statement)}
+    )
+    store = FakeStore(in_progress([attempt], checksum=checksum_sql(sql)))
+    client = _NoOutcomeAsyncClient()
+    with pytest.raises(MigrateError) as info:
+        _apply(_write(tmp_path, sql), cast(Any, client), store)
+    assert info.value.code == "async_outcome_unknown"
+    assert info.value.message.startswith("Migration m.sql failed at statement 1 of 1")
+    assert (
+        "query_id legacy-query-id): the journal records an attempt of it"
+        in info.value.message
+    )
+    assert client.calls == []
+    assert store.writes == []
+
+
+class _FailedLookupAsyncClient(_NoOutcomeAsyncClient):
+    """The outcome lookup of the recorded async attempt fails."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self.error = error
+
+    def query_status(
+        self, _query_id: str, **_options: Any
+    ) -> QueryStatus:
+        raise self.error
+
+
+@pytest.mark.parametrize(
+    ("lookup_error", "text"),
+    [
+        (
+            RuntimeError("HTTP 504: gateway timeout"),
+            "could not check whether a previous attempt is still running "
+            "(HTTP 504: gateway timeout)",
+        ),
+        (
+            RuntimeError(
+                "Code: 497. DB::Exception: default: Not enough privileges. To execute "
+                "this query, it's necessary to have the grant SELECT(type, query_id) ON "
+                "system.query_log. (ACCESS_DENIED)"
+            ),
+            "the ClickHouse user cannot read system.query_log",
+        ),
+    ],
+    ids=["a gateway error", "denied system.query_log access"],
+)
+def test_an_async_statement_whose_fenced_attempt_lookup_fails_keeps_async_outcome_unknown(
+    tmp_path: Path, lookup_error: Exception, text: str
+) -> None:
+    """A lookup of a fenced attempt's outcome that fails leaves the outcome
+    unknown, so --json reports async_outcome_unknown, with the request's error
+    as the cause."""
+    statement = "INSERT INTO db.a SELECT 1;"
+    sql = f"-- operation: load_table_data key=table:db.a risk=safe mode=async\n{statement}\n"
+    attempt = op(0, "started", LOAD, query_id="fenced-query-id").model_copy(
+        update={
+            "last_error": "submitted under its own query id; a retry reads its outcome from "
+            "system.query_log",
+            "fingerprint": statement_fingerprint(statement),
+            "attempt_fenced": True,
+        }
+    )
+    store = FakeStore(in_progress([attempt], checksum=checksum_sql(sql)))
+    client = _FailedLookupAsyncClient(lookup_error)
+    with pytest.raises(MigrateError) as info:
+        _apply(_write(tmp_path, sql), cast(Any, client), store)
+    assert info.value.code == "async_outcome_unknown"
+    assert info.value.message.startswith("Migration m.sql failed at statement 1 of 1")
+    assert f"(query_id fenced-query-id): {text}" in info.value.message
+    # The stop's own error, then the request's.
+    stop = info.value.__cause__
+    assert isinstance(stop, MigrateError)
+    assert stop.code == "async_outcome_unknown"
+    assert stop.__cause__ is lookup_error
+    assert client.calls == []
+    assert store.writes == []
 
 
 def _retry_for(sql: str, previous: str = "old") -> RetryResume:
@@ -1424,6 +1822,7 @@ class _StatusClient(_RecordingClient):
         after_time: str | None = None,
         every_replica: bool = False,
         running_only: bool = False,
+        include_before_start: bool = False,
     ) -> QueryStatus:
         self.status_calls.append((query_id, every_replica, running_only))
         if isinstance(self._running, Exception):
@@ -1443,12 +1842,13 @@ def test_apply_edit_dropping_an_async_attempt_checks_it_stopped(
         in_progress(
             [
                 op(0, "failed"),
+                # A rejection the server recorded for the id (#767).
                 op(
                     1,
                     "failed",
                     Marker(type="load_table_data", key="table:t"),
                     query_id="retry-query-id",
-                ),
+                ).model_copy(update={"attempt_fenced": True}),
             ],
             checksum="old",
         )
@@ -1466,7 +1866,10 @@ def test_apply_edit_dropping_an_async_attempt_checks_it_stopped(
 
 
 @pytest.mark.parametrize("mode", ["sync", "barrier"])
-@pytest.mark.parametrize("prior", ["started", "failed", "abandoned", "stopped", "unreadable", "no-before-retry"])
+@pytest.mark.parametrize(
+    "prior",
+    ["started", "failed", "abandoned", "stopped", "unverified", "unreadable", "no-before-retry"],
+)
 def test_mode_only_edit_preserves_async_attempt_until_stopped(
     tmp_path: Path, mode: str, prior: str
 ) -> None:
@@ -1482,9 +1885,16 @@ def test_mode_only_edit_preserves_async_attempt_until_stopped(
     edited = original.replace("mode=async", f"mode={mode}")
     recorded = in_progress(
         [op(
-            0, "failed" if prior in {"failed", "stopped", "unreadable"} else "started",
+            0, "failed" if prior in {"failed", "stopped", "unverified", "unreadable"} else "started",
             LOAD, query_id="random-retry-query-id",
-        ).model_copy(update={"fingerprint": statement_fingerprint(sql)})],
+        ).model_copy(
+            update={
+                "fingerprint": statement_fingerprint(sql),
+                # A failure the server recorded for the id (#767); 'unverified'
+                # is a failed record without one, as an earlier release wrote.
+                "attempt_fenced": prior != "unverified",
+            }
+        )],
         checksum=checksum_sql(original),
     )
 
@@ -1501,7 +1911,11 @@ def test_mode_only_edit_preserves_async_attempt_until_stopped(
     store = CrashStore(recorded)
     if prior == "abandoned":
         abandon_migration_state(recorded, journal_store=store)
-    client = ModeClient(RuntimeError("replica unavailable") if prior == "unreadable" else prior != "stopped")
+    client = ModeClient(
+        RuntimeError("replica unavailable")
+        if prior == "unreadable"
+        else prior not in {"stopped", "unverified"}
+    )
     _write(tmp_path, edited)
     retry = _retry_for(edited, checksum_sql(original))
     if prior == "stopped":
@@ -1509,6 +1923,13 @@ def test_mode_only_edit_preserves_async_attempt_until_stopped(
         assert client.calls == (["TRUNCATE TABLE db.a", sql] if mode == "sync" else ["TRUNCATE TABLE db.a"])
         assert store.state is not None
         assert store.state.migration_completed is True
+    elif prior == "unverified":
+        # #767 (round 2): it may have finished, so nothing is written or run.
+        with pytest.raises(MigrateError) as unknown:
+            _apply(tmp_path, client, store, retry=retry)
+        assert unknown.value.code == "async_outcome_unknown"
+        assert client.calls == []
+        assert store.writes == []
     else:
         if prior == "unreadable":
             with pytest.raises(RuntimeError, match="replica unavailable"):
@@ -1522,7 +1943,10 @@ def test_mode_only_edit_preserves_async_attempt_until_stopped(
         assert store.state is not None
         assert store.state.operations[0].query_id == "random-retry-query-id"
         assert all(write.operations[0].query_id == "random-retry-query-id" for write in store.writes)
-    assert client.status_calls == [("random-retry-query-id", True, True)]
+    # A fenced started attempt is also read from query_log (#767). An attempt
+    # that ended is read before the re-key and again before the statement runs.
+    check = ("random-retry-query-id", True, prior not in {"started", "no-before-retry"})
+    assert client.status_calls == ([check, check] if prior == "stopped" else [check])
 
 
 def test_apply_started_statement_still_requires_retry(tmp_path: Path) -> None:
@@ -1651,6 +2075,40 @@ def test_cli_abandon_rejects_conflicting_flags(
     assert envelope["command"] == "migrate"
     assert envelope["error"]["code"] == "invalid_usage"
     assert f"--abandon cannot be combined with {flag}" in envelope["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (
+            ["--mark-applied", "x", "--mark-not-applied", "x"],
+            "--mark-applied and --mark-not-applied cannot be combined",
+        ),
+        (["--mark-applied", "x", "--abandon", "x"], "--mark-applied cannot be combined with --abandon"),
+        (
+            ["--mark-not-applied", "x", "--retry", "x"],
+            "--mark-not-applied cannot be combined with --retry",
+        ),
+        (
+            ["--mark-applied", "x", "--table", "app.users"],
+            "--mark-applied cannot be combined with --table",
+        ),
+        (
+            ["--mark-not-applied", "x", "--allow-destructive"],
+            "--mark-not-applied cannot be combined with --allow-destructive",
+        ),
+        (["--mark-applied="], "--mark-applied requires a migration file name"),
+    ],
+)
+def test_cli_mark_outcome_rejects_conflicting_flags(
+    usage_project: Path, args: list[str], message: str
+) -> None:
+    _ = usage_project
+    result = CliRunner().invoke(app, ["migrate", "--json", *args])
+    assert result.exit_code == 1
+    envelope = json.loads(result.stdout)
+    assert envelope["error"]["code"] == "invalid_usage"
+    assert message in envelope["error"]["message"]
 
 
 def test_cli_empty_migration_name_is_usage_error(usage_project: Path) -> None:
@@ -2178,3 +2636,357 @@ def test_apply_checks_another_releases_fingerprinted_state_by_fingerprint(
         "ALTER TABLE t ADD COLUMN b UInt64;",
         "ALTER TABLE t ADD COLUMN c UInt64;",
     ]
+
+
+class _AlwaysUnknownClient(_RecordingClient):
+    """No replica runs the recorded async attempt, and query_log has nothing of it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.status_ids: list[str] = []
+
+    def query(self, _sql: str) -> QueryResult:
+        return QueryResult(
+            column_names=["now_ms", "database"],
+            rows=[{"now_ms": "1700000000000", "database": "db"}],
+        )
+
+    def query_status(
+        self,
+        query_id: str,
+        *,
+        after_time: str | None = None,
+        every_replica: bool = False,
+        running_only: bool = False,
+        include_before_start: bool = False,
+    ) -> QueryStatus:
+        _ = (after_time, every_replica, running_only, include_before_start)
+        self.status_ids.append(query_id)
+        return QueryStatus(status="unknown")
+
+    def submit(self, *_args: Any, **_kwargs: Any) -> str:
+        msg = "never submitted"
+        raise AssertionError(msg)
+
+
+def test_a_marker_key_edit_that_would_drop_an_unverified_failed_record_stops(
+    tmp_path: Path,
+) -> None:
+    """#767 (round 3): an edit of only the marker's key drops the record of an
+    async attempt that an earlier release journaled failed without a server
+    failure (a lost response after the INSERT committed). The record is read
+    against the identity it was recorded with first, and the run stops with
+    the journal as it was: the INSERT would otherwise run again."""
+    statement = "INSERT INTO db.a SELECT 1;"
+    original = f"-- operation: load_table_data key=table:db.a risk=safe mode=async\n{statement}\n"
+    edited = original.replace("key=table:db.a", "key=table:db.renamed")
+    attempt = op(0, "failed", LOAD, query_id="legacy-query-id", last_error="error code: 524")
+    store = FakeStore(
+        in_progress(
+            [attempt.model_copy(update={"fingerprint": statement_fingerprint(statement)})],
+            checksum=checksum_sql(original),
+        )
+    )
+    client = _AlwaysUnknownClient()
+    with pytest.raises(MigrateError) as info:
+        _apply(
+            _write(tmp_path, edited),
+            cast(Any, client),
+            store,
+            retry=_retry_for(edited, previous=checksum_sql(original)),
+        )
+    assert info.value.code == "async_outcome_unknown"
+    assert "query_id legacy-query-id" in info.value.message
+    assert client.status_ids == ["legacy-query-id"]
+    assert client.calls == []
+    assert store.writes == []
+
+
+def test_a_migration_with_async_work_on_a_journal_that_cannot_fence_stops_before_it_runs(
+    tmp_path: Path,
+) -> None:
+    """#767 (round 3): a journal that cannot store an async attempt's fence
+    stops the migration before any statement runs, so nothing needs
+    reconciling."""
+    sql = (
+        "-- operation: sql_statement key=statement:0 risk=safe\nINSERT INTO db.log VALUES (1);\n"
+        "-- operation: load_table_data key=table:db.a risk=safe mode=async\n"
+        "INSERT INTO db.a SELECT 1;\n"
+    )
+    store = FakeStore(fences=False)
+    client = _RecordingClient()
+    with pytest.raises(MigrateError) as info:
+        _apply(_write(tmp_path, sql), client, store)
+    assert info.value.code == "async_attempt_unfenced"
+    assert "Nothing ran. Add the column" in info.value.message
+    assert client.calls == []
+    assert store.writes == []
+
+
+def test_a_mode_only_edit_of_a_prepared_attempt_runs_without_before_retry_sql(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#767 (round 4): a prepared attempt with nothing of its id on the server
+    was never sent and ran nothing, so the sync run gets no before-retry SQL."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+    _store, client, run, statement = _mode_only_edit(
+        tmp_path,
+        QueryStatus(status="unknown"),
+        last_error="prepared under its own query id; not submitted yet",
+    )
+    run()
+    assert client.calls == [statement]
+    # The sync path reuses the edit check's lookup: the check and its 5
+    # query_log flush rechecks run once.
+    assert len(client.checks) == 6
+
+
+class _RewritingRuntime(_FakeRuntime):
+    """A plugin whose onBeforeApply rewrites the statement, the file unchanged."""
+
+    def __init__(self) -> None:
+        super().__init__(lambda statements: [s.replace("SELECT 1", "SELECT 2") for s in statements])
+
+
+@pytest.mark.parametrize("recorded", ["fenced-started", "unverified-failed"])
+def test_a_plugin_rewrite_never_skips_the_reconcile_of_a_recorded_attempt(
+    tmp_path: Path, recorded: str
+) -> None:
+    """#767 (round 4): with the file unchanged, a plugin's onBeforeApply
+    rewrite changes the statement's fingerprint. The recorded attempt is still
+    read as it was recorded, so a load that may have left rows stops the run
+    instead of being compensated and run again."""
+    statement = "INSERT INTO db.a SELECT 1;"
+    sql = (
+        "-- operation: load_table_data key=table:db.a risk=safe mode=async\n"
+        f"-- before-retry: TRUNCATE TABLE db.a\n{statement}\n"
+    )
+    status = "started" if recorded == "fenced-started" else "failed"
+    attempt = op(0, status, LOAD, query_id="recorded-query-id").model_copy(
+        update={
+            "last_error": (
+                "submitted under its own query id; a retry reads its outcome from "
+                "system.query_log"
+                if recorded == "fenced-started"
+                else "error code: 524"
+            ),
+            "fingerprint": statement_fingerprint(statement),
+            "attempt_fenced": recorded == "fenced-started",
+        }
+    )
+    store = FakeStore(in_progress([attempt], checksum=checksum_sql(sql)))
+    client = _AlwaysUnknownClient()
+    with pytest.raises(MigrateError) as info:
+        _apply(_write(tmp_path, sql), cast(Any, client), store, runtime=_RewritingRuntime())
+    # A started record of other SQL stops at the recorded-statements check;
+    # a failed one at the record's own outcome.
+    assert info.value.code == (
+        "statement_split_changed" if recorded == "fenced-started" else "async_outcome_unknown"
+    )
+    assert client.calls == []
+    assert store.writes == []
+
+
+
+def test_a_plugin_that_drops_a_statement_with_an_unresolved_async_attempt_stops(
+    tmp_path: Path,
+) -> None:
+    """#767 (round 5): a plugin's onBeforeApply that drops a statement with a
+    recorded async attempt never marks the migration applied while that
+    attempt has no outcome."""
+    first = "ALTER TABLE db.a ADD COLUMN x UInt8;"
+    load = "INSERT INTO db.a SELECT 1;"
+    sql = f"{first}\n-- operation: load_table_data key=table:db.a risk=safe mode=async\n{load}\n"
+    store = FakeStore(
+        in_progress(
+            [
+                op(0, "completed").model_copy(
+                    update={"fingerprint": statement_fingerprint(first)}
+                ),
+                op(1, "failed", LOAD, query_id="recorded-query-id").model_copy(
+                    update={
+                        "last_error": "error code: 524",
+                        "fingerprint": statement_fingerprint(load),
+                    }
+                ),
+            ],
+            checksum=checksum_sql(sql),
+        )
+    )
+    client = _AlwaysUnknownClient()
+    with pytest.raises(MigrateError) as info:
+        _apply(
+            _write(tmp_path, sql),
+            cast(Any, client),
+            store,
+            runtime=_FakeRuntime(lambda statements: statements[:1]),
+        )
+    assert info.value.code == "async_outcome_unknown"
+    assert "query_id recorded-query-id" in info.value.message
+    assert client.calls == []
+    assert store.writes == []
+    assert store.appended == []
+
+
+class _PreparedRerunClient(_AlwaysUnknownClient):
+    """Nothing of the prepared attempt on the server; its re-run finishes."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.submitted: list[str | None] = []
+
+    def query_status(self, query_id: str, **kwargs: Any) -> QueryStatus:
+        super().query_status(query_id, **kwargs)
+        if query_id == "prepared-query-id" or not self.submitted:
+            return QueryStatus(status="unknown")
+        return QueryStatus(status="finished", written_rows=1, duration_ms=10)
+
+    def submit(
+        self,
+        statement: str,
+        query_id: str | None = None,
+        settings: dict[str, Any] | None = None,
+        *,
+        before_send: Any = None,
+    ) -> str:
+        _ = (statement, settings)
+        if before_send is not None:
+            before_send()
+            before_send.commit()
+        self.submitted.append(query_id)
+        return query_id or "x"
+
+
+def test_an_async_rerun_after_a_retry_edit_looks_its_prepared_attempt_up_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#767 (round 6): an async statement after a --retry edit reuses the
+    edit check's lookup of its prepared attempt: the check and its 5 query_log
+    flush rechecks run once, then the attempt runs again under a new id."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+    statement = "INSERT INTO db.a SELECT 1;"
+    original = (
+        "-- operation: load_table_data key=table:db.a risk=safe mode=async\n"
+        f"-- before-retry: TRUNCATE TABLE db.a\n{statement}\n"
+    )
+    edited = f"-- an edited comment\n{original}"
+    attempt = op(0, "started", LOAD, query_id="prepared-query-id").model_copy(
+        update={
+            "last_error": "prepared under its own query id; not submitted yet",
+            "fingerprint": statement_fingerprint(statement),
+            "attempt_fenced": True,
+        }
+    )
+    store = FakeStore(in_progress([attempt], checksum=checksum_sql(original)))
+    client = _PreparedRerunClient()
+    _apply(
+        _write(tmp_path, edited),
+        cast(Any, client),
+        store,
+        retry=_retry_for(edited, previous=checksum_sql(original)),
+    )
+    assert client.status_ids.count("prepared-query-id") == 6
+    assert len(client.submitted) == 1
+    assert client.submitted[0] != "prepared-query-id"
+    assert client.calls == []
+    assert store.appended
+
+
+class _OutcomeClient(_AlwaysUnknownClient):
+    def __init__(self, outcome: str) -> None:
+        super().__init__()
+        self._outcome = outcome
+
+    def query_status(self, query_id: str, **kwargs: Any) -> QueryStatus:
+        super().query_status(query_id, **kwargs)
+        if self._outcome == "finished":
+            return QueryStatus(status="finished", written_rows=1, duration_ms=10)
+        return QueryStatus(status=self._outcome)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("outcome", "code"),
+    [
+        ("running", "retry_mismatch"),
+        ("unknown", "async_outcome_unknown"),
+        ("finished", "statement_split_changed"),
+    ],
+)
+def test_a_plugin_that_drops_a_statement_with_a_fenced_started_attempt_reads_it_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str, code: str
+) -> None:
+    """#767 (round 6): a fenced started attempt the plugin dropped is read
+    against its record before the recorded statements are checked."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+    first = "ALTER TABLE db.a ADD COLUMN x UInt8;"
+    load = "INSERT INTO db.a SELECT 1;"
+    sql = f"{first}\n-- operation: load_table_data key=table:db.a risk=safe mode=async\n{load}\n"
+    store = FakeStore(
+        in_progress(
+            [
+                op(0, "completed").model_copy(
+                    update={"fingerprint": statement_fingerprint(first)}
+                ),
+                op(1, "started", LOAD, query_id="fenced-query-id").model_copy(
+                    update={
+                        "last_error": "submitted under its own query id; a retry reads its "
+                        "outcome from system.query_log",
+                        "fingerprint": statement_fingerprint(load),
+                        "attempt_fenced": True,
+                    }
+                ),
+            ],
+            checksum=checksum_sql(sql),
+        )
+    )
+    client = _OutcomeClient(outcome)
+    with pytest.raises(MigrateError) as info:
+        _apply(
+            _write(tmp_path, sql),
+            cast(Any, client),
+            store,
+            runtime=_FakeRuntime(lambda statements: statements[:1]),
+        )
+    assert info.value.code == code
+    assert client.status_ids[0] == "fenced-query-id"
+    assert client.calls == []
+    assert store.writes == []
+    assert store.appended == []
+
+
+class _FirstLookupFinishesClient(_AlwaysUnknownClient):
+    def query_status(self, query_id: str, **kwargs: Any) -> QueryStatus:
+        super().query_status(query_id, **kwargs)
+        if len(self.status_ids) == 1:
+            return QueryStatus(status="finished", written_rows=1, duration_ms=10)
+        return QueryStatus(status="unknown")
+
+
+def test_an_async_statement_after_a_retry_edit_records_the_query_finish_the_check_read(
+    tmp_path: Path,
+) -> None:
+    """#767 (round 6): a retained async statement takes the edit check's
+    QueryFinish, even when a later lookup would find nothing."""
+    statement = "INSERT INTO db.a SELECT 1;"
+    original = f"-- operation: load_table_data key=table:db.a risk=safe mode=async\n{statement}\n"
+    edited = f"-- an edited comment\n{original}"
+    attempt = op(0, "started", LOAD, query_id="fenced-query-id").model_copy(
+        update={
+            "last_error": "submitted under its own query id; a retry reads its outcome from "
+            "system.query_log",
+            "fingerprint": statement_fingerprint(statement),
+            "attempt_fenced": True,
+        }
+    )
+    store = FakeStore(in_progress([attempt], checksum=checksum_sql(original)))
+    client = _FirstLookupFinishesClient()
+    _apply(
+        _write(tmp_path, edited),
+        cast(Any, client),
+        store,
+        retry=_retry_for(edited, previous=checksum_sql(original)),
+    )
+    assert client.status_ids == ["fenced-query-id"]
+    assert store.state is not None
+    assert store.state.operations[0].status == "completed"
+    assert store.appended

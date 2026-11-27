@@ -15,6 +15,7 @@ import { GLOBAL_FLAGS, TABLE_FLAG } from '../../runtime/global-flags.js'
 import { emitJson } from '../../runtime/json-output.js'
 import { readSnapshot } from '../../runtime/migration-store.js'
 import { loadSchemaDefinitionsWithHooks } from '../../runtime/schema-loader.js'
+import { collectDataCopyWarnings, collectMigrationDataCopyWarnings } from '../../runtime/data-copy-warnings.js'
 import { CLI_VERSION } from '../../runtime/version.js'
 import {
   buildScopedSnapshotDefinitions,
@@ -197,7 +198,10 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
   plan = applyExplicitTableRenames(plan, activeTableMappings)
   plan = applyExplicitDictionaryRenames(plan, activeDictionaryMappings)
   assertCliColumnMappingsResolvable(cliColumnMappings, plan, definitions)
-  plan = applySelectedRenameSuggestions(plan, buildExplicitColumnRenameSuggestions(plan, columnMappings))
+  plan = applySelectedRenameSuggestions(plan, buildExplicitColumnRenameSuggestions(plan, columnMappings), {
+    previous: remappedPreviousDefinitions,
+    next: definitions,
+  })
 
   plan = await pluginRuntime.runOnPlanCreated(
     {
@@ -241,6 +245,8 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
   plan = applyOnClusterToPlan(plan, config.clickhouse?.cluster)
 
   const warnings = [
+    ...await collectMigrationDataCopyWarnings(migrationsDir),
+    ...plan.operations.flatMap((op) => collectDataCopyWarnings(op.sql, op.key, op.type, op.mode)),
     // A plugin hook may leave definitions noncanonical; warn on what the planner sees, as chkit-py does.
     ...collectDefinitionWarnings(canonicalizeDefinitions(schemaDefinitions, { indexGranularity })).map((issue) => issue.message),
     ...detectDictionaryPasswordWarnings(plan),

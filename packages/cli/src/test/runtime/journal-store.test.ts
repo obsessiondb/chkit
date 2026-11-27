@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
 
-import { createJournalStore, type MigrationRowState } from '../../runtime/journal-store.js'
+import { ATTEMPT_RECORD_MARKER } from '../../commands/migrate/async-apply.js'
+import { type CopyRow, createJournalStore, everyCopyRead, type MigrationRowState, type OperationState } from '../../runtime/journal-store.js'
 import { CLI_VERSION } from '../../runtime/version.js'
 
 interface ScriptedExecutor {
@@ -797,9 +798,93 @@ describe('createJournalStore', () => {
       await store.writeMigrationState(state(['v1:a', "v1:'b"]))
 
       const insert = commands.find((sql) => sql.startsWith('INSERT INTO'))
-      expect(insert).toContain('migration_completed, operations, operation_fingerprints) VALUES')
+      // Never an asynchronous insert, on any transport (#767).
+      expect(insert).toContain('migration_completed, operations, operation_fingerprints) SETTINGS async_insert = 0 VALUES')
       expect(insert).toEndWith(", ['v1:a','v1:\\'b'])")
       expect(commands.some((sql) => sql.startsWith('ALTER TABLE'))).toBe(false)
+    })
+
+    // #767: a fenced started record stores its fingerprint with a prefix, so
+    // releases from #599 on stop at it. Only the write that sets the fence
+    // stores it; any other write of the record stores it as it was read.
+    describe('attempt fence (#767)', () => {
+      const started = (overrides: Partial<OperationState> = {}): MigrationRowState => ({
+        ...state(['v1:a']),
+        operations: [{ ...state(['v1:a']).operations[0], queryId: 'q-1', status: 'started', finishedAt: null, lastError: ATTEMPT_RECORD_MARKER, ...overrides } as OperationState],
+      })
+      const insertOf = (commands: string[]) => commands.find((sql) => sql.startsWith('INSERT INTO')) ?? ''
+
+      test('a fenced started record is stored with the prefix and read back fenced', async () => {
+        const { store, commands } = storeWith({ rows: [row([{ ...tuple(0), status: 'started', query_id: 'q-1', finished_at: null }], ['fenced-attempt;v1:a'])] })
+
+        await store.writeMigrationState(started({ attemptFenced: true }))
+        const read = await store.readMigrationState('m.sql')
+
+        expect(insertOf(commands)).toEndWith(", ['fenced-attempt;v1:a'])")
+        expect(read?.operations[0]).toMatchObject({ fingerprint: 'v1:a', attemptFenced: true })
+      })
+
+      // 770b, 770c, 770d: a rewrite of a record read without the fence (a
+      // --retry re-key, an abandon) never adds it, whatever its lastError says.
+      test('a started record with the marker but without the fence is stored without it', async () => {
+        const { store, commands } = storeWith({})
+
+        await store.writeMigrationState(started())
+
+        expect(insertOf(commands)).toEndWith(", ['v1:a'])")
+      })
+
+      // A failed record keeps the fence (the server recorded its failure); a
+      // completed one never has it, so every release skips it as before.
+      for (const [status, stored] of [['completed', 'v1:a'], ['failed', 'fenced-attempt;v1:a']] as const) {
+        test(`a ${status} copy of a fenced record is stored as ${stored}`, async () => {
+          const { store, commands } = storeWith({})
+
+          await store.writeMigrationState(started({ attemptFenced: true, status, finishedAt: '2026-11-09T12:00:02.000' }))
+
+          expect(insertOf(commands)).toEndWith(`, ['${stored}'])`)
+        })
+      }
+
+      test('a row without the prefix is read without the fence', async () => {
+        const { store } = storeWith({ rows: [row([{ ...tuple(0), status: 'started', query_id: 'q-1', finished_at: null }], ['v1:a'])] })
+
+        const read = await store.readMigrationState('m.sql')
+
+        expect(read?.operations[0]?.attemptFenced).toBeUndefined()
+      })
+
+      // #767 (round 2): an async submit requires the server's record, not
+      // this process's last write.
+      test('readStoredOperation returns the server row only, never the last write', async () => {
+        const { store } = storeWith({})
+
+        await store.writeMigrationState(started({ attemptFenced: true }))
+
+        expect((await store.readMigrationState('m.sql'))?.operations[0]?.queryId).toBe('q-1')
+        expect(await store.readStoredOperation('m.sql', 0)).toBeUndefined()
+      })
+
+      test('readStoredOperation returns the fenced record the server has', async () => {
+        const { store } = storeWith({ rows: [row([{ ...tuple(0), status: 'started', query_id: 'q-1', finished_at: null }], ['fenced-attempt;v1:a'])] })
+
+        expect(await store.readStoredOperation('m.sql', 0)).toMatchObject({ queryId: 'q-1', fingerprint: 'v1:a', attemptFenced: true })
+      })
+
+      test('a journal without the column stores no fence, and the cached write has none either', async () => {
+        const { store, commands } = storeWith({
+          queryError: (sql) => (FINGERPRINT_PROBE.test(sql) ? clickHouseError('47', 'UNKNOWN_IDENTIFIER') : undefined),
+          commandError: (sql) => (sql.startsWith('ALTER TABLE') ? clickHouseError('497', 'ACCESS_DENIED') : undefined),
+        })
+
+        await store.writeMigrationState(started({ attemptFenced: true }))
+        // The server returns no row, so the read returns the last write.
+        const read = await store.readMigrationState('m.sql')
+
+        expect(insertOf(commands)).not.toContain('operation_fingerprints')
+        expect(read?.operations[0]?.queryId).toBe('q-1')
+        expect(read?.operations[0]?.attemptFenced).toBeUndefined()
+      })
     })
 
     test('a journal without the column is read without fingerprints and never altered by a read', async () => {
@@ -915,7 +1000,7 @@ describe('createJournalStore', () => {
     test('an INSERT that fails on the column is not written again without it', async () => {
       const { store, commands } = storeWith({
         commandError: (sql) =>
-          sql.includes('operation_fingerprints) VALUES') ? clickHouseError('16', 'NO_SUCH_COLUMN_IN_TABLE') : undefined,
+          sql.includes('operation_fingerprints) SETTINGS async_insert = 0 VALUES') ? clickHouseError('16', 'NO_SUCH_COLUMN_IN_TABLE') : undefined,
       })
 
       await expect(store.writeMigrationState(state(['v1:a']))).rejects.toThrow('NO_SUCH_COLUMN_IN_TABLE')
@@ -1233,5 +1318,150 @@ describe('createJournalStore', () => {
       expect(writes.length).toBeGreaterThan(1)
       for (const sql of writes) expect(sql).toMatch(/^(INSERT INTO|ALTER TABLE) `app`\._chkit_migrations /)
     })
+  })
+})
+
+// #767 (round 5): a read of a replicated journal counts as a read of every
+// copy only when every member of the table's replica set answered it, by the
+// replica name the set records; the newest version across them is the record.
+describe('everyCopyRead', () => {
+  const row = (replica: string, appliedAt: string, members = ['r1', 'r2']): CopyRow => ({
+    replica,
+    members: JSON.stringify(members),
+    present: 1,
+    applied_at: appliedAt,
+    operations: appliedAt,
+    operation_fingerprints: '[]',
+  })
+  const findOp = (operations: unknown) => ({ lastError: String(operations) }) as OperationState
+
+  test('every member answered: the newest version is the record', () => {
+    expect(everyCopyRead([row('r1', '2026-11-18 10:00:00.000'), row('r2', '2026-11-18 10:00:01.000')], findOp)).toEqual({
+      covered: true,
+      op: { lastError: '2026-11-18 10:00:01.000' } as OperationState,
+    })
+  })
+
+  test('two servers with one name, and a member the read did not reach: not covered', () => {
+    // The cluster lists r1 twice (a shared hostname) and never r2.
+    expect(everyCopyRead([row('r1', '2026-11-18 10:00:00.000'), row('r1', '2026-11-18 10:00:00.000')], findOp)).toEqual({ covered: false })
+  })
+
+  test('a duplicate reply covering every member: not covered', () => {
+    expect(everyCopyRead([row('r1', 'a'), row('r2', 'b'), row('r2', 'b')], findOp)).toEqual({ covered: false })
+  })
+
+  test('a replica set that is not a JSON array of names: not covered', () => {
+    expect(everyCopyRead([{ ...row('r1', 'a'), members: 'r1' }], findOp)).toEqual({ covered: false })
+    expect(everyCopyRead([{ ...row('r1', 'a'), members: '[""]' }], findOp)).toEqual({ covered: false })
+  })
+
+  test('a server that cannot name its replica, or no answer at all: not covered', () => {
+    expect(everyCopyRead([row('r1', 'a'), row('', 'b')], findOp)).toEqual({ covered: false })
+    expect(everyCopyRead([], findOp)).toEqual({ covered: false })
+    expect(everyCopyRead([row('r1', 'a', [])], findOp)).toEqual({ covered: false })
+  })
+
+  test('no copy holds the record: covered, without one', () => {
+    expect(everyCopyRead([{ ...row('r1', ''), present: '0' }, { ...row('r2', ''), present: '0' }], findOp)).toEqual({ covered: true, op: undefined })
+  })
+})
+
+// #767 (round 6): the topology of an every-copy read is read fresh, in the
+// same query, and only positive evidence of a single server counts a journal
+// that is not replicated as one copy.
+describe('readOperationOnEveryCopy topology', () => {
+  const UUID_A = '2dea4dea-c7d6-439c-b8ef-5eaa1d275f14'
+  const UUID_B = '6f1c2a9e-0b7d-4f3e-9a51-3c8d2e7b4a10'
+  const prepared = JSON.stringify([{ operation_index: 0, operation_key: 'k', operation_type: 'load_table_data', query_id: 'qid', status: 'started', started_at: '2026-11-18 10:00:00.000', finished_at: null, last_error: 'prepared under its own query id; not submitted yet' }])
+  // As the Workbench API returns it: every cell a string.
+  const copy = (replica: string) => ({ replica, members: JSON.stringify([replica]), present: '1', applied_at: '2026-11-18 10:00:00.000', operations: prepared, operation_fingerprints: '[]' })
+  // A journal that is not replicated is read as one copy only on a declared cluster (#802).
+  function storeAnswering(engine: string, everyCopy: () => unknown[], { cluster }: { cluster?: string } = { cluster: engine.startsWith('Replicated') ? undefined : 'c' }) {
+    const reads: Array<{ sql: string; settings: unknown }> = []
+    const db = {
+      async command() {},
+      async query<T>(sql: string, settings?: unknown): Promise<T[]> {
+        if (sql.includes('SELECT engine FROM system.tables')) return [{ engine }] as T[]
+        if (sql.includes('currentDatabase() AS database')) return [{ database: 'db' }] as T[]
+        if (sql.includes('view(')) {
+          reads.push({ sql, settings })
+          return everyCopy() as T[]
+        }
+        return []
+      },
+    } as unknown as ClickHouseExecutor
+    return { store: createJournalStore(db, cluster), reads }
+  }
+
+  test('one server answers, every cell a string: covered, with its prepared record', async () => {
+    const { store, reads } = storeAnswering('ReplacingMergeTree', () => [copy(UUID_A)])
+    const read = await store.readOperationOnEveryCopy('m.sql', 0)
+    expect(read).toMatchObject({ covered: true, op: { queryId: 'qid', status: 'started', lastError: 'prepared under its own query id; not submitted yet' } })
+    expect(reads[0]?.sql).toContain("clusterAllReplicas('c', view(SELECT toString(serverUUID())")
+    // An unavailable server fails the read; no limit cuts the reply short.
+    expect(reads[0]?.settings).toMatchObject({ skip_unavailable_shards: 0, result_overflow_mode: 'throw', read_overflow_mode: 'throw' })
+  })
+
+  // #802: behind a load balancer over independent servers, each lists only
+  // itself in its own clusters, so the one that answers proves nothing about
+  // the copies on the others.
+  test('a journal that is not replicated, without a declared cluster: not covered, and nothing is read', async () => {
+    const { store, reads } = storeAnswering('ReplacingMergeTree', () => [copy(UUID_A)], {})
+    expect(await store.readOperationOnEveryCopy('m.sql', 0)).toEqual({ covered: false })
+    expect(reads).toHaveLength(0)
+  })
+
+  test('a declared cluster is read as declared, even when empty', async () => {
+    const reads: string[] = []
+    const db = {
+      async command() {},
+      async query<T>(sql: string): Promise<T[]> {
+        if (sql.includes('SELECT engine FROM system.tables')) return [{ engine: 'ReplacingMergeTree' }] as T[]
+        if (sql.includes('currentDatabase() AS database')) return [{ database: 'db' }] as T[]
+        if (sql.includes('view(')) reads.push(sql)
+        return (sql.includes('view(') ? [copy(UUID_A)] : []) as T[]
+      },
+    } as unknown as ClickHouseExecutor
+    await createJournalStore(db, undefined, { cluster: '', replicas: 1 }).readOperationOnEveryCopy('m.sql', 0)
+    expect(reads[0]).toContain("clusterAllReplicas('', view(")
+  })
+
+  test('a replicated journal read whose cells are strings: covered, with its record', async () => {
+    const { store } = storeAnswering('ReplicatedReplacingMergeTree', () => [
+      { ...copy('ch1'), members: '["ch1","ch2"]' },
+      { ...copy('ch2'), members: '["ch1","ch2"]' },
+    ])
+    expect(await store.readOperationOnEveryCopy('m.sql', 0)).toMatchObject({ covered: true, op: { queryId: 'qid' } })
+  })
+
+  test('one server replying twice, or a reply without a server UUID: not covered', async () => {
+    expect(await storeAnswering('ReplacingMergeTree', () => [copy(UUID_A), copy(UUID_A)]).store.readOperationOnEveryCopy('m.sql', 0)).toEqual({ covered: false })
+    expect(await storeAnswering('ReplacingMergeTree', () => [copy('uuid-a')]).store.readOperationOnEveryCopy('m.sql', 0)).toEqual({ covered: false })
+  })
+
+  test('a cluster the user may not read, or that does not exist, fails the read', async () => {
+    const denied = storeAnswering('ReplacingMergeTree', () => {
+      throw Object.assign(new Error('Not enough privileges. (ACCESS_DENIED)'), { code: '497' })
+    })
+    await expect(denied.store.readOperationOnEveryCopy('m.sql', 0)).rejects.toThrow('ACCESS_DENIED')
+    const missing = storeAnswering('ReplacingMergeTree', () => {
+      throw Object.assign(new Error("Requested cluster 'default' not found"), { code: '701' })
+    })
+    await expect(missing.store.readOperationOnEveryCopy('m.sql', 0)).rejects.toThrow('not found')
+  })
+
+  test('two servers behind one hostname: not covered', async () => {
+    const { store } = storeAnswering('ReplacingMergeTree', () => [copy(UUID_A), copy(UUID_B)])
+    expect(await store.readOperationOnEveryCopy('m.sql', 0)).toEqual({ covered: false })
+  })
+
+  test('a server added after the first read: the next read is not covered', async () => {
+    let servers = [copy(UUID_A)]
+    const { store, reads } = storeAnswering('ReplacingMergeTree', () => servers)
+    expect((await store.readOperationOnEveryCopy('m.sql', 0)).covered).toBe(true)
+    servers = [copy(UUID_A), copy(UUID_B)]
+    expect(await store.readOperationOnEveryCopy('m.sql', 0)).toEqual({ covered: false })
+    expect(reads).toHaveLength(2)
   })
 })

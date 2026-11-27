@@ -6,6 +6,13 @@ export const onRequest: PagesFunction<{ ASSETS: Fetcher }> = async (context) => 
 		return Response.redirect(url.toString(), 301);
 	}
 
+	const syncReference = url.pathname.match(/^\/(cli|plugins)\/ingest(?:\/|\.md)?$/);
+	if (syncReference) {
+		const suffix = url.pathname.endsWith('.md') ? '.md' : '/';
+		url.pathname = `/${syncReference[1]}/sync${suffix}`;
+		return Response.redirect(url.toString(), 301);
+	}
+
 	// The product landing and CLI overview now live under /sync/.
 	// Redirect their old HTML and Markdown URLs before the legacy guide rule.
 	if (/^\/ingestion(?:\/cli)?(?:\/|\.md)?$/.test(url.pathname)) {

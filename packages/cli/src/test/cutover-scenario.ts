@@ -15,6 +15,7 @@ import { join } from 'node:path'
 
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
 
+import type { TableDriftDetail } from '../commands/drift/compare.js'
 import { isoWithoutZone } from '../commands/migrate/async-apply.js'
 import { createJournalStore, type MigrationRowState } from '../runtime/journal-store.js'
 import {
@@ -25,6 +26,7 @@ import {
   createStatelessLiveExecutor,
   formatTestDiagnostic,
   getLiveEnv,
+  pollUntil,
   runCli,
   startCli,
   type CliResult,
@@ -34,6 +36,15 @@ const WORKSPACE_ROOT = join(import.meta.dir, '../../../..')
 const BACKFILL_ENTRY = join(WORKSPACE_ROOT, 'packages/plugin-backfill/src/index.ts')
 const HISTORIC_ROWS = 20_000
 const BATCH_ROWS = 200
+const NESTED_HISTORIC_ROWS = 2_000
+const NESTED_COLUMNS = [
+  { name: 'id', type: 'UInt64' },
+  { name: 'user_id', type: 'UInt64' },
+  { name: 'payload', type: 'String' },
+  { name: 'n', type: 'Nested(x UInt64, `y z` Decimal64(2))' },
+]
+const NESTED_X = 'arrayMap(i -> id * 10 + i, range(id % 5 + 1))'
+const NESTED_Y = 'arrayMap(i -> toDecimal64(id, 2) + toDecimal64(i * 10 + 5, 2) / 100, range(id % 5 + 1))'
 const MIGRATE_TIMEOUT_MS = 600_000
 
 export interface CutoverTarget {
@@ -42,7 +53,7 @@ export interface CutoverTarget {
   /** Runs DDL and verification reads. */
   admin: ClickHouseExecutor
   /** Stateless executors the concurrent writers insert through, round robin. */
-  writers: ClickHouseExecutor[]
+  writers: [ClickHouseExecutor, ...ClickHouseExecutor[]]
   engine: string
   /** Every row of a table across shards: a qualified name, or cluster(...). */
   rowsOf: (table: string) => string
@@ -84,15 +95,22 @@ export interface CutoverProject {
   previous: string
   /** Rows inserted before the cutover. */
   historic: number
+  /** The table's columns in the schema, when they are not id, user_id and payload. */
+  columns?: Array<Record<string, unknown>>
 }
 
 interface WriterReport {
   batches: number
   rows: number
+  nestedRows: number
   errors: string[]
 }
 
-export async function createCutoverProject(target: CutoverTarget, label: string): Promise<CutoverProject> {
+export async function createCutoverProject(
+  target: CutoverTarget,
+  label: string,
+  columns?: Array<Record<string, unknown>>,
+): Promise<CutoverProject> {
   const prefix = createPrefix(label)
   const dir = await mkdtemp(join(tmpdir(), `chkit-cutover-${label}-`))
   const project: CutoverProject = {
@@ -105,6 +123,7 @@ export async function createCutoverProject(target: CutoverTarget, label: string)
     ingest: `${prefix}ingest`,
     previous: `${prefix}events_previous`,
     historic: HISTORIC_ROWS,
+    columns,
   }
   project.env = { CHKIT_JOURNAL_TABLE: project.journalTable, CI: '1' }
   const config = {
@@ -125,7 +144,8 @@ export async function createCutoverProject(target: CutoverTarget, label: string)
   expectOk(cli(project, ['migrate', '--apply', '--json']), 'migrate init')
   const db = target.database
   const half = HISTORIC_ROWS / 2
-  const [first, second] = [target.writers[0], target.writers[target.writers.length - 1]] as ClickHouseExecutor[]
+  const first = target.writers[0]
+  const second = target.writers.at(-1) ?? first
   await first.command(`INSERT INTO ${db}.${project.table} (id, user_id, payload) SELECT number, number % 97, 'historic' FROM numbers(${half})`)
   await second.command(`INSERT INTO ${db}.${project.ingest} (id, user_id, payload) SELECT ${half} + number, number % 97, 'historic' FROM numbers(${half})`)
   return project
@@ -150,9 +170,10 @@ const columns = [
   { name: 'user_id', type: 'UInt64' },
   { name: 'payload', type: 'String' },
 ]
+${project.columns ? `const tableColumns = ${JSON.stringify(project.columns)}` : 'const tableColumns = columns'}
 
 export default schema(
-  table({ database: '${db}', name: '${project.table}', engine: ${engine}, columns, primaryKey: ${JSON.stringify(orderBy)}, orderBy: ${JSON.stringify(orderBy)}${settings ? `, settings: ${JSON.stringify(settings)}` : ''} }),
+  table({ database: '${db}', name: '${project.table}', engine: ${engine}, columns: tableColumns, primaryKey: ${JSON.stringify(orderBy)}, orderBy: ${JSON.stringify(orderBy)}${settings ? `, settings: ${JSON.stringify(settings)}` : ''} }),
   table({ database: '${db}', name: '${project.byUser}', engine: ${engine}, columns: [{ name: 'user_id', type: 'UInt64' }, { name: 'id', type: 'UInt64' }], primaryKey: ['user_id'], orderBy: ['user_id', 'id'] }),
   materializedView({ database: '${db}', name: '${project.byUser}_mv', to: { database: '${db}', name: '${project.byUser}' }, as: 'SELECT user_id, id FROM ${local(project.table)}' }),
   table({ database: '${db}', name: '${project.ingest}', engine: ${engine}, columns, primaryKey: ['id'], orderBy: ['id'] }),
@@ -170,22 +191,25 @@ export default schema(
  * (741) overlapped the swap and wrote nothing, so it is retried once, as the
  * cutover guide tells writers to; any other error fails the scenario.
  */
-function startWriters(target: CutoverTarget, project: CutoverProject, parallel = 2): { stop: () => Promise<WriterReport> } {
+function startWriters(target: CutoverTarget, project: CutoverProject, parallel = 2, nested = false): { stop: () => Promise<WriterReport> } {
   let stopped = false
   let next = 0
-  const report: WriterReport = { batches: 0, rows: 0, errors: [] }
+  const report: WriterReport = { batches: 0, rows: 0, nestedRows: 0, errors: [] }
   const db = target.database
   const loop = async (worker: number) => {
     while (!stopped) {
       const batch = next
       next += 1
-      const executor = target.writers[batch % target.writers.length] as ClickHouseExecutor
-      const into = batch % 2 === 0 ? project.table : project.ingest
+      const writer = nested ? Math.floor(batch / 2) : batch
+      const executor = target.writers[writer % target.writers.length] as ClickHouseExecutor
+      const direct = batch % 2 === 0
+      const into = direct ? project.table : project.ingest
+      const withNested = nested && direct
       const start = 1_000_000_000 + batch * BATCH_ROWS
-      const insert = () =>
-        executor.command(
-          `INSERT INTO ${db}.${into} (id, user_id, payload) SELECT ${start} + number, number % 97, 'live-${worker}' FROM numbers(${BATCH_ROWS})`,
-        )
+      const sql = withNested
+        ? insertNestedSQL(`${db}.${into}`, start, BATCH_ROWS, `live-nested-${worker}`)
+        : `INSERT INTO ${db}.${into} (id, user_id, payload) SELECT ${start} + number, number % 97, 'live-${worker}' FROM numbers(${BATCH_ROWS})`
+      const insert = () => executor.command(sql)
       try {
         await insert().catch((error: unknown) => {
           if (!(error instanceof Error && 'code' in error && String(error.code) === '741')) throw error
@@ -193,6 +217,7 @@ function startWriters(target: CutoverTarget, project: CutoverProject, parallel =
         })
         report.batches += 1
         report.rows += BATCH_ROWS
+        if (withNested) report.nestedRows += BATCH_ROWS
       } catch (error) {
         report.errors.push(error instanceof Error ? error.message : String(error))
       }
@@ -273,6 +298,69 @@ async function assertCutoverRows(
   return { total: expected }
 }
 
+function insertNestedSQL(table: string, start: number, count: number, payload: string): string {
+  return `INSERT INTO ${table} (id, user_id, payload, \`n.x\`, \`n.y z\`) SELECT ${start} + number AS id, number % 97, '${payload}', ${NESTED_X}, ${NESTED_Y} FROM numbers(${count})`
+}
+
+function storedColumns(target: CutoverTarget, project: CutoverProject): Promise<Array<{ name: string; type: string }>> {
+  return target.admin.query(
+    `SELECT name, type FROM system.columns WHERE database = '${target.database}' AND table = '${project.table}' ORDER BY position`,
+  )
+}
+
+function nestedDrift(project: CutoverProject, table: string): TableDriftDetail {
+  const payload = JSON.parse(expectOk(cli(project, ['drift', '--table', table, '--json']), 'drift').stdout) as { tableDrift: TableDriftDetail[] }
+  const detail = payload.tableDrift.find((item) => item.table === table)
+  // Drift reports the declared Nested name as missing and its stored leaves as extra.
+  if (!detail || JSON.stringify([detail.reasonCodes, detail.missingColumns, detail.extraColumns]) !==
+      JSON.stringify([['missing_column', 'extra_column'], ['n'], ['n.x', 'n.y z']])) {
+    throw new Error(`unexpected Nested drift: ${JSON.stringify(payload)}`)
+  }
+  return detail
+}
+
+async function seedNested(target: CutoverTarget, project: CutoverProject) {
+  const table = `${target.database}.${project.table}`
+  const columns = await storedColumns(target, project)
+  const drift = nestedDrift(project, table)
+  const half = NESTED_HISTORIC_ROWS / 2
+  const first = target.writers[0]
+  const second = target.writers.at(-1) ?? first
+  await first.command(insertNestedSQL(table, project.historic, half, 'nested-historic'))
+  await second.command(insertNestedSQL(table, project.historic + half, half, 'nested-historic'))
+  project.historic += NESTED_HISTORIC_ROWS
+  return { columns, drift }
+}
+
+async function assertNestedRows(
+  target: CutoverTarget,
+  project: CutoverProject,
+  before: Awaited<ReturnType<typeof seedNested>>,
+  expected: number,
+): Promise<void> {
+  const [counts] = await rows<Record<'nested' | 'wrong_values' | 'nonempty' | 'unaligned', string | number>>(
+    target,
+    `WITH (payload LIKE 'nested-%' OR payload LIKE 'live-nested-%') AS is_nested
+     SELECT countIf(is_nested) AS nested,
+       countIf(is_nested AND (\`n.x\` != ${NESTED_X} OR \`n.y z\` != ${NESTED_Y})) AS wrong_values,
+       countIf(NOT is_nested AND (notEmpty(\`n.x\`) OR notEmpty(\`n.y z\`))) AS nonempty,
+       countIf(length(\`n.x\`) != length(\`n.y z\`)) AS unaligned
+     FROM ${target.rowsOf(project.table)}`,
+  )
+  if (Number(counts?.nested) !== expected || Number(counts?.wrong_values) !== 0 ||
+      Number(counts?.nonempty) !== 0 || Number(counts?.unaligned) !== 0) {
+    throw new Error(`Nested rows: expected ${expected} valid rows, found ${JSON.stringify(counts)}`)
+  }
+  const columns = await storedColumns(target, project)
+  if (JSON.stringify(columns) !== JSON.stringify(before.columns)) {
+    throw new Error(`stored columns after cutover: ${JSON.stringify(columns)}; before: ${JSON.stringify(before.columns)}`)
+  }
+  const drift = nestedDrift(project, `${target.database}.${project.table}`)
+  if (JSON.stringify(drift) !== JSON.stringify(before.drift)) {
+    throw new Error(`Nested drift changed after cutover: ${JSON.stringify(drift)}`)
+  }
+}
+
 /** A cutover's change: the new sort key and settings, and the layout `layouts` reports after it. */
 export interface CutoverChange {
   orderBy: string[]
@@ -301,25 +389,20 @@ async function sortingKeys(target: CutoverTarget, project: CutoverProject): Prom
   return Object.fromEntries(result.map((row) => [row.name, row.sorting_key.replace(/^\(|\)$/g, '')]))
 }
 
-/** status, drift, check and generate --dryrun report nothing to do. */
-function assertChkitClean(project: CutoverProject): void {
-  const status = JSON.parse(expectOk(cli(project, ['status', '--json']), 'status').stdout) as { pending: number }
-  const drift = JSON.parse(expectOk(cli(project, ['drift', '--json']), 'drift').stdout) as {
-    drifted: boolean
-    missing: string[]
-    tableDrift: Array<{ table: string; reasonCodes: string[] }>
-  }
+/** check (no pending migration, no drift) and generate --dryrun report nothing to do. */
+function assertChkitClean(project: CutoverProject, nested = false): void {
   const check = cli(project, ['check', '--json'])
+  const payload = JSON.parse(check.stdout) as { pendingCount: number; driftEvaluated: boolean; drifted: boolean; failedChecks: string[] }
   const plan = JSON.parse(expectOk(cli(project, ['generate', '--dryrun', '--json']), 'generate --dryrun').stdout) as { operationCount: number }
   const summary = {
-    pending: status.pending,
-    drifted: drift.drifted,
-    missing: drift.missing,
-    tableDrift: drift.tableDrift.map((table) => `${table.table}: ${table.reasonCodes.join(', ')}`),
     check: check.exitCode,
+    pending: payload.pendingCount,
+    driftEvaluated: payload.driftEvaluated,
+    drifted: payload.drifted,
+    failedChecks: payload.failedChecks,
     operations: plan.operationCount,
   }
-  if (JSON.stringify(summary) !== JSON.stringify({ pending: 0, drifted: false, missing: [], tableDrift: [], check: 0, operations: 0 })) {
+  if (JSON.stringify(summary) !== JSON.stringify({ check: nested ? 1 : 0, pending: 0, driftEvaluated: true, drifted: nested, failedChecks: nested ? ['schema_drift'] : [], operations: 0 })) {
     throw new Error(`chkit not clean after the cutover: ${JSON.stringify(summary)}\n${formatTestDiagnostic('check', check)}`)
   }
 }
@@ -360,9 +443,10 @@ export async function dropCutoverProject(target: CutoverTarget, project: Cutover
  * The default cutover: the copy runs inside the migration and the old table
  * is kept as `<table>_previous`, while writers insert the whole time.
  */
-export async function runKeepScenario(target: CutoverTarget, label: string): Promise<void> {
-  const project = await createCutoverProject(target, label)
+export async function runKeepScenario(target: CutoverTarget, label: string, nested = false): Promise<void> {
+  const project = await createCutoverProject(target, label, nested ? NESTED_COLUMNS : undefined)
   try {
+    const before = nested ? await seedNested(target, project) : undefined
     await writeSchema(target, project, ['user_id', 'id'])
     const generated = JSON.parse(
       expectOk(cli(project, ['generate', '--name', 'cutover', '--cutover', `${target.database}.${project.table}=id`, '--json']), 'generate --cutover').stdout,
@@ -370,7 +454,7 @@ export async function runKeepScenario(target: CutoverTarget, label: string): Pro
     if (generated.riskSummary.danger !== 0) throw new Error('a keep-mode cutover must not be destructive')
     if (generated.cutovers[0]?.retainedAs !== `${target.database}.${project.previous}`) throw new Error('missing retained table')
 
-    const writers = startWriters(target, project, 4)
+    const writers = startWriters(target, project, 4, nested)
     const migrate = await cliAsync(project, ['migrate', '--apply', '--json'])
     const report = await writers.stop()
     expectOk(migrate, 'migrate --apply (cutover)')
@@ -392,7 +476,8 @@ export async function runKeepScenario(target: CutoverTarget, label: string): Pro
     if (Number(previous?.total) < Number(previous?.ids) || Number(previous?.ids) < project.historic) {
       throw new Error(`old table after the cutover: ${JSON.stringify(previous)}`)
     }
-    assertChkitClean(project)
+    if (before) await assertNestedRows(target, project, before, NESTED_HISTORIC_ROWS + report.nestedRows)
+    assertChkitClean(project, nested)
   } finally {
     await dropCutoverProject(target, project)
   }
@@ -403,20 +488,25 @@ export async function runKeepScenario(target: CutoverTarget, label: string): Pro
  * plugin copies the snapshot, and the next apply verifies and swaps. The old
  * table is dropped.
  */
-export async function runBackfillScenario(target: CutoverTarget, label: string): Promise<void> {
-  const project = await createCutoverProject(target, label)
+export async function runBackfillScenario(target: CutoverTarget, label: string, nested = false): Promise<void> {
+  const project = await createCutoverProject(target, label, nested ? NESTED_COLUMNS : undefined)
   try {
+    const before = nested ? await seedNested(target, project) : undefined
     await writeSchema(target, project, ['user_id', 'id'])
     const fqn = `${target.database}.${project.table}`
     expectOk(
       cli(project, ['generate', '--name', 'cutover', '--cutover', `${fqn}=id`, '--cutover-copy', 'backfill', '--cutover-old', 'drop', '--json']),
       'generate --cutover backfill',
     )
-    const writers = startWriters(target, project)
+    const writers = startWriters(target, project, 2, nested)
     const copied = (async () => {
       const stopped = await cliAsync(project, ['migrate', '--apply', '--allow-destructive', '--json'])
       if (stopped.exitCode !== 1 || !`${stopped.stdout}${stopped.stderr}`.includes(`chkit plugin backfill plan --cutover ${fqn}`)) {
         throw new Error(formatTestDiagnostic('migrate must stop at the copy check', stopped))
+      }
+      if (nested) {
+        await target.admin.command(insertNestedSQL(fqn, project.historic, BATCH_ROWS, 'nested-paused'))
+        project.historic += BATCH_ROWS
       }
       const plan = JSON.parse(expectOk(await cliAsync(project, ['plugin', 'backfill', 'plan', '--cutover', fqn, '--json']), 'backfill plan').stdout) as {
         planId: string
@@ -440,23 +530,35 @@ export async function runBackfillScenario(target: CutoverTarget, label: string):
     if (JSON.stringify(keys) !== JSON.stringify({ [project.table]: 'user_id, id' })) {
       throw new Error(`only the cut-over table may remain, found ${JSON.stringify(keys)}`)
     }
-    assertChkitClean(project)
+    if (before) await assertNestedRows(target, project, before, NESTED_HISTORIC_ROWS + report.nestedRows + BATCH_ROWS)
+    assertChkitClean(project, nested)
   } finally {
     await dropCutoverProject(target, project)
   }
 }
 
 /**
- * Fails every statement of the cutover once and resumes it with --retry, and
- * replays the statements whose acknowledgement can be lost: the snapshot
- * (re-taken after a TRUNCATE), the copy (skips what it wrote), the EXCHANGE
- * (refuses: it must never swap back) and the drop of the old table. Writers
- * insert the whole time; no row may be lost or duplicated.
+ * Which statements of the cutover fail once. `retries`: every statement whose
+ * retry runs other SQL than its first run (before-retry SQL, or the lookup of
+ * an async attempt), and the statement after each one whose acknowledgement
+ * is lost. A retry of any other statement only runs it again, which
+ * apply-resume.test.ts covers. `layout guards`: the EXCHANGE and the drop of
+ * the old table, whose guards compare the tables' layouts.
+ */
+export type RetryFailures = 'retries' | 'layout guards'
+
+/**
+ * Fails statements of the cutover once (see RetryFailures) and resumes them
+ * with --retry, and replays the statements whose acknowledgement can be lost:
+ * the snapshot (re-taken after a TRUNCATE), the copy (skips what it wrote),
+ * the EXCHANGE (refuses: it must never swap back) and the drop of the old
+ * table. Writers insert the whole time; no row may be lost or duplicated.
  */
 export async function runRetryScenario(
   target: CutoverTarget,
   label: string,
   change: CutoverChange = ORDER_BY_CHANGE,
+  failures: RetryFailures = 'retries',
 ): Promise<void> {
   const project = await createCutoverProject(target, label)
   const writers = startWriters(target, project, 1)
@@ -486,9 +588,15 @@ export async function runRetryScenario(
       cliAsync(project, ['migrate', '--apply', '--allow-destructive', '--json', ...(retry ? ['--retry', file] : [])])
     const write = (content: string) => writeFile(join(project.dir, 'chkit/migrations', file), content, 'utf8')
 
-    for (let step = 0; step < types.length; step += 1) {
+    const exchange = types.indexOf('exchange_tables')
+    const retryRunsOtherSql = (step: number) => /^-- before-retry:|^-- operation: .* mode=async\b/m.test(blocks[step + 1] as string)
+    const steps =
+      failures === 'layout guards'
+        ? [exchange, exchange + 1, dropOld]
+        : types.flatMap((_, step) => (retryRunsOtherSql(step) || replayed.has(step - 1) ? [step] : []))
+    for (const [attempt, step] of steps.entries()) {
       await write(injectFailure(blocks, step))
-      const failed = await migrate(step > 0)
+      const failed = await migrate(attempt > 0)
       if (failed.exitCode === 0 || !`${failed.stdout}${failed.stderr}`.includes(`injected failure at statement ${step + 1}`)) {
         throw new Error(formatTestDiagnostic(`statement ${step + 1} (${types[step]}) must fail`, failed))
       }
@@ -544,13 +652,154 @@ export async function runRetryScenario(
   }
 }
 
-/** Replaces the SQL of operation `step` (0-based) with a statement that fails, keeping its marker lines. */
+/**
+ * A table created with only ORDER BY, as outside chkit (#524). Before
+ * ClickHouse 26.7 its parts attach only to a table that leaves PRIMARY KEY
+ * out too, so the snapshot must copy the table's stored definition.
+ */
+export async function runUndeclaredPrimaryKeyScenario(target: CutoverTarget, label: string): Promise<void> {
+  const project = await createCutoverProject(target, label)
+  try {
+    const fqn = `${target.database}.${project.table}`
+    await target.admin.command(`DROP TABLE ${fqn} SYNC`)
+    await target.admin.command(`CREATE TABLE ${fqn} (id UInt64, user_id UInt64, payload String) ENGINE = ${target.engine} ORDER BY id`)
+    const [created] = await pollUntil(
+      () => target.admin.query<{ engine_full: string }>(`SELECT engine_full FROM system.tables WHERE database = '${target.database}' AND name = '${project.table}'`),
+      (found) => found.length > 0,
+    )
+    if (created === undefined || created.engine_full.includes(' PRIMARY KEY ')) throw new Error(`the table must have no PRIMARY KEY, found ${JSON.stringify(created)}`)
+    await target.admin.command(`INSERT INTO ${fqn} (id, user_id, payload) SELECT number, number % 97, 'historic' FROM numbers(1000)`)
+
+    await writeSchema(target, project, ['user_id', 'id'])
+    expectOk(cli(project, ['generate', '--name', 'cutover', '--cutover', `${fqn}=id`, '--json']), 'generate --cutover')
+    expectOk(cli(project, ['migrate', '--apply', '--json']), 'migrate --apply (cutover)')
+    const keys = await sortingKeys(target, project)
+    if (JSON.stringify(keys) !== JSON.stringify({ [project.table]: 'user_id, id', [project.previous]: 'id' })) {
+      throw new Error(`layouts after the cutover: ${JSON.stringify(keys)}`)
+    }
+    const [count] = await rows<{ total: number | string }>(target, `SELECT count() AS total FROM ${target.rowsOf(project.table)}`)
+    if (Number(count?.total) !== 1000) throw new Error(`the new table must hold the 1000 rows, found ${JSON.stringify(count)}`)
+    assertChkitClean(project)
+  } finally {
+    await dropCutoverProject(target, project)
+  }
+}
+
+/**
+ * The table is created outside chkit with `columns` and the engine that
+ * `engine` returns for its name, which differ from the schema (`schemaColumns`,
+ * or id, user_id and payload). The snapshot is created AS the table, so it
+ * would take the server's state: the cutover must stop at its first statement,
+ * before it creates anything.
+ */
+export async function runRefusedAtStartScenario(
+  target: CutoverTarget,
+  label: string,
+  created: { columns: string; engine: (table: string) => string; orderBy?: string; clauses?: string; settings?: Record<string, number> },
+  message: string,
+  schemaColumns?: Array<Record<string, unknown>>,
+): Promise<void> {
+  const project = await createCutoverProject(target, label, schemaColumns)
+  try {
+    const fqn = `${target.database}.${project.table}`
+    const cluster = target.connection.cluster
+    const onCluster = cluster ? ` ON CLUSTER '${cluster}'` : ''
+    await target.admin.command(`DROP TABLE ${fqn}${onCluster} SYNC`)
+    await target.admin.command(
+      `CREATE TABLE ${fqn}${onCluster} (${created.columns}) ENGINE = ${created.engine(project.table)} ORDER BY ${created.orderBy ?? 'id'}${created.clauses ? ` ${created.clauses}` : ''}`,
+      created.settings,
+    )
+    await pollUntil(
+      () => target.admin.query<{ name: string }>(`SELECT name FROM system.tables WHERE database = '${target.database}' AND name = '${project.table}'`),
+      (found) => found.length > 0,
+    )
+
+    await writeSchema(target, project, ['user_id', 'id'])
+    expectOk(cli(project, ['generate', '--name', 'cutover', '--cutover', `${fqn}=id`, '--json']), 'generate --cutover')
+    const refused = cli(project, ['migrate', '--apply', '--json'])
+    const output = `${refused.stdout}${refused.stderr}`
+    if (refused.exitCode === 0 || !output.includes(message) || !output.includes('failed at statement 1 of')) {
+      throw new Error(formatTestDiagnostic(`migrate --apply must stop with "${message}"`, refused))
+    }
+    const tables = cluster ? `clusterAllReplicas('${cluster}', system.tables)` : 'system.tables'
+    const leftovers = await target.admin.query<{ name: string }>(
+      `SELECT name FROM ${tables} WHERE database = '${target.database}' AND startsWith(name, '${project.table}__cutover_')`,
+    )
+    if (leftovers.length > 0) throw new Error(`the cutover must create nothing, found ${JSON.stringify(leftovers)}`)
+  } finally {
+    await dropCutoverProject(target, project)
+  }
+}
+
+/**
+ * The table is created outside chkit with `columns`, `clauses` after its
+ * ORDER BY and the query `settings`, in a form the schema (`schemaColumns`)
+ * describes but chkit would not write: the cutover must accept it.
+ */
+export async function runCreatedOutsideChkitScenario(
+  target: CutoverTarget,
+  label: string,
+  created: { columns: string; orderBy?: string; clauses?: string; settings?: Record<string, number> },
+  schemaColumns: Array<Record<string, unknown>>,
+): Promise<void> {
+  const project = await createCutoverProject(target, label, schemaColumns)
+  try {
+    const fqn = `${target.database}.${project.table}`
+    await target.admin.command(`DROP TABLE ${fqn} SYNC`)
+    await target.admin.command(
+      `CREATE TABLE ${fqn} (${created.columns}) ENGINE = ${target.engine} ORDER BY ${created.orderBy ?? 'id'}${created.clauses ? ` ${created.clauses}` : ''}`,
+      created.settings,
+    )
+    await pollUntil(
+      () => target.admin.query<{ name: string }>(`SELECT name FROM system.tables WHERE database = '${target.database}' AND name = '${project.table}'`),
+      (found) => found.length > 0,
+    )
+    await target.admin.command(`INSERT INTO ${fqn} (id, user_id, payload) SELECT number, number % 97, 'historic' FROM numbers(1000)`)
+
+    await writeSchema(target, project, ['user_id', 'id'])
+    expectOk(cli(project, ['generate', '--name', 'cutover', '--cutover', `${fqn}=id`, '--json']), 'generate --cutover')
+    expectOk(cli(project, ['migrate', '--apply', '--json']), 'migrate --apply (cutover)')
+    const keys = await sortingKeys(target, project)
+    if (keys[project.table] !== 'user_id, id') throw new Error(`layouts after the cutover: ${JSON.stringify(keys)}`)
+    const [count] = await rows<{ total: number | string }>(target, `SELECT count() AS total FROM ${target.rowsOf(project.table)}`)
+    if (Number(count?.total) !== 1000) throw new Error(`the new table must hold the 1000 rows, found ${JSON.stringify(count)}`)
+  } finally {
+    await dropCutoverProject(target, project)
+  }
+}
+
+/**
+ * The schema declares `columns`, and chkit creates the table from it.
+ * ClickHouse stores some types in another spelling (`Decimal64(2)` as
+ * `Decimal(18, 2)`), and the cutover must still accept the unchanged table.
+ */
+export async function runStoredSpellingScenario(target: CutoverTarget, label: string, columns: Array<Record<string, unknown>>): Promise<void> {
+  const project = await createCutoverProject(target, label, columns)
+  try {
+    await writeSchema(target, project, ['user_id', 'id'])
+    expectOk(cli(project, ['generate', '--name', 'cutover', '--cutover', `${target.database}.${project.table}=id`, '--json']), 'generate --cutover')
+    expectOk(cli(project, ['migrate', '--apply', '--json']), 'migrate --apply (cutover)')
+    const keys = await sortingKeys(target, project)
+    if (keys[project.table] !== 'user_id, id') throw new Error(`layouts after the cutover: ${JSON.stringify(keys)}`)
+    const [count] = await rows<{ total: number | string }>(target, `SELECT count() AS total FROM ${target.rowsOf(project.table)}`)
+    if (Number(count?.total) !== project.historic) throw new Error(`the new table must hold the ${project.historic} rows, found ${JSON.stringify(count)}`)
+    // No assertChkitClean: chkit drift reports Decimal64(2) against the stored Decimal(18, 2) on its own.
+  } finally {
+    await dropCutoverProject(target, project)
+  }
+}
+
+/**
+ * Replaces the SQL of operation `step` (0-based) with a statement that fails, keeping its marker lines.
+ * The server rejects it before it starts (an unknown identifier): an async step that fails while it
+ * runs may have applied writes, so it is never retried without an abandon (#767).
+ */
 function injectFailure(blocks: string[], step: number): string {
   return blocks
     .map((block, index) => {
       if (index !== step + 1) return block
       const comments = block.split('\n').filter((line) => line.startsWith('--'))
-      return [...comments, `SELECT throwIf(1, 'injected failure at statement ${step + 1}');`].join('\n')
+      return [...comments, `SELECT \`injected failure at statement ${step + 1}\`;`].join('\n')
     })
     .join('\n\n')
 }

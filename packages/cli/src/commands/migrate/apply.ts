@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { setTimeout as defaultSleep } from 'node:timers/promises'
 
 import {
   assertNoFireAndForgetAsyncInserts,
@@ -10,7 +11,6 @@ import {
   type ClickHouseExecutor,
   type ClickHouseSettings,
   type QualifiedTable,
-  type QueryStatus,
 } from '@chkit/clickhouse'
 import { extractLegacyExecutableStatements, statementFingerprint, type ResolvedChxConfig } from '@chkit/core'
 
@@ -22,18 +22,27 @@ import type {
   OperationState,
   OperationStatus,
 } from '../../runtime/journal-store.js'
+import { resolveJournalTableName } from '../../runtime/journal-store.js'
 import { checksumSQL, type MigrationJournalEntry } from '../../runtime/migration-store.js'
 import {
   extractExecutableStatements,
   extractMigrationOperationSummaries,
+  extractStatementOperations,
   findNonSelectBarriers,
   type MigrationOperationSummary,
 } from '../../runtime/safety-markers.js'
 import { CLI_VERSION } from '../../runtime/version.js'
+import type { QueryContext, QueryTracker } from './query-intents.js'
 import {
   applyAsyncStatement,
+  finishedRecordOf,
   freshMigrationState,
   isoWithoutZone,
+  type KnownOutcome,
+  outcomeUnknownError,
+  resolveRecordedAttempt,
+  reusableOutcome,
+  stopRunningAdvice,
   upsertOperation,
 } from './async-apply.js'
 import {
@@ -44,6 +53,7 @@ import {
   statementSplitChangedError,
   type PendingNonSelectBarrier,
 } from './errors.js'
+import { asCleanup } from './interrupt.js'
 import {
   assertCompletedStatement,
   hasStatementProgress,
@@ -127,7 +137,7 @@ export function previewStatement(sql: string, max = 120): string {
 export function nonSelectBarriers(
   migration: string,
   statements: readonly string[],
-  operations: readonly MigrationOperationSummary[],
+  operations: ReadonlyArray<MigrationOperationSummary | undefined>,
 ): PendingNonSelectBarrier[] {
   return findNonSelectBarriers(statements, operations).map((barrier) => ({
     migration,
@@ -167,6 +177,65 @@ interface RecordedIdentity {
   fingerprint: string
 }
 
+// A sync or barrier run of a statement whose record names an async attempt
+// (a mode-only edit with --retry) resolves that attempt first, as an async
+// re-run does (#767): a QueryFinish records the statement completed, a
+// server failure is journaled failed before any before-retry SQL runs, and
+// an attempt that may have finished stops the run before anything is written
+// or run. A running attempt keeps its record: its query id is the only way to
+// find it later.
+const ASYNC_STOP_CODES: ReadonlySet<string> = new Set(['async_outcome_unknown', 'async_attempt_unfenced', 'async_needs_lock'])
+
+function unfencedJournalError(file: string): MigrateError {
+  return new MigrateError(
+    'async_attempt_unfenced',
+    `Cannot apply ${file}: it has async statements, and the journal ${resolveJournalTableName()} has no operation_fingerprints column, which records each async attempt's fence (#767). Nothing ran. Add the column with a user that can alter the journal: run chkit migrate --apply as that user, or ALTER TABLE <database>.${resolveJournalTableName()} ADD COLUMN IF NOT EXISTS operation_fingerprints Array(String) DEFAULT [] (ON CLUSTER in cluster mode), then apply again.`,
+  )
+}
+
+async function resolveAsyncAttemptBeforeSync(input: {
+  db: ClickHouseExecutor
+  journalStore: JournalStore
+  file: string
+  state: MigrationRowState
+  op: OperationState
+  fingerprint: string
+  /** The statement this run runs at that position. */
+  sql: string
+  operationType: string
+  log: (line: string) => void
+  /** The outcome the edit's check read for this attempt, if it did (#767). */
+  known?: KnownOutcome
+}): Promise<'completed' | 'run' | 'unsent'> {
+  const { op, file, known } = input
+  if (op.status === 'completed' || op.queryId === '') return 'run'
+  const recorded =
+    reusableOutcome(known, op, input.fingerprint) ??
+    (await resolveRecordedAttempt({
+        db: input.db, journalStore: input.journalStore, migrationName: file, op, fingerprint: input.fingerprint, sql: input.sql, queryId: op.queryId,
+        operationType: input.operationType, log: input.log, sleep: defaultSleep,
+      }))
+  switch (recorded.kind) {
+    case 'running':
+      throw attemptStillRunningError(file, op)
+    case 'unknown':
+      throw outcomeUnknownError({ operationType: input.operationType, statementIndex: op.operationIndex, migrationName: file, queryId: op.queryId, reason: recorded.reason })
+    case 'finished':
+      await input.journalStore.writeMigrationState(upsertOperation(input.state, finishedRecordOf(op, Date.now), Date.now))
+      input.log(`  ${input.operationType}: earlier async attempt of query_id=${op.queryId} finished on the server, recording it as completed`)
+      return 'completed'
+    case 'failed':
+      await input.journalStore.writeMigrationState(
+        upsertOperation(input.state, { ...op, status: 'failed', finishedAt: isoWithoutZone(new Date()), lastError: recorded.error }, Date.now),
+      )
+      return 'run'
+    case 'unsent':
+      return 'unsent'
+    case 'ended':
+      return 'run'
+  }
+}
+
 function syncOperationState(
   index: number,
   identity: RecordedIdentity,
@@ -198,6 +267,11 @@ export async function applyMigration(input: {
   file: string
   /** --setting values, sent with every statement of the migration (sync, async, barrier, before-retry). */
   settings?: ClickHouseSettings
+  queryTracker?: QueryTracker
+  /** Set when the run holds no migrate lock because the target database did not exist (#767). */
+  locklessBootstrap?: boolean
+  /** Aborted by Ctrl-C: no statement starts after it. */
+  signal?: AbortSignal
   /** Set when --retry verified an edit of this in-progress migration before the run (#233). */
   retry?: { previousChecksum: string; checksum: string }
   /** Progress lines; the command sends them to stderr in --json mode. */
@@ -209,9 +283,11 @@ export async function applyMigration(input: {
   debug('migrate', `applying ${file}`)
   const sql = await readFile(join(migrationsDir, file), 'utf8')
   const parsedStatements = extractExecutableStatements(sql)
-  const operationSummaries = extractMigrationOperationSummaries(sql)
-  debug('migrate', `${file}: ${parsedStatements.length} statements, ${operationSummaries.length} operations`)
+  // The marker of each statement, by position (#831).
+  const operationSummaries = extractStatementOperations(sql)
+  debug('migrate', `${file}: ${parsedStatements.length} statements, ${operationSummaries.filter(Boolean).length} operations`)
 
+  input.signal?.throwIfAborted()
   const statements = await pluginRuntime.runOnBeforeApply({
     command: 'migrate',
     config,
@@ -220,7 +296,7 @@ export async function applyMigration(input: {
     migration: file,
     sql,
     statements: parsedStatements,
-  })
+  }, input.signal)
 
   // migrate refused a file's non-SELECT barrier before the run; a plugin may
   // have rewritten the statements since (#634).
@@ -230,6 +306,7 @@ export async function applyMigration(input: {
   const migrationChecksum = checksumSQL(sql)
   // What the journal records for each statement run, and checks against (#599).
   const fingerprints = statements.map(statementFingerprint)
+  const sqlByFingerprint = new Map(statements.map((statement, index) => [fingerprints[index] ?? '', statement]))
 
   // Resume support (#6): if a prior run left per-statement journal state for
   // this migration, statements already marked completed are skipped instead of
@@ -260,6 +337,19 @@ export async function applyMigration(input: {
       })
     }
   }
+  // A statement a plugin's onBeforeApply dropped is never visited below, so
+  // its recorded async attempt is read, against the identity it was recorded
+  // with, before anything runs and before the recorded statements are
+  // checked: one still running or without an outcome stops the run with the
+  // journal as it was, instead of the migration being recorded as applied, or
+  // the record being refused unread (#767).
+  if (initialState !== null && !initialState.migrationCompleted && initialState.checksum === migrationChecksum) {
+    const omitted = initialState.operations.filter((op) => op.operationIndex >= statements.length)
+    if (omitted.length > 0) {
+      await assertRecordedAttemptsResolved(db, journalStore, file, { ...initialState, operations: omitted }, initialState, sqlByFingerprint, log)
+    }
+  }
+
   // The file is unchanged, so the statements this run gets should be those the
   // journal recorded. They are not when the split or a plugin's onBeforeApply
   // changed since: then positions do not hold (#599). An edited file is
@@ -279,24 +369,36 @@ export async function applyMigration(input: {
       })
     }
   }
+  // The outcomes the edit's check read for the attempts it keeps, so the sync
+  // path does not look them up, through the query_log rechecks, again.
+  let editResolved = new Map<number, KnownOutcome>()
   if (
     initialState !== null &&
     !initialState.migrationCompleted &&
     initialState.checksum !== migrationChecksum
   ) {
-    await acceptEditedMigration({
+    editResolved = await acceptEditedMigration({
       db,
       file,
       state: initialState,
       checksum: migrationChecksum,
-      identities: statementIdentities(operationSummaries, fingerprints),
+      identities: statementIdentities(operationSummaries, fingerprints, extractMigrationOperationSummaries(sql)),
+      sqlByFingerprint,
       retry,
       journalStore,
       log,
     })
   }
 
+  // An async attempt is submitted only once the journal stored its fence
+  // (#767), so a journal that cannot store one stops the migration before any
+  // of its statements runs: nothing needs reconciling.
+  if (operationSummaries.some((operation) => operation?.mode === 'async') && !(await journalStore.storesAttemptFences())) {
+    throw unfencedJournalError(file)
+  }
+
   for (let i = 0; i < statements.length; i++) {
+    input.signal?.throwIfAborted()
     const statement = statements[i] as string
     const operation = operationSummaries[i]
     if (operation?.mode === 'async') {
@@ -311,12 +413,22 @@ export async function applyMigration(input: {
           operationType: operation.type,
           operationKey: operation.key,
           fingerprint: fingerprints[i] ?? '',
+          known: editResolved.get(i),
           beforeRetry: operation.beforeRetry,
           settings,
+          queryTracker: input.queryTracker,
+          locklessBootstrap: input.locklessBootstrap,
+          signal: input.signal,
           log,
         })
       } catch (error) {
-        throw statementError({ file, index: i, total: statements.length, statement, error })
+        if (error === input.signal?.reason) throw error
+        const wrapped = statementError({ file, index: i, total: statements.length, statement, error })
+        // A stop of an async statement keeps its code for --json (#767).
+        if (error instanceof MigrateError && ASYNC_STOP_CODES.has(error.code)) {
+          throw new MigrateError(error.code, wrapped.message, { cause: error })
+        }
+        throw wrapped
       }
       // Async ops are DML (loads, backfills) — no DDL propagation to wait on.
       continue
@@ -348,14 +460,21 @@ export async function applyMigration(input: {
       continue
     }
     const priorAttempt = stateBefore?.operations.find((op) => op.operationIndex === i)
-    if (priorAttempt !== undefined) await assertAsyncAttemptStopped(db, file, priorAttempt)
-    if (priorAttempt !== undefined && operation?.beforeRetry) {
+    let resolved: 'completed' | 'run' | 'unsent' = 'run'
+    if (priorAttempt !== undefined && stateBefore !== null) {
+      resolved = await resolveAsyncAttemptBeforeSync({ db, journalStore, file, state: stateBefore, op: priorAttempt, fingerprint: identity.fingerprint, sql: statement, operationType: identity.type, log, known: editResolved.get(i) })
+      if (resolved === 'completed') continue
+    }
+    // An async attempt that was never sent ran nothing: no before-retry SQL.
+    if (priorAttempt !== undefined && operation?.beforeRetry && resolved !== 'unsent') {
       try {
         await runBeforeRetry(db, operation.type, statement, operation.beforeRetry, {
           cluster: config.clickhouse?.cluster,
           settings,
           log,
           status: priorAttempt.status,
+          queryTracker: input.queryTracker,
+          queryContext: { migration: file, statementIndex: i, forwardSQL: statement, beforeRetry: operation.beforeRetry },
         })
       } catch (error) {
         throw statementError({ file, index: i, total: statements.length, statement, error })
@@ -377,17 +496,23 @@ export async function applyMigration(input: {
       if (operation?.mode === 'barrier') {
         await waitForInsertBarrier(db, statement, { cluster: config.clickhouse?.cluster, settings, log })
       } else {
-        await db.command(statement, settings)
+        if (input.queryTracker) {
+          await input.queryTracker.command({ migration: file, statementIndex: i, forwardSQL: statement, beforeRetry: operation?.beforeRetry ?? null }, 'forward', statement, settings)
+        } else await db.command(statement, settings)
       }
     } catch (error) {
-      const stateOnError = (await journalStore.readMigrationState(file)) ?? baseState
-      await journalStore.writeMigrationState(
-        upsertOperation(
-          stateOnError,
-          syncOperationState(i, identity, 'failed', errorMessage(error)),
-          Date.now,
-        ),
-      )
+      // Cleanup: an interrupted run records the outcome it saw (#816).
+      await asCleanup(async () => {
+        const stateOnError = (await journalStore.readMigrationState(file)) ?? baseState
+        await journalStore.writeMigrationState(
+          upsertOperation(
+            stateOnError,
+            syncOperationState(i, identity, 'failed', errorMessage(error)),
+            Date.now,
+          ),
+        )
+      })
+      if (error === input.signal?.reason) throw error
       throw statementError({ file, index: i, total: statements.length, statement, error })
     }
     // Mark completed as soon as the statement has executed — BEFORE waiting for
@@ -397,14 +522,17 @@ export async function applyMigration(input: {
     // Until its wait passes, the record carries PROPAGATION_WAIT_PENDING, so a
     // re-run waits for it again before the next statement (#513).
     const waits = hasPropagationWait(operation)
-    const stateAfter = (await journalStore.readMigrationState(file)) ?? baseState
-    await journalStore.writeMigrationState(
-      upsertOperation(
-        stateAfter,
-        syncOperationState(i, identity, 'completed', waits ? PROPAGATION_WAIT_PENDING : ''),
-        Date.now,
-      ),
-    )
+    const stateAfter = await asCleanup(async () => {
+      const state = (await journalStore.readMigrationState(file)) ?? baseState
+      await journalStore.writeMigrationState(
+        upsertOperation(
+          state,
+          syncOperationState(i, identity, 'completed', waits ? PROPAGATION_WAIT_PENDING : ''),
+          Date.now,
+        ),
+      )
+      return state
+    })
     if (waits) {
       await completePropagation({
         db,
@@ -472,13 +600,17 @@ async function runBeforeRetry(
     settings: ClickHouseSettings | undefined
     log: (line: string) => void
     status: OperationStatus
+    queryTracker?: QueryTracker
+    queryContext?: QueryContext
   },
 ): Promise<void> {
   if (operationType === 'exchange_tables') {
     await waitForExchange(db, statement, { cluster: options.cluster })
   }
   options.log(`  ${operationType}: an earlier attempt ${options.status === 'failed' ? 'failed' : 'was interrupted'} — running before-retry SQL`)
-  await db.command(beforeRetry, options.settings)
+  if (options.queryTracker && options.queryContext) {
+    await options.queryTracker.command(options.queryContext, 'compensation', beforeRetry, options.settings)
+  } else await db.command(beforeRetry, options.settings)
 }
 
 // An in-progress migration whose file changed resumes when this run's --retry
@@ -492,10 +624,11 @@ async function acceptEditedMigration(input: {
   state: MigrationRowState
   checksum: string
   identities: StatementIdentity[]
+  sqlByFingerprint: ReadonlyMap<string, string>
   retry: { previousChecksum: string; checksum: string } | undefined
   journalStore: JournalStore
   log: (line: string) => void
-}): Promise<void> {
+}): Promise<Map<number, KnownOutcome>> {
   const { file, state, checksum, identities, retry, journalStore } = input
   const retryVerified =
     retry !== undefined && retry.previousChecksum === state.checksum && retry.checksum === checksum
@@ -518,47 +651,54 @@ async function acceptEditedMigration(input: {
     )
   }
   const rebased = rebaseInProgressState(state, { checksum, identities, appliedAt: isoWithoutZone(new Date()) })
-  await assertDroppedAttemptsStopped(input.db, file, state, rebased)
+  const resolved = await assertRecordedAttemptsResolved(input.db, journalStore, file, state, rebased, input.sqlByFingerprint, input.log)
   await journalStore.writeMigrationState(rebased)
+  return resolved
 }
 
-// An async retry runs under a random query id (#701), so the record a rebase
-// drops is the only trace of an attempt that may still run (a submit that
-// failed while the server ran it, an attempt kept by --abandon): the next run
-// would not find it. Every replica is read, and an edit stops while one runs.
-async function assertDroppedAttemptsStopped(
+
+// Every async attempt the journal records, the ones the re-key would drop
+// included, must have an outcome the edit can act on before it is accepted,
+// read against the identity it was recorded with (#767). An attempt still
+// running, one whose outcome is unknown, and one that finished but whose
+// record the edit drops (its statement would run again) stop the run here,
+// with the journal as it was and nothing run. A dropped record is otherwise
+// the only trace of an attempt under a random id (#701).
+async function assertRecordedAttemptsResolved(
   db: ClickHouseExecutor,
+  journalStore: JournalStore,
   file: string,
   state: MigrationRowState,
   rebased: MigrationRowState,
-): Promise<void> {
-  const dropped = state.operations.filter(
-    (op) => op.status !== 'completed' && op.queryId !== '' && !rebased.operations.includes(op),
-  )
-  for (const op of dropped) await assertAsyncAttemptStopped(db, file, op)
+  /** The statements this run has, by fingerprint: a record's own SQL, when it is one of them. */
+  sqlByFingerprint: ReadonlyMap<string, string>,
+  log: (line: string) => void,
+): Promise<Map<number, KnownOutcome>> {
+  const resolved = new Map<number, KnownOutcome>()
+  for (const op of state.operations) {
+    if (op.status === 'completed' || op.queryId === '') continue
+    const sql = op.fingerprint === '' ? undefined : sqlByFingerprint.get(op.fingerprint)
+    const recorded = await resolveRecordedAttempt({ db, journalStore, migrationName: file, op, fingerprint: op.fingerprint, sql, queryId: op.queryId, operationType: op.operationType, log, sleep: defaultSleep })
+    if (recorded.kind === 'running') throw attemptStillRunningError(file, op)
+    const dropped = !rebased.operations.includes(op)
+    const reason =
+      recorded.kind === 'unknown'
+        ? recorded.reason
+        : recorded.kind === 'finished' && dropped
+          ? 'it finished on the server, but the edit drops its record, so the edited statement would run again'
+          : undefined
+    if (reason !== undefined) {
+      throw outcomeUnknownError({ operationType: op.operationType, statementIndex: op.operationIndex, migrationName: file, queryId: op.queryId, reason })
+    }
+    if (!dropped) resolved.set(op.operationIndex, { op, recorded })
+  }
+  return resolved
 }
 
-// A non-async path must not compensate or replace a recorded async attempt
-// while it still runs: its random query id is the only way to find it later.
-async function assertAsyncAttemptStopped(
-  db: ClickHouseExecutor,
-  file: string,
-  op: OperationState,
-): Promise<void> {
-  if (op.status === 'completed' || op.queryId === '') return
-  let status: QueryStatus
-  try {
-    status = await db.queryStatus(op.queryId, { everyReplica: true, runningOnly: true })
-  } catch (error) {
-    throw new Error(
-      `Cannot apply ${file}: could not check whether the earlier attempt of statement ${op.operationIndex + 1} (query_id ${op.queryId}) is still running (${error instanceof Error ? error.message : String(error)}). Nothing ran — re-run chkit migrate --apply.`,
-      { cause: error },
-    )
-  }
-  if (status.status === 'running') {
-    throw new MigrateError(
-      'retry_mismatch',
-      `Cannot apply ${file}: the earlier attempt of statement ${op.operationIndex + 1} (query_id ${op.queryId}) is still running on the server, and continuing would discard its query id. Wait for it to finish or run KILL QUERY WHERE query_id = '${op.queryId}', then run chkit migrate --apply again.`,
-    )
-  }
+function attemptStillRunningError(file: string, op: OperationState): MigrateError {
+  return new MigrateError(
+    'retry_mismatch',
+    `Cannot apply ${file}: the earlier attempt of statement ${op.operationIndex + 1} (query_id ${op.queryId}) is still running on the server, and continuing would discard its query id. ${stopRunningAdvice(op.queryId)}`,
+  )
 }
+

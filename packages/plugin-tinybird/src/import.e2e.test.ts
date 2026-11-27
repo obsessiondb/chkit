@@ -17,7 +17,7 @@ import { importTinybirdProject, type TinybirdImport } from './index.js'
 // test/fixtures/synthetic --record test/fixtures/synthetic.oracle.json`.
 // Tinybird runs on plain ClickHouse, so this always targets the local test
 // stack, also when the rest of the suite targets ObsessionDB (whose Shared
-// engines are not what Tinybird creates), as plugin-ingest's staged-loader
+// engines are not what Tinybird creates), as plugin-sync's staged-loader
 // E2Es do.
 const FIXTURE = join(import.meta.dir, '../test/fixtures/synthetic')
 // The generated queries import '@chkit/core', which does not resolve from a temp dir.

@@ -36,7 +36,7 @@ class _Client:
     queries: list[str] = field(default_factory=list[str])
     executed: list[str] = field(default_factory=list[str])
 
-    def query(self, sql: str) -> _Result:
+    def query(self, sql: str, settings: object = None) -> _Result:
         self.queries.append(sql)
         error = self.query_error(sql, self.executed)
         if error is not None:
@@ -138,9 +138,129 @@ def test_writes_the_fingerprints_next_to_the_operations() -> None:
     client = _Client()
     _store(client).write_migration_state(_state(["v1:a", "v1:'b"]))
     insert = next(sql for sql in client.executed if sql.startswith("INSERT INTO"))
-    assert "migration_completed, operations, operation_fingerprints) VALUES" in insert
+    # Never an asynchronous insert, on any transport (#767).
+    assert (
+        "migration_completed, operations, operation_fingerprints) SETTINGS async_insert = 0 VALUES"
+        in insert
+    )
     assert insert.endswith(", ['v1:a','v1:\\'b'])")
     assert not any(sql.startswith("ALTER TABLE") for sql in client.executed)
+
+
+# ---------- attempt fence (#767) ----------
+#
+# A fenced started record stores its fingerprint with a prefix, so releases
+# from #599 on stop at it. Only the write that sets the fence stores it; any
+# other write of the record stores it as it was read. Same cases as the TS
+# ``attempt fence (#767)`` tests.
+
+_ATTEMPT_MARKER = (
+    "submitted under its own query id; a retry reads its outcome from system.query_log"
+)
+
+
+def _started(**overrides: Any) -> MigrationRowState:
+    state = _state(["v1:a"])
+    op = state.operations[0].model_copy(
+        update={
+            "query_id": "q-1",
+            "status": "started",
+            "finished_at": None,
+            "last_error": _ATTEMPT_MARKER,
+            **overrides,
+        }
+    )
+    return state.model_copy(update={"operations": [op]})
+
+
+def _started_tuple() -> dict[str, Any]:
+    return {**_tuple(0), "status": "started", "query_id": "q-1", "finished_at": None}
+
+
+def _insert_of(client: _Client) -> str:
+    return next(sql for sql in client.executed if sql.startswith("INSERT INTO"))
+
+
+def test_a_fenced_started_record_is_stored_with_the_prefix_and_read_back_fenced() -> None:
+    client = _Client(rows=[_row([_started_tuple()], ["fenced-attempt;v1:a"])])
+    store = _store(client)
+    store.write_migration_state(_started(attempt_fenced=True))
+    read = store.read_migration_state("m.sql")
+    assert _insert_of(client).endswith(", ['fenced-attempt;v1:a'])")
+    assert read is not None
+    assert (read.operations[0].fingerprint, read.operations[0].attempt_fenced) == ("v1:a", True)
+
+
+def test_a_started_record_with_the_marker_but_without_the_fence_is_stored_without_it() -> None:
+    """770b, 770c, 770d: a rewrite of a record read without the fence (a
+    --retry re-key, an abandon) never adds it, whatever its last_error says."""
+    client = _Client()
+    _store(client).write_migration_state(_started())
+    assert _insert_of(client).endswith(", ['v1:a'])")
+
+
+@pytest.mark.parametrize(
+    ("status", "stored"), [("completed", "v1:a"), ("failed", "fenced-attempt;v1:a")]
+)
+def test_a_copy_of_a_fenced_record_in_another_status_keeps_the_fence_unless_completed(
+    status: str, stored: str
+) -> None:
+    """A failed record keeps the fence (the server recorded its failure); a
+    completed one never has it, so every release skips it as before."""
+    client = _Client()
+    _store(client).write_migration_state(
+        _started(attempt_fenced=True, status=status, finished_at="2026-11-09T12:00:02.000")
+    )
+    assert _insert_of(client).endswith(f", ['{stored}'])")
+
+
+def test_read_stored_operation_returns_the_server_row_only_never_the_last_write() -> None:
+    """#767 (round 2): an async submit requires the server's record, not
+    this process's last write."""
+    client = _Client()
+    store = _store(client)
+    store.write_migration_state(_started(attempt_fenced=True))
+    state = store.read_migration_state("m.sql")
+    assert state is not None
+    assert state.operations[0].query_id == "q-1"
+    assert store.read_stored_operation("m.sql", 0) is None
+
+
+def test_read_stored_operation_returns_the_fenced_record_the_server_has() -> None:
+    client = _Client(rows=[_row([_started_tuple()], ["fenced-attempt;v1:a"])])
+    stored = _store(client).read_stored_operation("m.sql", 0)
+    assert stored is not None
+    assert (stored.query_id, stored.fingerprint, stored.attempt_fenced) == ("q-1", "v1:a", True)
+
+
+def test_a_row_without_the_prefix_is_read_without_the_fence() -> None:
+    client = _Client(rows=[_row([_started_tuple()], ["v1:a"])])
+    read = _store(client).read_migration_state("m.sql")
+    assert read is not None
+    assert read.operations[0].attempt_fenced is False
+
+
+def test_a_journal_without_the_column_stores_no_fence_and_the_cached_write_has_none() -> None:
+    client = _Client(
+        query_error=_no_column,
+        execute_error=lambda sql: (
+            _clickhouse_error(497, "ACCESS_DENIED") if sql.startswith("ALTER TABLE") else None
+        ),
+    )
+    store = _store(client)
+    store.write_migration_state(_started(attempt_fenced=True))
+    # The server returns no row, so the read returns the last write.
+    read = store.read_migration_state("m.sql")
+    assert "operation_fingerprints" not in _insert_of(client)
+    assert read is not None
+    assert read.operations[0].query_id == "q-1"
+    assert read.operations[0].attempt_fenced is False
+
+
+def test_the_fence_is_never_part_of_a_report() -> None:
+    op = _started(attempt_fenced=True).operations[0]
+    assert "attempt_fenced" not in op.model_dump()
+    assert "attemptFenced" not in op.model_dump(by_alias=True)
 
 
 def test_a_journal_without_the_column_is_read_without_fingerprints_and_not_altered() -> None:
@@ -280,7 +400,7 @@ def test_an_insert_that_fails_on_the_column_is_not_written_again_without_it() ->
     client = _Client(
         execute_error=lambda sql: (
             _clickhouse_error(16, "NO_SUCH_COLUMN_IN_TABLE")
-            if "operation_fingerprints) VALUES" in sql
+            if "operation_fingerprints) SETTINGS async_insert = 0 VALUES" in sql
             else None
         )
     )
@@ -297,7 +417,7 @@ class _ReplicatedClient:
     queries: list[str] = field(default_factory=list[str])
     polls: int = 0
 
-    def query(self, sql: str) -> _Result:
+    def query(self, sql: str, settings: object = None) -> _Result:
         self.queries.append(sql)
         if "system.one" in sql:
             return _Result([{"replicas": 2}])
@@ -370,7 +490,7 @@ class _DeniedColumnsClient:
     executed: list[str] = field(default_factory=list[str])
     probes: int = 0
 
-    def query(self, sql: str) -> _Result:
+    def query(self, sql: str, settings: object = None) -> _Result:
         self.queries.append(sql)
         if "currentDatabase() AS database" in sql:
             return _Result([{"database": "default"}])
@@ -542,7 +662,7 @@ def test_without_system_columns_the_column_this_run_adds_is_waited_for_through_s
 @pytest.mark.usefixtures("two_replicas")
 def test_a_system_columns_probe_that_fails_for_another_reason_stops_the_read() -> None:
     class _Unavailable(_ReplicatedClient):
-        def query(self, sql: str) -> _Result:
+        def query(self, sql: str, settings: object = None) -> _Result:
             if "system.columns" in sql:
                 raise Exception("HTTP 503 Service Unavailable")
             return super().query(sql)

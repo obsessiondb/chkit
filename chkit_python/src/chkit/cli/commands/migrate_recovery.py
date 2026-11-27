@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -23,6 +24,8 @@ class RecoveryTargets:
 
     retry_target: str | None
     abandon_target: str | None
+    # ``--mark-applied`` / ``--mark-not-applied <migration>``: (migration, outcome).
+    mark_target: tuple[str, Literal["applied", "not-applied"]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +37,10 @@ class StatementIdentity:
     # The ``statement_fingerprint`` of the statement; None when its SQL cannot
     # be checked yet, because a plugin's on_before_apply may still rewrite it.
     fingerprint: str | None = None
+    # The marker releases before #831 gave the statement, when it differs:
+    # they paired the n-th marker of the file with the n-th statement, and the
+    # journal names the marker they gave each statement they ran.
+    legacy: StatementIdentity | None = None
 
 
 class Marker(BaseModel):
@@ -107,6 +114,9 @@ def resolve_recovery_targets(
     abandon: str | None,
     table: str | None = None,
     allow_destructive: bool = False,
+    mark_applied: str | None = None,
+    mark_not_applied: str | None = None,
+    cancel_lock_queries: bool = False,
 ) -> RecoveryTargets:
     """Read --retry and --abandon; usage errors surface before any connection."""
     retry_target = (
@@ -128,7 +138,45 @@ def resolve_recovery_targets(
                 "resets the journal state of one migration and applies nothing."
             )
             raise MigrateError("invalid_usage", msg)
-    return RecoveryTargets(retry_target=retry_target, abandon_target=abandon_target)
+    mark_target = _resolve_mark_target(
+        mark_applied,
+        mark_not_applied,
+        {
+            "--retry": retry is not None,
+            "--abandon": abandon is not None,
+            "--table": table is not None,
+            "--allow-destructive": allow_destructive,
+            "--cancel-lock-queries": cancel_lock_queries,
+        },
+    )
+    return RecoveryTargets(
+        retry_target=retry_target, abandon_target=abandon_target, mark_target=mark_target
+    )
+
+
+def _resolve_mark_target(
+    applied: str | None, not_applied: str | None, present: dict[str, bool]
+) -> tuple[str, Literal["applied", "not-applied"]] | None:
+    if applied is not None and not_applied is not None:
+        msg = (
+            "--mark-applied and --mark-not-applied cannot be combined: each records one "
+            "outcome of the stopped statement."
+        )
+        raise MigrateError("invalid_usage", msg)
+    flag = "--mark-applied" if applied is not None else "--mark-not-applied"
+    raw = applied if applied is not None else not_applied
+    if raw is None:
+        return None
+    migration = normalize_migration_name(raw, flag)
+    # Flags that mean nothing next to a mark, which only changes the journal.
+    conflicts = [name for name, given in present.items() if given]
+    if conflicts:
+        msg = (
+            f"{flag} cannot be combined with {', '.join(conflicts)}. It only records the "
+            "outcome of one statement in the journal and applies nothing."
+        )
+        raise MigrateError("invalid_usage", msg)
+    return migration, "applied" if applied is not None else "not-applied"
 
 
 def normalize_migration_name(raw: str, flag: str) -> str:
@@ -144,26 +192,39 @@ def normalize_migration_name(raw: str, flag: str) -> str:
 
 
 def statement_identity(
-    operations: Sequence[MigrationOperationSummary], index: int
+    operations: Sequence[MigrationOperationSummary | None], index: int
 ) -> StatementIdentity:
     """The (type, key) the journal records for statement ``index``."""
-    if index >= len(operations):
+    operation = operations[index] if index < len(operations) else None
+    if operation is None:
         return StatementIdentity(type="sql_statement", key=f"statement:{index}", marked=False)
-    operation = operations[index]
     return StatementIdentity(type=operation.type, key=operation.key, marked=True)
 
 
 def statement_identities(
-    operations: Sequence[MigrationOperationSummary],
+    operations: Sequence[MigrationOperationSummary | None],
     fingerprints: Sequence[str | None],
+    legacy_operations: Sequence[MigrationOperationSummary],
 ) -> list[StatementIdentity]:
-    """One identity per statement; ``fingerprints`` has one entry per statement."""
+    """One identity per statement; ``fingerprints`` has one entry per statement.
+
+    ``operations`` has the marker of each statement
+    (``extract_statement_operations``), ``legacy_operations`` the file's
+    markers in order, as releases before #831 paired them
+    (``extract_migration_operation_summaries``).
+    """
     out: list[StatementIdentity] = []
     for index, fingerprint in enumerate(fingerprints):
         marker = statement_identity(operations, index)
+        legacy = statement_identity(legacy_operations, index)
+        differs = (legacy.type, legacy.key) != (marker.type, marker.key)
         out.append(
             StatementIdentity(
-                type=marker.type, key=marker.key, marked=marker.marked, fingerprint=fingerprint
+                type=marker.type,
+                key=marker.key,
+                marked=marker.marked,
+                fingerprint=fingerprint,
+                legacy=legacy if differs else None,
             )
         )
     return out
@@ -180,7 +241,36 @@ def verify_retry_edit(
     marker and, where the journal recorded its fingerprint, its SQL (#599). A
     record from an older release has no fingerprint and is matched by position
     and marker.
+
+    The records of a release before #831 name the markers it paired by order.
+    When the statements' own markers do not match them, every record is
+    checked against that pairing instead, as a whole, so a marker that several
+    statements share keeps its count (#831).
     """
+    own = _check_retry_edit(operations, identities)
+    if isinstance(own, RetryEditOk) or all(i.legacy is None for i in identities):
+        return own
+    legacy = _check_retry_edit(
+        operations,
+        [
+            i
+            if i.legacy is None
+            else StatementIdentity(
+                type=i.legacy.type,
+                key=i.legacy.key,
+                marked=i.legacy.marked,
+                fingerprint=i.fingerprint,
+            )
+            for i in identities
+        ],
+    )
+    return legacy if isinstance(legacy, RetryEditOk) else own
+
+
+def _check_retry_edit(
+    operations: Sequence[OperationState],
+    identities: Sequence[StatementIdentity],
+) -> RetryEditCheck:
     bound = sorted(
         (op for op in operations if _is_bound_to_position(op)),
         key=lambda op: op.operation_index,
@@ -313,7 +403,11 @@ def rebase_in_progress_state(
     Completed statements stay recorded (--retry verified them). A failed or
     started statement stays only if the same operation still sits at its
     index, so a retry keeps its ``-- before-retry:`` compensation and query
-    id; any other record is dropped.
+    id; any other record is dropped. A record under the marker a release
+    before #831 gave the statement stays too when it is an attempt of this
+    statement: an async attempt --retry matched, or one the journal recorded
+    with the statement's SQL. Another statement's record never passes on its
+    compensation (#831).
     """
 
     def keep(op: OperationState) -> bool:
@@ -321,7 +415,14 @@ def rebase_in_progress_state(
             return True
         if op.operation_index >= len(identities):
             return False
-        return _same_identity(identities[op.operation_index], op)
+        current = identities[op.operation_index]
+        if _same_identity(current, op):
+            return True
+        if current.legacy is None or not _same_identity(current.legacy, op):
+            return False
+        return _is_bound_to_position(op) or (
+            op.fingerprint != "" and op.fingerprint == current.fingerprint
+        )
 
     return state.model_copy(
         update={

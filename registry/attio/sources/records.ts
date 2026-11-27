@@ -1,5 +1,5 @@
 import { view } from '@chkit/core'
-import { rawTable, type SourceContext } from '@chkit/plugin-ingest'
+import { rawTable, type SourceContext } from '@chkit/plugin-sync'
 
 import { createAttioClient } from '../client.js'
 import { attioConfig, type AttioReaderConfig } from '../config.js'

@@ -1,4 +1,4 @@
-import type { ClickHouseExecutor, ClickHouseSettings, QueryStatusOptions } from '@chkit/clickhouse'
+import type { ClickHouseExecutor, ClickHouseSettings, QueryControlOptions, QueryStatusOptions, SubmitOptions } from '@chkit/clickhouse'
 
 import { debug, isDebugEnabled } from '../debug.js'
 
@@ -36,10 +36,25 @@ export function wrapExecutorWithDebug(
   const systemTableSource = executor.systemTableSource?.bind(executor)
   const openConcurrent = executor.openConcurrent?.bind(executor)
   const commandGuarded = executor.commandGuarded?.bind(executor)
+  const commandTracked = executor.commandTracked?.bind(executor)
+  const queryControl = executor.queryControl?.bind(executor)
 
   return {
+    // Backfill proves a failed chunk only through an executor that sends once (#765).
+    ...(executor.submitSendsOnce ? { submitSendsOnce: true } : {}),
+    ...(executor.queryControlCluster ? { queryControlCluster: executor.queryControlCluster } : {}),
     ...(systemTableSource ? { systemTableSource } : {}),
     ...(openConcurrent ? { openConcurrent: () => wrapExecutorWithDebug(openConcurrent()) } : {}),
+    ...(commandTracked ? {
+      commandTracked(sql: string, check: () => void, beforeAttempt: () => Promise<string>, settings?: ClickHouseSettings) {
+        return trace('tracked command', null, () => commandTracked(sql, check, beforeAttempt, settings))
+      },
+    } : {}),
+    ...(queryControl ? {
+      queryControl<T>(sql: string, timeoutMs: number, options?: QueryControlOptions) {
+        return trace('query control', (rows) => `${rows.length} rows`, () => queryControl<T>(sql, timeoutMs, options))
+      },
+    } : {}),
     ...(commandGuarded ? {
       commandGuarded(sql: string, check: () => void, settings?: ClickHouseSettings): Promise<void> {
         debug('clickhouse', `command: ${truncate(sql)}`)
@@ -77,12 +92,12 @@ export function wrapExecutorWithDebug(
       )
       return trace('insert', null, () => executor.insert(params))
     },
-    submit(sql: string, queryId?: string, settings?: ClickHouseSettings): Promise<string> {
+    submit(sql: string, queryId?: string, settings?: ClickHouseSettings, options?: SubmitOptions): Promise<string> {
       debug(
         'clickhouse',
         `submit${queryId ? ` (id: ${queryId})` : ''}: ${truncate(sql)}`,
       )
-      return trace('submit', (id) => `id: ${id}`, () => executor.submit(sql, queryId, settings))
+      return trace('submit', (id) => `id: ${id}`, () => executor.submit(sql, queryId, settings, options))
     },
     queryStatus(queryId: string, options?: QueryStatusOptions) {
       debug('clickhouse', `queryStatus for ${queryId}`)

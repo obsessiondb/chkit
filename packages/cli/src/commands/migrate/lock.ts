@@ -9,6 +9,7 @@ import type { ClickHouseExecutor, ClickHouseSettings, ReplicaFanout } from '@chk
 import { debug } from '../../runtime/debug.js'
 import { CLI_VERSION } from '../../runtime/version.js'
 import { MigrateError } from './errors.js'
+import type { QueryIdentity } from './query-intents.js'
 
 /**
  * The migrate lock (#716): one `migrate --apply` (or `--abandon --apply`) at
@@ -84,6 +85,8 @@ interface LockHolder {
   startedAt: string
   /** Which write of the holder the row is: 0 for the claim, then one per heartbeat. */
   beat: number
+  queries?: QueryIdentity
+  recoveryOf?: string
 }
 
 interface LockClaim {
@@ -99,9 +102,13 @@ interface LockClaim {
 }
 
 export interface MigrateLock {
+  /** Owning claim, available for durable query associations. */
+  readonly claimId?: string
   /** Throws when the lock may no longer be held. */
   assertHeld(): void
   release(): Promise<void>
+  /** Set when release() could not write the release. */
+  readonly releaseFailed?: boolean
 }
 
 export interface LockDeps {
@@ -125,6 +132,12 @@ const DEFAULT_DEPS: Omit<LockDeps, 'log'> = {
 export function migrateLockDisabled(): boolean {
   const value = process.env.CHKIT_MIGRATE_LOCK?.trim().toLowerCase()
   return value === 'off' || value === '0' || value === 'false'
+}
+
+/** Whether CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK lets a run with the lock off submit async statements (#810). */
+export function asyncWithoutLockAccepted(): boolean {
+  const value = process.env.CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK?.trim().toLowerCase()
+  return value === '1' || value === 'true' || value === 'on'
 }
 
 function escapeSqlString(value: string): string {
@@ -351,6 +364,10 @@ export async function acquireMigrateLock(
      * executor with an HTTP session takes one query at a time. Defaults to `db`.
      */
     heartbeatDb?: ClickHouseExecutor
+    /** Advertises durable per-physical-attempt query associations. */
+    queryTracking?: QueryIdentity
+    /** Validated predecessor snapshot for cancellation's reservation-before-release handoff. */
+    takeover?: { claim: string; holder: string; beforeRelease?: () => Promise<void>; resumePending?: (reservations: readonly { claim: string; holder: string }[]) => Promise<void> }
   },
   overrides: Partial<Omit<LockDeps, 'log'>> = {},
 ): Promise<MigrateLock> {
@@ -362,8 +379,56 @@ export async function acquireMigrateLock(
     chkitVersion: CLI_VERSION,
     startedAt: new Date().toISOString(),
     beat: 0,
+    ...(options.queryTracking ? { queries: options.queryTracking } : {}),
+    ...(options.takeover ? { recoveryOf: options.takeover.claim } : {}),
   }
   const holderJson = JSON.stringify(holder)
+  if (options.takeover) {
+    if (options.breakLock !== options.takeover.claim) throw new MigrateError('invalid_usage', 'Cancellation requires the same --break-lock claim.')
+    const name = `${LOCK_ROW_PREFIX}${deps.newId()}`
+    const sentAt = deps.now()
+    try {
+      await writeClaim(db, target, name, holderJson, { released: false })
+      const predecessorName = `${LOCK_ROW_PREFIX}${options.takeover.claim}`
+      const claims = await readClaims(db, target, predecessorName)
+      const own = claims.find((claim) => claim.name === name)
+      const predecessor = claims.find((claim) => claim.name === predecessorName)
+      const others = claims.filter((claim) => !claim.released && claim.name !== name && claim.name !== predecessorName)
+      if (!own || own.released || deps.now() - sentAt > timings.validMs) throw unverifiableError(target)
+      if (!predecessor || predecessor.rawHolder !== options.takeover.holder) {
+        throw new MigrateError('migrate_cancellation_failed', 'The predecessor claim changed or disappeared before takeover; no query was canceled.')
+      }
+      if (others.length > 0) {
+        // Only an unresolved durable barrier proves these later cooperating
+        // reservations could not have admitted migration work of their own.
+        if (!options.takeover.resumePending) throw lockedError(target, others, timings)
+        await options.takeover.resumePending(others.map((claim) => ({ claim: claim.name.slice(LOCK_ROW_PREFIX.length), holder: claim.rawHolder })))
+        const live = others.filter((claim) => claim.ageMs < timings.leaseMs)
+        if (live.length > 0) throw lockedError(target, live, timings)
+        const alive = await releaseStoppedClaims(db, target, others, deps)
+        if (alive.length > 0) throw lockedError(target, alive, timings)
+        // The observation outlasts this reservation's validity. Start a new
+        // reservation instead of releasing the predecessor under an old one.
+        await writeClaim(db, target, name, holderJson, { released: true })
+        return await acquireMigrateLock(db, target, options, overrides)
+      }
+      // The acknowledged reservation blocks a third cooperating run throughout
+      // the handoff. Only now may the named predecessor be released.
+      await options.takeover.beforeRelease?.()
+      if (deps.now() - sentAt > timings.validMs) throw unverifiableError(target)
+      if (!predecessor.released) await writeClaim(db, target, predecessorName, predecessor.rawHolder, { released: true })
+      const current = await readClaims(db, target, name)
+      const confirmed = current.find((claim) => claim.name === name)
+      const remaining = current.filter((claim) => !claim.released && claim.name !== name)
+      if (!confirmed || confirmed.released || deps.now() - sentAt > timings.validMs) throw unverifiableError(target)
+      if (remaining.length > 0) throw lockedError(target, remaining, timings)
+      return startHolding({ db, heartbeatDb: options.heartbeatDb ?? db }, target,
+        { name, holder, confirmedAt: sentAt, version: confirmed.version }, deps)
+    } catch (error) {
+      await writeClaim(db, target, name, holderJson, { released: true }).catch(() => undefined)
+      throw error
+    }
+  }
   if (options.breakLock !== undefined) await breakClaim(db, target, options.breakLock, deps)
 
   for (let attempt = 1; ; ) {
@@ -413,6 +478,7 @@ function startHolding(
   let stopped = false
   let timer: ReturnType<typeof setTimeout> | undefined
   let inFlight: Promise<void> = Promise.resolve()
+  let releaseFailed = false
 
   function lapsed(at: number): boolean {
     return at - confirmedAt > timings.validMs
@@ -492,6 +558,7 @@ function startHolding(
   schedule()
 
   return {
+    claimId: claim.name.slice(LOCK_ROW_PREFIX.length),
     assertHeld() {
       if (lost === undefined && lapsed(deps.now())) lost = lapsedReason(deps.now())
       if (lost === undefined) return
@@ -500,6 +567,9 @@ function startHolding(
         `This run lost the migrate lock on ${target.database}.${target.journalTable} (${lost}), so it stopped before its next request: ` +
           'another run may have taken the lock. Check the journal with chkit status, then run migrate again.',
       )
+    },
+    get releaseFailed() {
+      return releaseFailed
     },
     async release() {
       stopped = true
@@ -511,6 +581,7 @@ function startHolding(
         await writeClaim(db, target, claim.name, holderJson(beat), { released: true })
         debug('migrate-lock', `released ${claim.name}`)
       } catch (error) {
+        releaseFailed = true
         deps.log(
           `⚠ Could not release the migrate lock (${error instanceof Error ? error.message : String(error)}); ` +
             `other runs can take it ${timings.leaseMs / 1000}s after this run's last heartbeat.`,

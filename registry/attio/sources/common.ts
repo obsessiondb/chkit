@@ -1,4 +1,4 @@
-import { rawRows } from '@chkit/plugin-ingest'
+import { rawRows } from '@chkit/plugin-sync'
 
 import { entityId, type AttioClient, type AttioEntity, type AttioParent, type CollectionRequest } from '../client.js'
 

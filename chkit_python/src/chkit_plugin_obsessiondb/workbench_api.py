@@ -43,6 +43,7 @@ class WorkbenchExecuteResult(BaseModel):
     statistics: dict[str, Any] | None = None
     query_id: str | None = None
     error: str | None = None
+    truncated: bool = False
 
 
 def workbench_query_execute(
@@ -52,16 +53,21 @@ def workbench_query_execute(
     query: str,
     settings: dict[str, Any] | None = None,
     query_id: str | None = None,
+    timeout: httpx.Timeout | float = QUERY_TIMEOUT,
+    guard: Any = None,
 ) -> WorkbenchExecuteResult:
     """``workbench.query.execute`` — proxy a SQL string through ObsessionDB.
 
     ``query_id`` is the id ClickHouse runs the query under. The API takes it as
     the top-level ``queryId`` field and ignores a ``query_id`` setting.
+    ``guard`` runs the request's first write (see ``_rpc_post``).
     """
     payload: dict[str, Any] = {"serviceSlug": service_slug, "query": query}
     if settings is not None:
         payload["settings"] = settings
     if query_id is not None:
         payload["queryId"] = query_id
-    body = _rpc_post(creds, "workbench/query/execute", payload, timeout=QUERY_TIMEOUT)
+    body = _rpc_post(
+        creds, "workbench/query/execute", payload, timeout=timeout, guard=guard
+    )
     return WorkbenchExecuteResult.model_validate(body)

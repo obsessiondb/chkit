@@ -7,23 +7,42 @@ client returns ``Any`` extensively; this wrapper narrows it down.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import re
+import socket
 import threading
+import time
 import uuid
 from collections.abc import Callable
-from typing import Any, Literal, NoReturn, Self
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from typing import Any, Literal, NoReturn, Protocol, Self, TypeVar
 from urllib.parse import unquote, urlparse
 
 import clickhouse_connect  # type: ignore[import-untyped]
+import httpx
+from clickhouse_connect.driver import httputil  # type: ignore[import-untyped]
 from clickhouse_connect.driver.exceptions import (  # type: ignore[import-untyped]
     DatabaseError,
 )
 from pydantic import BaseModel, ConfigDict
-from urllib3 import Timeout
+from urllib3 import HTTPConnectionPool, HTTPSConnectionPool, Timeout
+from urllib3.connection import HTTPConnection, HTTPSConnection
+from urllib3.exceptions import (
+    ConnectTimeoutError,
+    HTTPError,
+    NameResolutionError,
+    NewConnectionError,
+)
 
+from chkit.clickhouse.control import (
+    STRICT_CONTROL_SETTINGS,
+    remaining_control_seconds,
+    run_control_request,
+)
 from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
 from chkit.core.jsnum import js_math_round
 from chkit.core.model import ChxResolvedClickHouseConfig
@@ -38,6 +57,17 @@ QueryStatusKind = Literal["running", "finished", "failed", "unknown"]
 
 # TS's PROGRESS_SETTINGS (``@chkit/clickhouse``): a progress header every 30 s.
 PROGRESS_INTERVAL_MS = "30000"
+
+# TS's DURABLE_INSERT_SETTINGS: a write is stored when it returns. No
+# asynchronous INSERT, and one that a table's own async_insert setting still
+# makes asynchronous waits for its flush (#790).
+_DURABLE_INSERT_SETTINGS: dict[str, Any] = {"async_insert": 0, "wait_for_async_insert": 1}
+
+
+def _plain_setting_value(value: object) -> str:
+    """A boolean setting's value in plain form, ``true`` and ``false`` as 1 and 0."""
+    text = ("true" if value else "false") if isinstance(value, bool) else str(value).lower()
+    return {"true": "1", "false": "0"}.get(text, text)
 
 # Column types whose JSON numbers a float cannot hold exactly: 64-bit and wider
 # integers and Decimals. The TS port (``@chkit/clickhouse``, ``exact-json.ts``)
@@ -103,12 +133,27 @@ class QueryStatus(BaseModel):
     elapsed_ms: int | None = None
     duration_ms: int | None = None
     error: str | None = None
+    # A failure the server logged before the query started (ExceptionBeforeStart).
+    before_start: bool = False
 
 
 class ClickHouseClient:
     """Imperative client wrapper. Use as a context manager."""
 
-    __slots__ = ("_client", "_closed", "_config", "_submit_client", "_submit_client_lock")
+    #: ``submit_once`` asks ``SEND_ADMISSION`` at its transport (#765): an
+    #: executor needs this marker for an interruptible backfill.
+    transport_admission = True
+
+    __slots__ = (
+        "_client",
+        "_closed",
+        "_config",
+        "_send_once_client",
+        "_send_once_inflight",
+        "_send_once_pool",
+        "_submit_client",
+        "_submit_client_lock",
+    )
 
     def __init__(self, client: Any, config: ChxResolvedClickHouseConfig) -> None:
         self._client: Any = client
@@ -116,6 +161,12 @@ class ClickHouseClient:
         # The driver `submit` sends through, opened on first use.
         self._submit_client: Any = None
         self._submit_client_lock = threading.Lock()
+        # The driver submit_once sends through, with a pool of its own.
+        self._send_once_client: Any = None
+        self._send_once_pool: Any = None
+        # submit_once calls in progress, by pool: the last one to end after
+        # close() unregisters that pool again (see submit_once).
+        self._send_once_inflight: dict[int, int] = {}
         self._closed = False
 
     @classmethod
@@ -165,6 +216,10 @@ class ClickHouseClient:
         except Exception as error:
             wrap_connection_error(error, config.url, config.username)
         client.database = config.database
+        # ``profile`` (a settings profile) is not in system.settings, so
+        # clickhouse-connect would refuse it as an unknown setting; TS sends it,
+        # as the server accepts it (``migrate --setting profile=...``, #790).
+        client.valid_transport_settings = {*client.valid_transport_settings, "profile"}
         _use_ts_timeouts(client)
         return client
 
@@ -185,8 +240,14 @@ class ClickHouseClient:
         self._client.close()
         with self._submit_client_lock:
             submit_client, self._submit_client = self._submit_client, None
+            send_once_client, self._send_once_client = self._send_once_client, None
+            send_once_pool, self._send_once_pool = self._send_once_pool, None
         if submit_client is not None:
             submit_client.close()
+        if send_once_client is not None:
+            send_once_client.close()
+        if send_once_pool is not None:
+            _dispose_pool(send_once_pool)
 
     def __enter__(self) -> Self:
         return self
@@ -198,6 +259,10 @@ class ClickHouseClient:
     def database(self) -> str:
         return self._config.database
 
+    @property
+    def query_control_cluster(self) -> str | None:
+        return self._config.cluster
+
     def execute(self, statement: str, settings: dict[str, Any] | None = None) -> None:
         """Run a statement (DDL or DML) without returning rows.
 
@@ -207,18 +272,147 @@ class ClickHouseClient:
         it, which lets the ``CREATE DATABASE`` of a first migration run."""
         self.execute_guarded(statement, lambda: None, settings)
 
+    def _write_settings(
+        self, settings: dict[str, Any] | None = None, driver: Any = None
+    ) -> dict[str, Any]:
+        """``settings``, then the settings that make a write stored when it
+        returns: no asynchronous INSERT, and one that a table's own
+        async_insert setting still makes asynchronous waits for its flush, as
+        TS sends with every write (#790). These are defaults: a caller's own
+        value of either is sent as written. They go last, since the server
+        applies a request's settings in order and a settings profile among the
+        caller's would otherwise change them. A setting the user cannot change
+        (readonly = 1, or a constraint) is left out when it already has that
+        value, where clickhouse-connect would refuse it before the server's
+        own error. Fixed at another value, the write is refused, as the server
+        refuses TS's. A readonly = 1 user gets the server's own error, which
+        refuses its writes. Read from ``driver``, the one that sends the write
+        (the main one by default)."""
+        own = settings or {}
+        server_settings = (driver or self._client).server_settings
+        mode = server_settings.get("readonly")
+        if mode is not None and str(mode.value) == "1":
+            return dict(own)
+        sent = {key: value for key, value in own.items() if key not in _DURABLE_INSERT_SETTINGS}
+        for name, default in _DURABLE_INSERT_SETTINGS.items():
+            value = own.get(name, default)
+            setting = server_settings.get(name)
+            if setting is None:
+                if name in own:
+                    sent[name] = value
+                continue
+            if not setting.readonly:
+                sent[name] = value
+            elif str(setting.value) != _plain_setting_value(value):
+                need = (
+                    f"this write sends {name} = {value}." if name in own
+                    else f"chkit writes need {name} = {value} to be stored when they return."
+                )
+                msg = (
+                    f"Setting {name} is fixed at {setting.value} for this ClickHouse user, "
+                    f"and {need}"
+                )
+                raise RuntimeError(msg)
+        return sent
+
     def execute_guarded(
         self, statement: str, check: Callable[[], None], settings: dict[str, Any] | None = None
     ) -> None:
         """Check ownership before each command attempt, including an internal retry."""
+        settings = self._write_settings(settings)
         check()
         try:
-            self._client.command(statement, settings=settings)
+            self._client.command(statement, settings=settings, transport_settings={"X-DDL": "1"})
         except DatabaseError as error:
             if not is_unknown_database_error(error):
                 raise
             check()
-            self._client.command(statement, settings=settings, use_database=False)
+            self._client.command(statement, settings=settings, use_database=False,
+                                 transport_settings={"X-DDL": "1"})
+
+    def execute_tracked(
+        self,
+        statement: str,
+        check: Callable[[], None],
+        before_attempt: Callable[[], str],
+        settings: dict[str, Any] | None = None,
+    ) -> None:
+        """Persist an id before each physical send; never replay an ambiguous send."""
+        # Refused before an id is recorded, as execute is (#790).
+        settings = self._write_settings(settings)
+        check()
+        query_id = before_attempt()
+        check()
+        try:
+            self._tracked_attempt(statement, query_id, settings, use_database=True)
+        except DatabaseError as error:
+            if not is_unknown_database_error(error):
+                raise
+            check()
+            query_id = before_attempt()
+            check()
+            self._tracked_attempt(statement, query_id, settings, use_database=False)
+
+    def _tracked_attempt(
+        self, statement: str, query_id: str, settings: dict[str, Any] | None, *, use_database: bool
+    ) -> None:
+        # clickhouse-connect 0.15.1 retries a remotely closed connection once,
+        # even with query_retries=0. The same id must never name that replay.
+        pool = self._client.http
+        self._client.http = _SingleAttemptPool(pool)
+        try:
+            self._client.command(
+                statement,
+                settings={
+                    "wait_end_of_query": 1, **(settings or {}), "query_id": query_id,
+                },
+                use_database=use_database,
+                transport_settings={"X-DDL": "1"},
+            )
+        finally:
+            self._client.http = pool
+
+    def query_control(
+        self, statement: str, timeout_ms: float, *, query_id: str | None = None,
+        settings: dict[str, Any] | None = None,
+    ) -> QueryResult:
+        """A session-free, non-retrying control request with one absolute budget."""
+        def request(deadline: float) -> QueryResult:
+            parsed = urlparse(self._config.url)
+            url = httpx.URL(scheme=parsed.scheme, host=parsed.hostname or "", port=parsed.port)
+            username = unquote(parsed.username) if parsed.username else self._config.username
+            password = unquote(parsed.password) if parsed.password else self._config.password
+            bodyless = bool(re.match(
+                r"INSERT\b|KILL\b[\s\S]*\bASYNC\s*;?$", statement.lstrip(), re.I
+            ))
+            with httpx.Client(transport=httpx.HTTPTransport(retries=0)) as control:
+                response = control.post(
+                    url,
+                    auth=(username, password),
+                    params={
+                        "database": self._config.database,
+                        **{key: str(value) for key, value in (settings or {}).items()
+                           if key not in ("query_id", "default_format") and value is not None},
+                        **STRICT_CONTROL_SETTINGS,
+                        "wait_end_of_query": "1",
+                        **({"query_id": query_id} if query_id else {}),
+                    },
+                    headers={"Connection": "close"},
+                    content=(statement if bodyless else
+                             statement.rstrip().rstrip(";") + "\nFORMAT JSONStrings"),
+                    timeout=remaining_control_seconds(deadline),
+                )
+                if response.is_error or response.headers.get("X-ClickHouse-Exception-Code") not in (
+                    None, "", "0",
+                ):
+                    raise DatabaseError(response.text)
+                if bodyless:
+                    return QueryResult(column_names=[], rows=[])
+                payload = response.json()
+                return QueryResult(column_names=[column["name"] for column in payload["meta"]],
+                                   rows=payload["data"])
+
+        return run_control_request(request, timeout_ms)
 
     def query(
         self,
@@ -236,7 +430,16 @@ class ClickHouseClient:
             if settings is not None
             else None
         )
-        result = self._client.query(statement, settings=effective_settings)
+        if effective_settings and effective_settings.get("default_format") == "JSONStrings":
+            effective_settings.pop("default_format")
+            payload = json.loads(
+                self._client.raw_query(statement, settings=effective_settings, fmt="JSONStrings",
+                                       transport_settings={"X-DDL": "1"})
+            )
+            return QueryResult(column_names=[column["name"] for column in payload["meta"]],
+                               rows=payload["data"])
+        result = self._client.query(statement, settings=effective_settings,
+                                    transport_settings={"X-DDL": "1"})
         column_names: list[str] = list(result.column_names)
         rows: list[dict[str, Any]] = [
             dict(zip(column_names, row, strict=True)) for row in result.result_rows
@@ -254,7 +457,8 @@ class ClickHouseClient:
         """
         query_id = str(uuid.uuid4())
         body = self._client.raw_query(
-            js_trim(statement).rstrip(";"), settings={"query_id": query_id}, fmt="JSON"
+            js_trim(statement).rstrip(";"), settings={"query_id": query_id}, fmt="JSON",
+            transport_settings={"X-DDL": "1"}
         )
         return ClickHouseJsonQueryResult.model_validate(
             {**parse_json_result(body), "query_id": query_id}
@@ -265,8 +469,15 @@ class ClickHouseClient:
         statement: str,
         query_id: str | None = None,
         settings: dict[str, Any] | None = None,
+        *,
+        before_send: Callable[[], None] | None = None,
     ) -> str:
         """Send a query that ``query_status`` follows. Returns its query_id.
+
+        ``before_send`` is the caller's guard (#767): called before the
+        request starts and, through ``commit``, once its connection is open and
+        before its first bytes are written. Either raises to stop a request
+        the caller gave up on.
 
         Used by ``chkit migrate --apply`` for long-running ``ALTER`` /
         ``OPTIMIZE`` statements: the server starts processing immediately
@@ -285,10 +496,107 @@ class ClickHouseClient:
         # clickhouse-connect's command() has no query_id parameter; over HTTP
         # the id travels as a query parameter, which the driver forwards from
         # per-query settings. Verified live: the id lands in system.query_log.
-        self._submit_driver().command(
-            statement, settings={**(settings or {}), "query_id": qid}
-        )
+        _SUBMIT_SEND.before_send = before_send
+        _SUBMIT_SEND.wrote = False
+        try:
+            # Opening the driver sends the statement nothing.
+            driver = self._submit_driver()
+            # Stored when it finishes, as execute sends: an asynchronous INSERT
+            # would finish while its rows are still buffered (#790).
+            sent = {**self._write_settings(settings, driver), "query_id": qid}
+            driver.command(statement, settings=sent)
+        except Exception as error:
+            # The driver sends each request once (#767), so a failure before
+            # its first byte proves the query was never sent (#800).
+            if not _SUBMIT_SEND.wrote and failed_before_sending(error):
+                message = format_connection_error(
+                    error, self._config.url, self._config.username
+                ) or str(error)
+                raise SubmitNotSentError(message) from error
+            raise
+        finally:
+            _SUBMIT_SEND.before_send = None
         return qid
+
+    def submit_once(
+        self,
+        statement: str,
+        query_id: str,
+        settings: dict[str, Any] | None = None,
+    ) -> str:
+        """``submit`` with one physical send: clickhouse-connect 0.15.1 resends a
+        request whose connection the remote closed, even with
+        ``query_retries=0``, and the same id must never name a second send of
+        a write (a backfill chunk could run twice). A connection failure
+        raises instead. TS's client sends a request once.
+
+        It sends through a driver with a urllib3 pool of its own, whose
+        ``urlopen`` asks the ``SEND_ADMISSION`` of this request only (a
+        context variable: an unrelated request, or another thread's, never
+        answers for it). When the admission refuses, nothing is sent and
+        ``SendNotAdmittedError`` is raised. ``prepare_submit_once`` opens
+        that driver ahead of the send."""
+        driver = self.prepare_submit_once()
+        # Stored when it finishes, as submit sends (#790); refused before the send.
+        sent = {**self._write_settings(settings, driver), "query_id": query_id}
+        pool = driver.http
+        with self._submit_client_lock:
+            self._send_once_inflight[id(pool)] = self._send_once_inflight.get(id(pool), 0) + 1
+        send = _Send(SEND_ADMISSION.get())
+        token = _CURRENT_SEND.set(send)
+        try:
+            driver.command(statement, settings=sent)
+        except SendNotAdmittedError:
+            raise
+        except Exception as error:
+            if send.sent and not send.handed_off and _timed_out(error):
+                raise SendConnectTimeoutError(_connect_timeout_message()) from error
+            raise
+        finally:
+            _CURRENT_SEND.reset(token)
+            with self._submit_client_lock:
+                left = self._send_once_inflight[id(pool)] - 1
+                if left:
+                    self._send_once_inflight[id(pool)] = left
+                else:
+                    del self._send_once_inflight[id(pool)]
+                # The driver's connection-expiry check can register the pool
+                # again after close() dropped it; the last call out drops it.
+                if not left and self._closed:
+                    httputil.all_managers.pop(pool, None)
+        return query_id
+
+    def prepare_submit_once(self) -> Any:
+        """Open the driver ``submit_once`` sends through, if it is not open
+        yet: connection setup, which may stall, done before a caller admits
+        a send."""
+        with self._submit_client_lock:
+            client = self._send_once_client
+        if client is None and not self._closed:
+            pool = _own_pool_manager(self._config.url)
+            # Opened outside the lock, so close() does not wait for it.
+            try:
+                opened = self._open_driver(
+                    self._config, autogenerate_session_id=False, pool_mgr=pool
+                )
+            except BaseException:
+                _dispose_pool(pool)
+                raise
+            # Bounded until the request is written (connect, TLS handshake and
+            # the write itself); the wait for the INSERT's response is not.
+            opened.timeout = Timeout(connect=SEND_CONNECT_TIMEOUT_MS / 1000, read=None)
+            with self._submit_client_lock:
+                if self._send_once_client is None and not self._closed:
+                    self._send_once_client = opened
+                    self._send_once_pool = pool
+                client = self._send_once_client
+            if client is not opened:
+                opened.close()
+                _dispose_pool(pool)
+        if self._closed or client is None:
+            msg = "ClickHouse client is closed."
+            raise RuntimeError(msg)
+        return client
 
     def _submit_driver(self) -> Any:
         with self._submit_client_lock:
@@ -296,6 +604,18 @@ class ClickHouseClient:
         if submit_client is None and not self._closed:
             # Opened outside the lock, so close() does not wait for it.
             opened = self._open_driver(self._config, autogenerate_session_id=False)
+            # One physical send per submit: the id is journaled for this
+            # attempt alone, so the driver must not send it again (#767). A
+            # submit the caller gave up on is not sent once it has connected,
+            # and connecting is bounded, so the caller can tell a late send
+            # is excluded.
+            opened.timeout = Timeout(connect=SUBMIT_CONNECT_TIMEOUT_SECONDS, read=None)
+            opened.http.pool_classes_by_scheme = {
+                "http": _GuardedHTTPConnectionPool,
+                "https": _GuardedHTTPSConnectionPool,
+            }
+            opened.http.clear()
+            opened.http = _NoReplayPool(opened.http)
             with self._submit_client_lock:
                 if self._submit_client is None and not self._closed:
                     self._submit_client = opened
@@ -333,7 +653,10 @@ class ClickHouseClient:
         elif cols is None:
             msg = "insert() requires column_names when values is a list of lists."
             raise ValueError(msg)
-        self._client.insert(table, rows, column_names=cols, database=database)
+        # No asynchronous INSERT, as TS's insert sends (#767).
+        self._client.insert(
+            table, rows, column_names=cols, database=database, settings=self._write_settings()
+        )
 
 
     def query_status(
@@ -343,8 +666,14 @@ class ClickHouseClient:
         after_time: str | None = None,
         every_replica: bool = False,
         running_only: bool = False,
+        include_before_start: bool = False,
     ) -> QueryStatus:
         """Check whether a previously-submitted query is running / finished / failed.
+
+        ``include_before_start`` counts an ExceptionBeforeStart entry (a
+        statement the server rejected) as the query's failure, for an id that
+        names one attempt alone (#767): a reused id can find an earlier
+        attempt's entry.
 
         Polls ``system.processes`` first (running?), then falls back to
         ``system.query_log`` for the terminal state. The query runs on the
@@ -363,7 +692,9 @@ class ClickHouseClient:
         def source(table: str) -> str:
             return all_replicas(fanout, table) if fanout else table
 
-        read_settings = {"skip_unavailable_shards": 0 if every_replica else 1}
+        read_settings = {
+            "skip_unavailable_shards": 0 if every_replica else 1, "default_format": "JSONStrings"
+        }
         running_sql = (
             "SELECT read_rows, read_bytes, written_rows, written_bytes, elapsed "
             f"FROM {source('system.processes')} "
@@ -387,33 +718,29 @@ class ClickHouseClient:
         # event_date prunes query_log's partitions: the entry is logged no earlier
         # than the query started. A day of slack covers a session time zone other
         # than the server's; toDate32, as a Date before 1970 wraps around.
+        types = (
+            "'QueryFinish', 'ExceptionWhileProcessing', 'ExceptionBeforeStart'"
+            if include_before_start
+            else "'QueryFinish', 'ExceptionWhileProcessing'"
+        )
+        # With ExceptionBeforeStart, every entry of the id is read: a rejected
+        # duplicate delivery logs one early, which must not hide the
+        # QueryFinish of the attempt that ran (#767).
         log_sql = (
-            "SELECT type, written_rows, written_bytes, query_duration_ms, exception "
+            "SELECT type, written_rows, written_bytes, query_duration_ms, exception, "
+            "exception_code, toString(serverUUID()) AS server, "
+            "toString(event_time_microseconds) AS event_at "
             f"FROM {source('system.query_log')} "
             f"WHERE user = currentUser() AND query_id = '{query_id}' "
-            "AND type IN ('QueryFinish', 'ExceptionWhileProcessing') "
+            f"AND type IN ({types}) "
             "AND is_initial_query = 1 "
             f"AND query_start_time >= parseDateTimeBestEffort('{after}') "
             f"AND event_date >= toDate32(parseDateTimeBestEffort('{after}')) - 1 "
-            "ORDER BY event_time DESC LIMIT 1"
+            "ORDER BY event_time DESC"
+            f"{'' if include_before_start else ' LIMIT 1'}"
         )
         log = self.query(log_sql, settings=read_settings)
-        if not log.rows:
-            return QueryStatus(status="unknown")
-
-        row = log.rows[0]
-        if str(row.get("type")) == "QueryFinish":
-            return QueryStatus(
-                status="finished",
-                written_rows=_safe_int(row.get("written_rows")),
-                written_bytes=_safe_int(row.get("written_bytes")),
-                duration_ms=_safe_int(row.get("query_duration_ms")),
-            )
-        return QueryStatus(
-            status="failed",
-            duration_ms=_safe_int(row.get("query_duration_ms")),
-            error=str(row.get("exception") or "") or None,
-        )
+        return query_log_outcome(log.rows)
 
     def list_databases(self) -> list[str]:
         result = self.query("SHOW DATABASES")
@@ -450,6 +777,523 @@ class ClickHouseClient:
         )
 
         return list_table_details(self, databases)
+
+
+class SendAdmission(Protocol):
+    """Asked by ``submit_once`` right before its request enters the transport
+    (#765). ``admit`` returning False sends nothing. ``handed_off`` is called
+    once urllib3 has written the whole request (request line, headers and
+    body) to the socket; a caller also ends its own wait when ``submit_once``
+    returns or raises without getting there. A caller that stops can
+    therefore wait until every admitted send has handed off, and know that no
+    request of it starts afterwards. An admission may also have
+    ``attach(abandon)``, called once ``admit`` returned True, with the
+    request's ``abandon``: calling it destroys the request's socket and
+    refuses any later write, so no more of the request is sent (TS's
+    ``abandon``)."""
+
+    def admit(self) -> bool: ...
+
+    def handed_off(self) -> None: ...
+
+
+#: How long an admitted request may take to connect (TCP and TLS) and write
+#: itself to its socket (TS ``SEND_CONNECT_TIMEOUT_MS``). Past it, the send
+#: fails: a connection that never completes (a stalled load balancer or TLS
+#: terminator) must not hold a backfill's interrupt (#765). The wait for the
+#: INSERT's response has no limit.
+SEND_CONNECT_TIMEOUT_MS = 10_000
+
+
+class SendConnectTimeoutError(RuntimeError):
+    """``submit_once``'s request did not connect and get written in time."""
+
+
+class SendAbandonedError(RuntimeError):
+    """``submit_once``'s request was abandoned before it was written."""
+
+
+def _connect_timeout_message() -> str:
+    return (
+        f"The request could not connect and be written within {SEND_CONNECT_TIMEOUT_MS} ms "
+        "(name lookup, TCP connect, TLS handshake and the request itself), so it was destroyed. "
+        "It may have reached the server."
+    )
+
+
+def _timed_out(error: BaseException) -> bool:
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, TimeoutError) or type(current).__name__.endswith("TimeoutError"):
+            return True
+        if any(isinstance(arg, BaseException) and _timed_out(arg) for arg in current.args):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+#: Set by a caller that must not send once it stops (#765), asked after any
+#: lazy connection setup.
+SEND_ADMISSION: ContextVar[SendAdmission | None] = ContextVar(
+    "chkit_send_admission", default=None
+)
+
+
+class SendNotAdmittedError(RuntimeError):
+    """``submit_once`` did not send: ``SEND_ADMISSION`` refused it."""
+
+
+@dataclass
+class _Send:
+    """One ``submit_once`` request: its admission, whether it was sent and
+    handed off, and what ``abandon`` needs: the connection it writes to."""
+
+    admission: SendAdmission | None
+    sent: bool = False
+    handed_off: bool = False
+    abandoned: bool = False
+    conn: Any = None
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def writing(self, conn: Any) -> None:
+        """Called by the connection right before it writes the request: from
+        then on, ``abandon`` shuts its socket down."""
+        with self.lock:
+            if self.abandoned:
+                raise SendAbandonedError(_ABANDONED_MESSAGE)
+            self.conn = conn
+
+    def abandon(self) -> None:
+        """No more of the request is written: a later write is refused, and a
+        write in progress fails on its shut-down socket."""
+        with self.lock:
+            self.abandoned = True
+            conn = self.conn
+        sock = getattr(conn, "sock", None)
+        if sock is not None:
+            # socket.socket's own shutdown: SSLSocket's would also drop its
+            # TLS state under the writing thread.
+            with contextlib.suppress(OSError):
+                socket.socket.shutdown(sock, socket.SHUT_RDWR)
+
+
+_ABANDONED_MESSAGE = (
+    "The request was abandoned before it was written: its caller stopped waiting for it. "
+    "It may have reached the server."
+)
+
+
+_CURRENT_SEND: ContextVar[_Send | None] = ContextVar("chkit_current_send", default=None)
+
+
+def _own_pool_manager(url: str) -> Any:
+    """A urllib3 pool for ``submit_once`` alone, routed as clickhouse-connect
+    routes a driver without a pool of its own: an HTTPS URL takes
+    ``HTTPS_PROXY``, then (like any URL) ``HTTP_PROXY``, each unless
+    ``NO_PROXY`` names the host; otherwise a direct pool. Its ``urlopen``
+    carries a stable hook that resolves the current request's own ``_Send``.
+    It is never shared, and ``_dispose_pool`` clears and unregisters it."""
+    parsed = urlparse(url)
+    scheme = parsed.scheme
+    host = parsed.hostname or ""
+    port = parsed.port or (443 if scheme == "https" else 80)
+    https_proxy = httputil.check_env_proxy("https", host, port) if scheme == "https" else None
+    http_proxy = None if https_proxy else httputil.check_env_proxy("http", host, port)
+    if https_proxy:
+        pool = httputil.get_pool_manager(https_proxy=https_proxy)
+    elif http_proxy:
+        pool = httputil.get_pool_manager(http_proxy=http_proxy)
+    else:
+        pool = httputil.get_pool_manager()
+    install_send_hook(pool)
+    return pool
+
+
+def _dispose_pool(pool: Any) -> None:
+    """Close a ``submit_once`` pool and drop it from clickhouse-connect's
+    process-wide registry of managers, which would keep it alive."""
+    pool.clear()
+    httputil.all_managers.pop(pool, None)
+
+
+def _body_after_handoff(kwargs: dict[str, Any], send: _Send) -> dict[str, Any]:
+    """``urlopen``'s arguments with the body as an iterable that reports the
+    handoff once urllib3 has written it (it asks for the next part only after
+    writing the last), as TS reports it on the request's ``finish``. The
+    body's Content-Length is set explicitly, so urllib3 sends it as is, not
+    chunked: some proxies reject chunked POSTs."""
+    body = kwargs.get("body")
+    data = body.encode() if isinstance(body, str) else (body or b"")
+    admission = send.admission
+
+    def chunks() -> Any:
+        if data:
+            yield data
+        send.handed_off = True
+        if admission is not None:
+            admission.handed_off()
+
+    headers = {
+        **{key: value for key, value in (kwargs.get("headers") or {}).items()
+           if key.lower() not in {"content-length", "transfer-encoding"}},
+        "Content-Length": str(len(data)),
+    }
+    return {**kwargs, "body": chunks(), "headers": headers}
+
+
+def install_send_hook(pool: Any) -> None:
+    """Make ``pool.urlopen`` ask the current request's admission (#765)."""
+    original = pool.urlopen
+
+    def urlopen(method: str, url: str, *args: Any, **kwargs: Any) -> Any:
+        send = _CURRENT_SEND.get()
+        if send is None:
+            return original(method, url, *args, **kwargs)
+        if send.sent:
+            msg = "A backfill chunk's request cannot be resent after a connection failure"
+            raise RuntimeError(msg)
+        if send.admission is not None and not send.admission.admit():
+            msg = "The request was not sent: its caller stopped"
+            raise SendNotAdmittedError(msg)
+        attach = getattr(send.admission, "attach", None)
+        if callable(attach):
+            # An admitted request can be abandoned from here on.
+            attach(send.abandon)
+        send.sent = True
+        admission = send.admission
+        if admission is not None:
+            # Handed off once urllib3 has written the body: the whole request
+            # is on the socket. A request that fails before that ends its
+            # caller's wait when submit_once returns.
+            kwargs = _body_after_handoff(kwargs, send)
+        return original(method, url, *args, **{**kwargs, "retries": False})
+
+    pool.urlopen = urlopen
+    # The connections tell the request when they write it, so that an
+    # abandon can stop them.
+    pool.pool_classes_by_scheme = {
+        "http": _SendHTTPConnectionPool,
+        "https": _SendHTTPSConnectionPool,
+    }
+
+
+class _SendConnectionMixin:
+    """A connection that registers with the current ``submit_once`` request
+    before it writes it, connected first (a plain HTTP connection otherwise
+    connects inside its first write), so an abandon finds its socket."""
+
+    def _new_conn(self) -> socket.socket:
+        """The socket, with the name resolved under the connect timeout too
+        (TS's timer covers its lookup): ``getaddrinfo`` cannot time out, so it
+        runs on a daemon thread, and the TCP connect gets what is left."""
+        conn: Any = self
+        new_conn: Callable[[], socket.socket] = super()._new_conn  # type: ignore[misc]
+        timeout = conn.timeout
+        if _CURRENT_SEND.get() is None or not isinstance(timeout, (int, float)):
+            return new_conn()
+        deadline = time.monotonic() + timeout
+        host = conn._dns_host
+        addresses = _resolve_within(host, conn.port, timeout)
+        last: BaseException | None = None
+        for address in addresses:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            conn._dns_host = address
+            conn.timeout = left
+            try:
+                return new_conn()
+            except NewConnectionError as error:
+                last = error
+            finally:
+                conn._dns_host = host
+                conn.timeout = timeout
+        if last is not None:
+            raise last
+        msg = f"Connection to {host} timed out. (connect timeout={timeout})"
+        raise ConnectTimeoutError(self, msg)
+
+    def request(self, method: str, url: str, *args: Any, **kwargs: Any) -> None:
+        send = _CURRENT_SEND.get()
+        if send is not None and send.admission is not None:
+            if getattr(self, "sock", None) is None:
+                self.connect()  # type: ignore[attr-defined]
+            send.writing(self)
+        super().request(method, url, *args, **kwargs)  # type: ignore[misc]
+
+
+def _resolve_within(host: str, port: int, timeout: float) -> list[str]:
+    """The addresses of ``host``, or a ``ConnectTimeoutError`` after
+    ``timeout`` seconds: the lookup runs on a daemon thread left behind."""
+    outcome: list[tuple[bool, object]] = []
+    done = threading.Event()
+
+    def resolve() -> None:
+        try:
+            infos = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+            outcome.append((True, [str(info[4][0]) for info in infos]))
+        except BaseException as error:
+            outcome.append((False, error))
+        done.set()
+
+    threading.Thread(target=resolve, name="chkit-send-resolve", daemon=True).start()
+    if not done.wait(timeout):
+        msg = f"Resolving {host} timed out. (connect timeout={timeout})"
+        raise ConnectTimeoutError(None, msg)
+    ok, value = outcome[0]
+    if not ok:
+        error = value if isinstance(value, BaseException) else RuntimeError(str(value))
+        raise NameResolutionError(host, None, error)  # type: ignore[arg-type]
+    return list(dict.fromkeys(value))  # type: ignore[call-overload]
+
+
+class _SendHTTPConnection(_SendConnectionMixin, HTTPConnection):
+    pass
+
+
+class _SendHTTPSConnection(_SendConnectionMixin, HTTPSConnection):
+    pass
+
+
+class _SendHTTPConnectionPool(HTTPConnectionPool):
+    ConnectionCls = _SendHTTPConnection
+
+
+class _SendHTTPSConnectionPool(HTTPSConnectionPool):
+    ConnectionCls = _SendHTTPSConnection
+
+
+class _SingleAttemptPool:
+    """Allow one driver HTTP send and disable urllib3's separate retry budget."""
+
+    def __init__(self, pool: Any) -> None:
+        self._pool = pool
+        self._sent = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._pool, name)
+
+    def request(self, *args: Any, **kwargs: Any) -> Any:
+        if self._sent:
+            msg = "A tracked migration request cannot be replayed after a connection failure"
+            raise RuntimeError(msg)
+        self._sent = True
+        return self._pool.request(*args, **{**kwargs, "retries": False})
+
+
+# QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING: a second delivery of the id, rejected
+# while the first runs. It says nothing about that first one.
+_SAME_ID_RUNNING = 216
+
+
+def query_log_outcome(rows: list[dict[str, Any]]) -> QueryStatus:
+    """The outcome query_log records for a query id, from its entries newest first (#767).
+
+    A QueryFinish, then an ExceptionWhileProcessing, outranks an
+    ExceptionBeforeStart, which a rejected duplicate delivery logs early; and
+    that rejection is never the query's own failure. Two terminal entries (a
+    redelivered request that ran twice) leave the outcome unknown: one of them
+    may have applied part of its writes.
+    """
+    # Each entry once per server: one node the cluster lists twice is not a
+    # second run.
+    entries = {
+        (row.get("server"), row.get("type"), row.get("event_at"), row.get("exception"))
+        for row in rows
+        if not _is_same_id_running(row)
+    }
+    if len(entries) > 1:
+        return QueryStatus(status="unknown")
+    finished = next((row for row in rows if str(row.get("type")) == "QueryFinish"), None)
+    if finished is not None:
+        return QueryStatus(
+            status="finished",
+            written_rows=_safe_int(finished.get("written_rows")),
+            written_bytes=_safe_int(finished.get("written_bytes")),
+            duration_ms=_safe_int(finished.get("query_duration_ms")),
+        )
+    failed = next(
+        (row for row in rows if str(row.get("type")) == "ExceptionWhileProcessing"), None
+    ) or next(
+        (
+            row
+            for row in rows
+            if str(row.get("type")) == "ExceptionBeforeStart" and not _is_same_id_running(row)
+        ),
+        None,
+    )
+    if failed is None:
+        return QueryStatus(status="unknown")
+    return QueryStatus(
+        status="failed",
+        duration_ms=_safe_int(failed.get("query_duration_ms")),
+        error=str(failed.get("exception") or "") or None,
+        before_start=str(failed.get("type")) == "ExceptionBeforeStart",
+    )
+
+
+def _is_same_id_running(row: dict[str, Any]) -> bool:
+    return _safe_int(row.get("exception_code")) == _SAME_ID_RUNNING or (
+        "QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING" in str(row.get("exception") or "")
+    )
+
+
+# The check a submit runs right before its request is sent, per thread: the
+# submit driver is shared by concurrent submits (#767). ``wrote`` is set once
+# the submit wrote a byte of a request (#800).
+_SUBMIT_SEND = threading.local()
+
+
+class SubmitNotSentError(RuntimeError):
+    """A submit that provably never sent its request (#800): its TCP connect was
+    refused, or its host name did not resolve. The server never saw the query."""
+
+
+def failed_before_sending(error: BaseException) -> bool:
+    """Whether a request failed before it wrote a byte (#800).
+
+    Only the connection's own connect failing with ECONNREFUSED, or the host
+    lookup failing, shows that: urllib3 raises them as a ``NewConnectionError``
+    while it opens the connection, before the request is written. A reset, a
+    timeout or an HTTP response may follow a request the server read. The
+    caller also checks that the submit wrote no byte (``_SUBMIT_SEND.wrote``).
+    """
+    seen: set[int] = set()
+    pending: list[BaseException | None] = [error]
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, NameResolutionError):
+            return True
+        if isinstance(current, NewConnectionError) and isinstance(
+            current.__cause__, ConnectionRefusedError
+        ):
+            return True
+        pending += [current.__cause__, current.__context__]
+    return False
+
+_T = TypeVar("_T")
+
+
+class _NoReplayPool:
+    """Never replay a sent request, for clients whose requests run concurrently.
+
+    clickhouse-connect sends a request again when the server reset the
+    connection, even with ``query_retries=0``, and urllib3 has a retry budget
+    of its own. A replayed async submit could run its statement twice under
+    one journaled id (#767). The reset is raised as an error the driver does
+    not retry, so the poller decides the outcome from the server's record.
+    """
+
+    def __init__(self, pool: Any) -> None:
+        self._pool = pool
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._pool, name)
+
+    def request(self, *args: Any, **kwargs: Any) -> Any:
+        # The submitting thread's guard, before the request starts (#767).
+        before_send = getattr(_SUBMIT_SEND, "before_send", None)
+        if before_send is not None:
+            before_send()
+        try:
+            return self._pool.request(*args, **{**kwargs, "retries": False})
+        except HTTPError as error:
+            if isinstance(error.__context__, ConnectionResetError):
+                msg = f"The connection was reset after the request was sent ({error})"
+                raise ConnectionError(msg) from error
+            raise
+
+
+# How long a submit may take to connect (#767): a submit the caller gave up
+# on is excluded from sending once it connected or failed to, so this bounds
+# how long the caller waits to know.
+SUBMIT_CONNECT_TIMEOUT_SECONDS = 10.0
+# How long writing a submit's request may take (#767): the run that gave up
+# on the submit keeps its migrate lock until the write completed or failed.
+SUBMIT_WRITE_TIMEOUT_SECONDS = 30.0
+
+
+def guard_begin_write(guard: Any) -> None:
+    """Start writing a request under the submit's guard (#767).
+
+    A guard with ``begin_write`` refuses once the run gave up on the submit,
+    and from here on holds the run's give-up until ``guard_end_write``: a
+    request is either written whole (or its write failed) before the run
+    stops, or never started.
+    """
+    begin = getattr(guard, "begin_write", None)
+    if begin is not None:
+        begin()
+
+
+def guard_end_write(guard: Any) -> None:
+    end = getattr(guard, "end_write", None)
+    if end is not None:
+        end()
+
+
+class _GuardedSend:
+    """The submitting thread's guard on writing each request.
+
+    The connection is opened first (connection setup is not sending); the
+    request's first ``send`` starts the guarded write, under the write
+    timeout, and it ends once ``request`` returned or failed.
+    """
+
+    _guard: Any = None
+    _writing: Any = None
+    _timeout_before: Any = None
+
+    def request(self, *args: Any, **kwargs: Any) -> None:
+        self._guard = getattr(_SUBMIT_SEND, "before_send", None)
+        try:
+            super().request(*args, **kwargs)  # type: ignore[misc]
+        finally:
+            self._guard = None
+            writing, self._writing = self._writing, None
+            if writing is not None:
+                if self.sock is not None:  # type: ignore[attr-defined]
+                    self.sock.settimeout(self._timeout_before)  # type: ignore[attr-defined]
+                guard_end_write(writing)
+
+    def send(self, data: Any) -> None:
+        guard, self._guard = self._guard, None
+        # Connected before any write, so a refused connect writes nothing (#800).
+        if self.sock is None:  # type: ignore[attr-defined]
+            self.connect()  # type: ignore[attr-defined]
+        if guard is not None:
+            try:
+                guard_begin_write(guard)
+            except BaseException:
+                self.close()  # type: ignore[attr-defined]
+                raise
+            self._writing = guard
+            self._timeout_before = self.sock.gettimeout()  # type: ignore[attr-defined]
+            self.sock.settimeout(SUBMIT_WRITE_TIMEOUT_SECONDS)  # type: ignore[attr-defined]
+        # Every write of a request, a proxy's CONNECT included (#800).
+        _SUBMIT_SEND.wrote = True
+        super().send(data)  # type: ignore[misc]
+
+
+class _GuardedHTTPConnection(_GuardedSend, HTTPConnection):
+    pass
+
+
+class _GuardedHTTPSConnection(_GuardedSend, HTTPSConnection):
+    pass
+
+
+class _GuardedHTTPConnectionPool(HTTPConnectionPool):
+    ConnectionCls = _GuardedHTTPConnection
+
+
+class _GuardedHTTPSConnectionPool(HTTPSConnectionPool):
+    ConnectionCls = _GuardedHTTPSConnection
 
 
 def _use_ts_timeouts(client: Any) -> None:

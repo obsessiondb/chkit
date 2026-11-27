@@ -14,6 +14,7 @@
       "@chkit/plugin-backfill",
       "@chkit/plugin-tinybird",
       "@chkit/plugin-ingest",
+      "@chkit/plugin-sync",
       "@chkit/plugin-obsessiondb"
     ]
   ],

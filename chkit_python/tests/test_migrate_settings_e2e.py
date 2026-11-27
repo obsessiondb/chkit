@@ -10,15 +10,23 @@ and a run without ``--setting`` sends none.
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
+from clickhouse_connect.driver.exceptions import (  # type: ignore[import-untyped]
+    DatabaseError,
+)
 from typer.testing import CliRunner
 
 from chkit.cli.commands.migrate_errors import MigrateError
-from chkit.cli.commands.migrate_settings import parse_setting_flags
+from chkit.cli.commands.migrate_settings import (
+    assert_insert_settings_changeable,
+    insert_settings_override_warning,
+    parse_setting_flags,
+)
 from chkit.cli.main import app
 from chkit.clickhouse.client import ClickHouseClient
 from chkit.core.model import ChxResolvedClickHouseConfig
@@ -30,6 +38,9 @@ from tests.e2e_testkit import (
     resolve_live_env,
     wait_for_table_on_every_replica,
 )
+
+# ObsessionDB users cannot create a settings profile (#430).
+_ON_OBSESSIONDB = os.environ.get("CHKIT_E2E_TARGET") == "obsessiondb"
 
 
 @pytest.fixture
@@ -75,6 +86,41 @@ def test_parse_setting_flags() -> None:
         ) as error:
             parse_setting_flags([f"max_table_size_to_drop=0,{name}=secret"])
         assert "secret" not in str(error.value)
+
+
+def test_parse_setting_flags_keeps_insert_settings_and_profile_as_written() -> None:
+    # #790, as TS settings.test.ts.
+    assert parse_setting_flags(["async_insert=TRUE,wait_for_async_insert = 0", "profile=bulk"]) == {
+        "async_insert": "TRUE",
+        "wait_for_async_insert": "0",
+        "profile": "bulk",
+    }
+
+
+def test_insert_settings_override_warning() -> None:
+    # #790, as TS settings.test.ts: nothing for chkit's defaults in any
+    # spelling, one line naming each other value as written.
+    assert insert_settings_override_warning(None) is None
+    assert insert_settings_override_warning({"max_threads": "1", "profile": "bulk"}) is None
+    assert insert_settings_override_warning(
+        {"async_insert": "FALSE", "wait_for_async_insert": "1"}
+    ) is None
+    assert insert_settings_override_warning(
+        {"async_insert": "0", "wait_for_async_insert": "true"}
+    ) is None
+    assert insert_settings_override_warning({"async_insert": "True"}) == (
+        "Warning: --setting overrides what every migration write sets by default: "
+        "async_insert=True (an INSERT is queued as an asynchronous insert, which migrate "
+        "cannot cancel)."
+    )
+    assert insert_settings_override_warning(
+        {"wait_for_async_insert": "0", "async_insert": "1"}
+    ) == (
+        "Warning: --setting overrides what every migration write sets by default: "
+        "async_insert=1 (an INSERT is queued as an asynchronous insert, which migrate "
+        "cannot cancel); wait_for_async_insert=0 (an asynchronous INSERT can be journaled "
+        "as applied before its rows are stored)."
+    )
 
 
 def test_migrate_sends_settings_with_every_statement(
@@ -176,3 +222,207 @@ def test_migrate_sends_settings_with_every_statement(
         live.execute(f"DROP TABLE IF EXISTS {fqn} SYNC", {"max_table_size_to_drop": 0})
         live.execute(f"DROP TABLE IF EXISTS {sink_fqn} SYNC")
         live.execute(f"DROP TABLE IF EXISTS {quote_ident(db)}.{quote_ident(journal_table)} SYNC")
+
+
+@pytest.mark.skipif(_ON_OBSESSIONDB, reason="ObsessionDB users have no CREATE USER grant (#430)")
+def test_insert_setting_overrides_are_sent_as_written_after_a_profile_with_one_warning(
+    live: ClickHouseClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#790, as TS migrate-settings.e2e.test.ts: async_insert and
+    wait_for_async_insert are defaults --setting may override, used as written
+    on sync and async statements with one warning, and sent after a --setting
+    profile, so the profile cannot change them."""
+    env = resolve_live_env()
+    db = live.database
+    prefix = create_prefix("insert_override_py")
+    sink = f"{prefix}sink"
+    profile = f"{prefix}fire_and_forget"
+    sink_fqn = f"{quote_ident(db)}.{quote_ident(sink)}"
+    journal_table = create_journal_table_name("insert_override_py")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CHKIT_JOURNAL_TABLE", journal_table)
+    monkeypatch.setenv("CI", "1")
+    (tmp_path / "clickhouse.config.py").write_text(
+        "from chkit import define_config\n\nconfig = define_config("
+        + json.dumps({
+            "schema": "./schema.py",
+            "outDir": "./chkit",
+            "migrationsDir": "./chkit/migrations",
+            "metaDir": "./chkit/meta",
+            "clickhouse": {
+                "url": env.clickhouse_url,
+                "username": env.clickhouse_user,
+                "password": env.clickhouse_password,
+                "database": db,
+            },
+        })
+        + ")\n"
+    )
+    migrations = tmp_path / "chkit" / "migrations"
+    migrations.mkdir(parents=True)
+
+    def write_migration(name: str, first: int) -> None:
+        (migrations / name).write_text(
+            f"INSERT INTO {sink_fqn} VALUES ({first});\n"
+            f"-- operation: load_table_data key=table:{db}.{sink} risk=caution mode=async\n"
+            f"INSERT INTO {sink_fqn} SELECT {first + 1};\n"
+        )
+
+    def migrate(*settings: str) -> Any:
+        flags = [arg for setting in settings for arg in ("--setting", setting)]
+        return CliRunner().invoke(app, ["migrate", "--apply", *flags])
+
+    def stored() -> int:
+        return int(live.query(f"SELECT toString(count()) AS n FROM {sink_fqn}").rows[0]["n"])
+
+    def sent_settings(tag: str) -> list[dict[str, Any]]:
+        live.execute("SYSTEM FLUSH LOGS")
+
+        # Settings lists a setting only when its value is not the server's default.
+        def effective(name: str) -> str:
+            return (
+                f"if(mapContains(Settings, '{name}'), Settings['{name}'], "
+                f"(SELECT default FROM system.settings WHERE name = '{name}')) AS {name}"
+            )
+
+        return list(live.query(
+            f"SELECT {effective('async_insert')}, {effective('wait_for_async_insert')} "
+            "FROM system.query_log WHERE type = 'QueryFinish' AND query_kind = 'Insert' "
+            f"AND Settings['log_comment'] = '{tag}' AND has(tables, '{db}.{sink}')"
+        ).rows)
+
+    def warnings(stderr: str) -> list[str]:
+        return [line for line in stderr.splitlines() if line.startswith("Warning: --setting")]
+
+    try:
+        # Fire-and-forget: without chkit's settings after it, an INSERT would
+        # return with its rows still buffered for 3 s.
+        live.execute(
+            f"CREATE SETTINGS PROFILE {quote_ident(profile)} SETTINGS async_insert = 1, "
+            "wait_for_async_insert = 0, async_insert_use_adaptive_busy_timeout = 0, "
+            "async_insert_busy_timeout_max_ms = 3000"
+        )
+        live.execute(f"CREATE TABLE {sink_fqn} (id UInt64) ENGINE = MergeTree ORDER BY id")
+        wait_for_table_on_every_replica(live, db, sink)
+
+        # A profile, and async_insert at chkit's default in another spelling:
+        # no warning, and both statements are stored when the run exits.
+        write_migration("20990101000000_first.sql", 1)
+        profiled = migrate(f"log_comment={prefix}a", f"profile={profile}", "async_insert=FALSE")
+        assert profiled.exit_code == 0, format_test_diagnostic("migrate with a profile", profiled)
+        assert warnings(profiled.stderr) == []
+        assert stored() == 2
+        assert sent_settings(f"{prefix}a") == [
+            {"async_insert": "0", "wait_for_async_insert": "1"},
+        ] * 2
+
+        # An override is used as written on both statements, with one warning.
+        write_migration("20990101000001_second.sql", 3)
+        overridden = migrate(f"log_comment={prefix}b", "async_insert=true")
+        assert overridden.exit_code == 0, format_test_diagnostic(
+            "migrate with an override", overridden
+        )
+        assert warnings(overridden.stderr) == [
+            "Warning: --setting overrides what every migration write sets by default: "
+            "async_insert=true (an INSERT is queued as an asynchronous insert, which migrate "
+            "cannot cancel).",
+        ]
+        assert stored() == 4
+        assert sent_settings(f"{prefix}b") == [
+            {"async_insert": "1", "wait_for_async_insert": "1"},
+        ] * 2
+    finally:
+        live.execute(f"DROP TABLE IF EXISTS {sink_fqn} SYNC")
+        live.execute(f"DROP TABLE IF EXISTS {quote_ident(db)}.{quote_ident(journal_table)} SYNC")
+        live.execute(f"DROP SETTINGS PROFILE IF EXISTS {quote_ident(profile)}")
+
+
+class _SettingsClient:
+    def __init__(self, rows: list[dict[str, object]] | Exception) -> None:
+        self._rows = rows
+
+    def query(self, _sql: str) -> object:
+        if isinstance(self._rows, Exception):
+            raise self._rows
+        return type("Result", (), {"rows": self._rows})()
+
+
+_CHANGEABLE: list[dict[str, object]] = [
+    {"name": "readonly", "value": "0", "readonly": 0},
+    {"name": "async_insert", "value": "1", "readonly": 0},
+    {"name": "wait_for_async_insert", "value": "0", "readonly": 0},
+]
+
+
+def test_insert_settings_check_passes_changeable_matching_and_readonly_users() -> None:
+    # #790, as TS settings.test.ts.
+    for rows in [
+        _CHANGEABLE,
+        [{"name": "async_insert", "value": "0", "readonly": 1},
+         {"name": "wait_for_async_insert", "value": "1", "readonly": 1}],
+        [{"name": "readonly", "value": "1", "readonly": 1},
+         {"name": "async_insert", "value": "1", "readonly": 1}],
+    ]:
+        assert_insert_settings_changeable(_SettingsClient(rows))  # type: ignore[arg-type]
+
+
+def test_insert_settings_check_stops_the_run_when_it_cannot_read() -> None:
+    # As TS: a failed read stops the run, unless the database does not exist yet.
+    with pytest.raises(DatabaseError, match="denied"):
+        assert_insert_settings_changeable(_SettingsClient(DatabaseError("denied")))  # type: ignore[arg-type]
+    missing = DatabaseError("Code: 81. DB::Exception: Database x does not exist. (UNKNOWN_DATABASE)")
+    assert_insert_settings_changeable(_SettingsClient(missing))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "durable"),
+    [("async_insert", "1", "0"), ("wait_for_async_insert", "0", "1")],
+)
+def test_insert_settings_fixed_elsewhere_are_refused(name: str, value: str, durable: str) -> None:
+    rows = [
+        {"name": name, "value": value, "readonly": 1} if row["name"] == name else row
+        for row in _CHANGEABLE
+    ]
+    with pytest.raises(MigrateError) as error:
+        assert_insert_settings_changeable(_SettingsClient(rows))  # type: ignore[arg-type]
+    assert error.value.code == "insert_settings_fixed"
+    assert str(error.value) == (
+        f"Setting {name} is fixed at {value} for this ClickHouse user, and chkit migrate "
+        f"needs {name} = {durable} so that a statement it records as applied is stored. "
+        "Nothing ran."
+    )
+
+
+def test_insert_settings_check_uses_the_value_sent() -> None:
+    # #790, as TS settings.test.ts: an override is checked as sent, and
+    # chkit's default as its journal writes send it.
+    def fixed_at(name: str, value: str) -> list[dict[str, object]]:
+        return [
+            {"name": name, "value": value, "readonly": 1} if row["name"] == name else row
+            for row in _CHANGEABLE
+        ]
+
+    assert_insert_settings_changeable(
+        _SettingsClient(fixed_at("async_insert", "0")),  # type: ignore[arg-type]
+        {"async_insert": "false"},
+    )
+    with pytest.raises(MigrateError) as error:
+        assert_insert_settings_changeable(
+            _SettingsClient(fixed_at("async_insert", "0")),  # type: ignore[arg-type]
+            {"async_insert": "1"},
+        )
+    assert error.value.code == "insert_settings_fixed"
+    assert str(error.value) == (
+        "Setting async_insert is fixed at 0 for this ClickHouse user, so "
+        "--setting async_insert=1 cannot apply. Nothing ran."
+    )
+    with pytest.raises(MigrateError) as error:
+        assert_insert_settings_changeable(
+            _SettingsClient(fixed_at("wait_for_async_insert", "0")),  # type: ignore[arg-type]
+            {"wait_for_async_insert": "false"},
+        )
+    assert str(error.value) == (
+        "Setting wait_for_async_insert is fixed at 0 for this ClickHouse user, and chkit "
+        "migrate needs wait_for_async_insert = 1 so that a statement it records as applied "
+        "is stored. Nothing ran."
+    )

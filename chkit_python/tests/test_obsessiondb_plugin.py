@@ -248,6 +248,18 @@ def test_load_selected_service_returns_none_when_missing(tmp_path: Path) -> None
     assert load_selected_service(config_path) is None
 
 
+def test_load_selected_service_returns_none_for_a_non_utf8_file(
+    tmp_path: Path,
+) -> None:
+    """TS decodes it lossily, fails JSON.parse and treats it as no selection."""
+    config_path = tmp_path / "clickhouse.config.py"
+    config_path.write_text("# config\n", encoding="utf-8")
+    service_file = tmp_path / ".chkit" / "obsessiondb.json"
+    service_file.parent.mkdir()
+    service_file.write_bytes(b"\xff\xfe")
+    assert load_selected_service(config_path) is None
+
+
 def test_load_selected_service_ignores_user_global_selection(
     isolated_home: Path, tmp_path: Path
 ) -> None:

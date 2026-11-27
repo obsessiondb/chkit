@@ -5,8 +5,8 @@
   "title": "GitHub",
   "description": "Editable GitHub ingestion with independent issue, pull-request, discussion, review, commit, and stargazer streams and raw ClickHouse tables.",
   "dependencies": [
-    "@chkit/core@^0.2.0-beta.12",
-    "@chkit/plugin-ingest@^0.2.0-beta.12",
+    "@chkit/core@^0.2.0-beta.19",
+    "@chkit/plugin-sync@^0.2.0-beta.19",
     "zod@^4.3.6"
   ],
   "files": [
@@ -85,8 +85,14 @@
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.3.1",
+      "version": "0.3.2",
       "changelog": [
+        {
+          "version": "0.3.2",
+          "changes": [
+            "Use the `@chkit/plugin-sync` package and `chkit sync` commands with chkit 0.2.0-beta.19 or later."
+          ]
+        },
         {
           "version": "0.3.1",
           "changes": [
@@ -130,8 +136,8 @@
       "logo": "https://chkit.obsessiondb.com/logos/github.svg",
       "language": "typescript",
       "license": "MIT",
-      "chkit": "^0.2.0-beta.12",
-      "ingest": "^0.2.0-beta.12",
+      "chkit": "^0.2.0-beta.19",
+      "ingest": "^0.2.0-beta.19",
       "clickhouse": ">=25.3.0",
       "root": "src/integrations/github",
       "entry": "index.ts",
@@ -321,7 +327,7 @@
       "views": [],
       "sync": {
         "description": "One installation pipeline groups eight independent resource streams per configured repository. Issues and comments use completed updated-time windows; pull requests, reviews, commits, and stargazers use fullSync. Each child stream discovers its own parent collection, independently of parent-stream execution or parent update times.",
-        "schedule": "Run bunx chkit ingest run --tag provider:github from a scheduler.",
+        "schedule": "Run bunx chkit sync run --tag provider:github from a scheduler.",
         "deletions": "Deleted records, removed stars, and commits no longer present after a force-push remain stored. Missing observations do not generate tombstones; legacy mixed issue/PR rows and nested child payloads require deliberate migration."
       }
     }

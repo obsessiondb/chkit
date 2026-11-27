@@ -40,7 +40,7 @@ def _connect_kwargs(
 
     def fake_get_client(**kwargs: Any) -> object:
         captured.update(kwargs)
-        client = SimpleNamespace(_progress_interval=None)
+        client = SimpleNamespace(_progress_interval=None, valid_transport_settings=set())
         if created is not None:
             created.append(client)
         return client
@@ -144,7 +144,7 @@ def test_a_url_with_only_a_user_keeps_the_configured_password(
 
     def fake_get_client(**kwargs: Any) -> object:
         captured.update(kwargs)
-        return SimpleNamespace(_progress_interval=None)
+        return SimpleNamespace(_progress_interval=None, valid_transport_settings=set())
 
     monkeypatch.setattr(clickhouse_connect, "get_client", fake_get_client)
     config = ChxResolvedClickHouseConfig(

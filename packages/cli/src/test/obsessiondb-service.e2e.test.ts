@@ -19,10 +19,12 @@ interface RpcRequest {
 async function runCliAsync(
 	args: string[],
 	env: Record<string, string | undefined>,
+	stdin?: string,
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
 	const proc = Bun.spawn({
 		cmd: ['bun', CLI_BIN_ENTRY, ...args],
 		cwd: WORKSPACE_ROOT,
+		stdin: stdin === undefined ? 'ignore' : new Blob([stdin]),
 		stdout: 'pipe',
 		stderr: 'pipe',
 		env: { ...process.env, ...env },
@@ -196,4 +198,49 @@ describe('@chkit/cli obsessiondb service e2e', () => {
 			await rm(fixture.dir, { recursive: true, force: true })
 		}
 	})
+
+	test('service select --json keeps the prompt off stdout', async () => {
+		const { fixture, env, servicePath, server, tempDir } =
+			await setupObsessiondbCli()
+
+		try {
+			const result = await runCliAsync(
+				['obsessiondb', 'service', 'select', '--json', '--config', fixture.configPath],
+				env,
+				'2\n',
+			)
+			expect(result.exitCode).toBe(0)
+			const messages = parseJsonEnvelopes(result.stdout).map(
+				(envelope) => (envelope as { message?: unknown }).message,
+			)
+			expect(messages).toEqual([
+				'\nAvailable services:',
+				'Acme (acme):',
+				'  1. production (running)',
+				'  2. staging (stopped)',
+				'Service selected: Acme (acme) / staging',
+			])
+			expect(result.stderr).toContain('\nSelect service [1-2]: ')
+
+			const stored = JSON.parse(await readFile(servicePath, 'utf8')) as {
+				service_slug?: string
+			}
+			expect(stored.service_slug).toBe('staging')
+		} finally {
+			server.stop()
+			await rm(tempDir, { recursive: true, force: true })
+			await rm(fixture.dir, { recursive: true, force: true })
+		}
+	})
 })
+
+/**
+ * Parses stdout as a sequence of pretty-printed JSON envelopes, each starting
+ * with `{` at the start of a line. Throws if anything else is in it.
+ */
+function parseJsonEnvelopes(stdout: string): unknown[] {
+	return stdout
+		.trim()
+		.split(/\n(?=\{)/)
+		.map((chunk) => JSON.parse(chunk) as unknown)
+}

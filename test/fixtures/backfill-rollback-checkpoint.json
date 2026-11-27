@@ -1,0 +1,11 @@
+{
+  "planId": "test-plan",
+  "target": "app.events",
+  "status": "failed",
+  "startedAt": "2026-11-18T10:00:00.000Z",
+  "updatedAt": "2026-11-18T10:05:00.000Z",
+  "progress": {
+    "c1": { "status": "pending", "queryId": "backfill-test-plan-c1", "singleSend": true },
+    "c2": { "status": "failed", "queryId": "backfill-test-plan-c2", "singleSend": true, "error": "Code: 394. QUERY_WAS_CANCELLED" }
+  }
+}

@@ -1,12 +1,16 @@
 import { describe, expect, test } from 'bun:test'
 
+import fixture from '../../../../../test/fixtures/statement-operations.json'
 import {
   collectDestructiveOperationMarkers,
   collectUnmarkedDestructiveStatements,
   extractExecutableStatements,
   extractMigrationOperationSummaries,
+  extractStatementOperations,
   findNonSelectBarriers,
+  type MigrationOperationSummary,
   isSelectStatement,
+  rejectionRunsNothing,
   migrationContainsDestructiveSql,
   scanDestructiveSqlStatements,
 } from '../../runtime/safety-markers.js'
@@ -442,5 +446,78 @@ describe('findNonSelectBarriers (#634)', () => {
       'CREATE TABLE default.a (id UInt64) ENGINE = MergeTree ORDER BY id;\n' +
       'DROP TABLE default.b;\n'
     expect(findNonSelectBarriers(extractExecutableStatements(sql), extractMigrationOperationSummaries(sql))).toEqual([])
+  })
+})
+
+// #767 (Opus review): only a SELECT or an INSERT applies nothing before its
+// pipeline starts; every other statement, and one that cannot be told, may.
+describe('rejectionRunsNothing', () => {
+  for (const statement of [
+    'SELECT 1',
+    '(SELECT 1)',
+    'WITH x AS (SELECT 1) SELECT * FROM x',
+    'INSERT INTO t SELECT * FROM s',
+    "INSERT INTO t VALUES (1, 'a')",
+    '-- a comment\ninsert into t select 1',
+    'WITH x AS (SELECT 1) INSERT INTO t SELECT * FROM x',
+  ]) {
+    test(`${JSON.stringify(statement)} runs nothing when rejected`, () => {
+      expect(rejectionRunsNothing(statement)).toBe(true)
+    })
+  }
+  for (const statement of [
+    'ALTER TABLE t UPDATE v = v + 100 WHERE 1',
+    'ALTER TABLE t DELETE WHERE 1',
+    'EXCHANGE TABLES a AND b',
+    'RENAME TABLE a TO b',
+    'OPTIMIZE TABLE t FINAL',
+    'CREATE TABLE t (x UInt8) ENGINE = MergeTree ORDER BY x',
+    'INSERT INTO t SELECT 1 PARALLEL WITH ALTER TABLE t DELETE WHERE 1',
+    'NOT VALID SQL',
+    '',
+  ]) {
+    test(`${JSON.stringify(statement)} may have applied effects`, () => {
+      expect(rejectionRunsNothing(statement)).toBe(false)
+    })
+  }
+})
+
+// test/fixtures/statement-operations.json is shared with chkit-py
+// (tests/test_safety_markers.py): both ports pair the same marker with each statement.
+describe('extractStatementOperations (#831)', () => {
+  const fields = (op: MigrationOperationSummary | undefined) =>
+    op === undefined ? null : { type: op.type, key: op.key, risk: op.risk, mode: op.mode, beforeRetry: op.beforeRetry }
+  for (const { name, sql, operations, legacy } of fixture.cases) {
+    test(name, () => {
+      const statements = extractExecutableStatements(sql)
+      expect(extractStatementOperations(sql).map(fields)).toEqual(operations)
+      expect(operations).toHaveLength(statements.length)
+      // What a release before #831 paired with each statement.
+      const ordered = extractMigrationOperationSummaries(sql)
+      expect(statements.map((_, index) => fields(ordered[index]))).toEqual(legacy === 'same' ? operations : legacy)
+    })
+  }
+
+  test('an unmarked DROP TABLE before a marked statement still needs --allow-destructive', () => {
+    const sql = [
+      'DROP TABLE app.old;',
+      '-- operation: create_table key=table:app.t risk=safe',
+      'CREATE TABLE app.t (id UInt64) ENGINE = MergeTree ORDER BY id;',
+    ].join('\n')
+    expect(scanDestructiveSqlStatements(sql)).toEqual([{ type: 'drop_table', statement: 'DROP TABLE app.old;' }])
+  })
+
+  test('a danger marker after a byte order mark still needs --allow-destructive', () => {
+    const sql = '\ufeff-- operation: drop_table key=table:app.t risk=danger\nDROP TABLE app.t;'
+    expect(collectDestructiveOperationMarkers('m.sql', sql).map((marker) => marker.type)).toEqual(['drop_table'])
+  })
+
+  test('a barrier after an unmarked statement is checked at its own statement', () => {
+    const sql = [
+      'INSERT INTO app.t VALUES (1);',
+      '-- operation: insert_barrier key=table:app.t risk=safe mode=barrier',
+      'SELECT 1 AS query_id;',
+    ].join('\n')
+    expect(findNonSelectBarriers(extractExecutableStatements(sql), extractStatementOperations(sql))).toEqual([])
   })
 })

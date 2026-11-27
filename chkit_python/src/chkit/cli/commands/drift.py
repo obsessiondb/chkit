@@ -56,6 +56,8 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         typer.Option(
             "--live",
             help="No-op, kept for existing scripts: drift always reads the live server",
+            # TS has no --live, so the help leaves it out, as TS does (#776).
+            hidden=True,
         ),
     ] = False,
     # Accepted so existing scripts keep working, and handed to on_init and
@@ -194,7 +196,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
                 )
                 continue
             typer.echo(f"- {d.code} {d.object}")
-            if d.code in ("query_mismatch", "target_mismatch", "comment_mismatch"):
+            if d.expected is not None or d.actual is not None:
                 typer.echo(f"  expected={d.expected or ''}")
                 typer.echo(f"  actual={d.actual or ''}")
     if payload_obj.table_drift:

@@ -65,6 +65,10 @@ chkit check --strict --json
 # Exit code 1 = one or more checks failed
 ```
 
+### Migration data-copy warnings
+
+`check` warns about standalone `INSERT` and data-reading/exporting `SELECT` statements in pending migration files, excluding ordinary DDL definitions, `assert_backfill` SELECTs, `SELECT throwIf(...)` guards and SELECT barriers; this warning never changes the exit status. Text prints `Warning: copy.sql, statement 1: Data copies should usually run as resumable backfill jobs; small copies in migrations are acceptable.`; JSON includes the same message without the `Warning: ` prefix in its `warnings` string array, for example `{"warnings": ["copy.sql, statement 1: Data copies …"]}`.
+
 ## Examples
 
 **Run all checks with defaults:**

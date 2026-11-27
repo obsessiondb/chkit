@@ -5,14 +5,10 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Sequence
-from typing import Any
 
 from chkit.core.canonical import canonicalize_definitions, definition_key
-from chkit.core.column_default import (
-    literal_default_fingerprint,
-    parse_column_default,
-    render_default,
-)
+from chkit.core.column_order import order_column_statements
+from chkit.core.column_shape import _column_identity, _columns_equal, _normalized_column
 from chkit.core.constraint import constraint_kind
 from chkit.core.diff_primitives import diff_by_name, diff_clauses, diff_settings
 from chkit.core.engine import is_distributed_engine
@@ -44,8 +40,6 @@ from chkit.core.object_dependencies import (
     order_by_dependencies,
 )
 from chkit.core.sql import (
-    column_codec_fingerprint,
-    column_type_fingerprint,
     key_fingerprint,
     render_alter_add_column,
     render_alter_add_constraint,
@@ -68,7 +62,10 @@ from chkit.core.sql import (
     render_dictionary_sql,
     to_create_sql,
 )
-from chkit.core.sql_lexer import js_regex, js_trim
+from chkit.core.sql_lexer import (
+    js_regex,
+    js_trim,
+)
 from chkit.core.sql_normalizer import sql_expression_fingerprint
 from chkit.core.table_settings import readonly_settings_fingerprint
 from chkit.core.text_index import text_index_fingerprint
@@ -202,35 +199,6 @@ def _requires_table_recreate(old: TableDefinition, new: TableDefinition) -> bool
     )
 
 
-def _normalized_column(column: ColumnDefinition) -> dict[str, Any]:
-    """Column shape ignoring name + renamed_from, with the type as rendered.
-
-    Compare what the DSL renders: inline ``Nullable(T)`` and ``nullable=True``
-    are equivalent, while an additional or differently placed wrapper is not.
-    A literal default compares by the SQL it renders, so the literal ``7`` and
-    the expression ``'7'`` that pull reads back are the same default (#466).
-    An expression keeps its comments, which the snapshot records as written.
-    """
-    data = column.model_dump(mode="json", by_alias=False)
-    data.pop("name", None)
-    data.pop("renamed_from", None)
-    data.pop("nullable", None)
-    # ClickHouse stores ``Decimal(10,2)`` as ``Decimal(10, 2)`` (#466).
-    data["type"] = column_type_fingerprint(column)
-    if column.default is not None:
-        parsed = parse_column_default(column.default)
-        sql = parsed.sql if parsed.kind == "expression" else render_default(column.default)
-        data["default"] = literal_default_fingerprint(sql) or sql
-    # Codecs compare in the form ClickHouse stores them, like drift (#465).
-    data["codec"] = column_codec_fingerprint(column)
-    return data
-
-
-def _column_identity(column: ColumnDefinition) -> str:
-    """JSON-stable shape of a column ignoring name + renamed_from."""
-    return json.dumps(_normalized_column(column), sort_keys=True, default=str)
-
-
 def _column_identity_after_removals(column: ColumnDefinition, remove_comment: bool) -> str:
     """A column without its codec, and without its comment.
 
@@ -241,10 +209,6 @@ def _column_identity_after_removals(column: ColumnDefinition, remove_comment: bo
     if remove_comment:
         data.pop("comment", None)
     return json.dumps(data, sort_keys=True, default=str)
-
-
-def _columns_equal(left: ColumnDefinition, right: ColumnDefinition) -> bool:
-    return _column_identity(left) == _column_identity(right)
 
 
 def _index_identity(index: SkipIndexDefinition) -> str:
@@ -834,18 +798,21 @@ def _order_operations(
     *,
     drop: DependencyGraph,
     create: DependencyGraph,
+    previous: Sequence[SchemaDefinition],
+    next_: Sequence[SchemaDefinition],
 ) -> list[MigrationOperation]:
     """Reorder the drop and create segments of a (rank, key)-sorted plan by object dependencies.
 
     Drops run dependents first, creates run dependencies first (#231). Alters
-    and create_database keep their place.
+    and create_database keep their place, except that the column statements
+    of a table are ordered by the columns they read and remove.
     """
     drops = [op for op in ordered if _rank(op) == 0]
     middle = [op for op in ordered if _rank(op) in (1, 2)]
     creates = [op for op in ordered if _rank(op) >= 3]  # noqa: PLR2004
     return [
         *order_by_dependencies(drops, lambda op: op.key, lambda key: drop.get(key, ())),
-        *middle,
+        *order_column_statements(middle, previous=previous, next_=next_, renames=()),
         *order_by_dependencies(creates, lambda op: op.key, lambda key: create.get(key, ())),
     ]
 
@@ -987,6 +954,8 @@ def plan_diff(
         operations,
         drop=invert_dependency_graph(build_dependency_graph(old_canonical)),
         create=build_dependency_graph(new_canonical),
+        previous=old_canonical,
+        next_=new_canonical,
     )
 
     counts: dict[RiskLevel, int] = {"safe": 0, "caution": 0, "danger": 0}

@@ -5,8 +5,8 @@
   "title": "Slack",
   "description": "Editable raw Slack readers with recent overlapping message ranges and checkpoints after complete history pages and replies.",
   "dependencies": [
-    "@chkit/core@^0.2.0-beta.12",
-    "@chkit/plugin-ingest@^0.2.0-beta.12",
+    "@chkit/core@^0.2.0-beta.19",
+    "@chkit/plugin-sync@^0.2.0-beta.19",
     "zod@^4.3.6"
   ],
   "devDependencies": [
@@ -80,8 +80,14 @@
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.3.1",
+      "version": "0.3.2",
       "changelog": [
+        {
+          "version": "0.3.2",
+          "changes": [
+            "Use the `@chkit/plugin-sync` package and `chkit sync` commands with chkit 0.2.0-beta.19 or later."
+          ]
+        },
         {
           "version": "0.3.1",
           "changes": [
@@ -127,8 +133,8 @@
       "logo": "https://chkit.obsessiondb.com/logos/slack.svg",
       "language": "typescript",
       "license": "MIT",
-      "chkit": "^0.2.0-beta.12",
-      "ingest": "^0.2.0-beta.12",
+      "chkit": "^0.2.0-beta.19",
+      "ingest": "^0.2.0-beta.19",
       "clickhouse": ">=25.3.0",
       "root": "src/integrations/slack",
       "entry": "index.ts",
@@ -217,7 +223,7 @@
       "views": [],
       "sync": {
         "description": "Channels and users are full reads. Messages initially select the recent 24 hours unless historyFrom is set, then overlap the completed watermark by 24 hours. Each history page and all its selected replies finish before its timestamp frontier commits. Temporary cursors and child progress are not persisted; old-root replies and old edits outside the selected range are outside normal coverage.",
-        "schedule": "Run chkit ingest run through cron, CI, or an existing scheduler, with one process per project/target. Interrupted message windows keep their fixed bounds and replay the incomplete history page; users/channels restart full reads. One history page and all its replies must fit the execution budget. Conservative message pacing remains 15 items and one request per minute.",
+        "schedule": "Run chkit sync run through cron, CI, or an existing scheduler, with one process per project/target. Interrupted message windows keep their fixed bounds and replay the incomplete history page; users/channels restart full reads. One history page and all its replies must fit the execution budget. Conservative message pacing remains 15 items and one request per minute.",
         "deletions": "Later observations replace stable row IDs, but deleted, inaccessible, or deselected records remain. The integration does not consume Slack events, propagate deletions, or maintain a complete change log."
       }
     }

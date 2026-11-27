@@ -62,15 +62,24 @@ async function exec(sql: string): Promise<void> {
   await client.command({ query: sql })
 }
 
-async function readColumnNames(): Promise<string[]> {
+// ObsessionDB exposes its replicas as the `default` cluster, and each request
+// lands on any of them. An ALTER that runs on a replica that has not applied
+// the previous DDL writes back its stale schema and loses that change (#709),
+// so the names are read on every replica: one list per replica with the table.
+let replicas = 0
+const onEveryReplica = (names: string[]) => Array.from({ length: replicas }, () => names)
+
+async function readColumnNames(): Promise<string[][]> {
   const rs = await client.query({
-    query:
-      'SELECT name FROM system.columns WHERE database = {db:String} AND table = {table:String} ORDER BY position',
+    query: `SELECT hostName() AS replica, name FROM clusterAllReplicas('default', system.columns)
+      WHERE database = {db:String} AND table = {table:String} ORDER BY replica, position`,
     query_params: { db: env.database, table: tableName },
     format: 'JSONEachRow',
   })
-  const rows = await rs.json<{ name: string }>()
-  return rows.map((row) => row.name)
+  const rows = await rs.json<{ replica: string; name: string }>()
+  return [...new Set(rows.map((row) => row.replica))].map((replica) =>
+    rows.filter((row) => row.replica === replica).map((row) => row.name),
+  )
 }
 
 // ObsessionDB DDL is eventually consistent: re-read until the expected shape
@@ -78,7 +87,7 @@ async function readColumnNames(): Promise<string[]> {
 // Each test outlives its polls, so bun's 5s default never cuts one short.
 const POLL_DEADLINE_MS = 30_000
 const POLL_TEST_TIMEOUT_MS = POLL_DEADLINE_MS + 15_000
-async function pollColumnNames(expected: string[]): Promise<string[]> {
+async function pollColumnNames(expected: string[][]): Promise<string[][]> {
   const deadline = Date.now() + POLL_DEADLINE_MS
   for (;;) {
     const names = await readColumnNames()
@@ -89,7 +98,11 @@ async function pollColumnNames(expected: string[]): Promise<string[]> {
 
 describe('identifier quoting round-trips through live ClickHouse', () => {
   beforeAll(async () => {
-    await client.ping()
+    const rs = await client.query({
+      query: "SELECT toUInt32(count(DISTINCT hostName())) AS n FROM clusterAllReplicas('default', system.one)",
+      format: 'JSONEachRow',
+    })
+    replicas = (await rs.json<{ n: number }>())[0]?.n ?? 0
   })
 
   afterAll(async () => {
@@ -100,20 +113,18 @@ describe('identifier quoting round-trips through live ClickHouse', () => {
 
   test('CREATE TABLE preserves table and column names verbatim', async () => {
     await exec(toCreateSQL(def).replace(/;$/, ''))
-    expect(await pollColumnNames(['id', evilColumn, 'a.b'])).toEqual(['id', evilColumn, 'a.b'])
+    const created = onEveryReplica(['id', evilColumn, 'a.b'])
+    expect(await pollColumnNames(created)).toEqual(created)
   }, POLL_TEST_TIMEOUT_MS)
 
   test('ADD COLUMN and DROP COLUMN target the exact names', async () => {
     const added = 'new`col\\with slash'
     await exec(renderAlterAddColumn(def, { name: added, type: 'String' }).replace(/;$/, ''))
-    expect(await pollColumnNames(['id', evilColumn, 'a.b', added])).toEqual([
-      'id',
-      evilColumn,
-      'a.b',
-      added,
-    ])
+    const withAdded = onEveryReplica(['id', evilColumn, 'a.b', added])
+    expect(await pollColumnNames(withAdded)).toEqual(withAdded)
 
     await exec(renderAlterDropColumn(def, evilColumn).replace(/;$/, ''))
-    expect(await pollColumnNames(['id', 'a.b', added])).toEqual(['id', 'a.b', added])
+    const withoutDropped = onEveryReplica(['id', 'a.b', added])
+    expect(await pollColumnNames(withoutDropped)).toEqual(withoutDropped)
   }, 2 * POLL_TEST_TIMEOUT_MS)
 })

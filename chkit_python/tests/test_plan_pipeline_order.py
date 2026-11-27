@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from chkit import table
+import pytest
+
+from chkit import SQLExpression, table
 from chkit.cli.commands.generate_plan_pipeline import (
     apply_explicit_dictionary_renames,
     apply_explicit_table_renames,
@@ -20,7 +22,13 @@ from chkit.cli.commands.generate_rename_mappings import (
     DictionaryRenameMapping,
     TableRenameMapping,
 )
-from chkit.core.model import MigrationOperation, MigrationPlan, TableDefinition, _RiskSummary
+from chkit.core.model import (
+    MigrationOperation,
+    MigrationPlan,
+    SchemaDefinition,
+    TableDefinition,
+    _RiskSummary,
+)
 from chkit.core.planner import plan_diff
 
 
@@ -117,6 +125,8 @@ def test_column_rename() -> None:
         build_explicit_column_rename_suggestions(
             PLAN, [ColumnRenameMapping("app", "t", "a", "b", "cli")]
         ),
+        previous_definitions=[],
+        next_definitions=[],
     )
     assert summary(plan) == [
         "drop_view view:app.z_top",
@@ -146,15 +156,18 @@ def test_column_rename_keeps_remove_default_right_before_its_modify_column() -> 
             columns=[{"name": "id", "type": "UInt64"}, *columns],
         )
 
-    planned = plan_diff(
-        [t([{"name": "a", "type": "String"}, {"name": "code", "type": "String", "default": "abc"}])],
-        [t([{"name": "b", "type": "String"}, {"name": "code", "type": "Int64"}])],
-    )
+    previous = [
+        t([{"name": "a", "type": "String"}, {"name": "code", "type": "String", "default": "abc"}])
+    ]
+    next_ = [t([{"name": "b", "type": "String"}, {"name": "code", "type": "Int64"}])]
+    planned = plan_diff(previous, next_)
     plan = apply_selected_rename_suggestions(
         planned,
         build_explicit_column_rename_suggestions(
             planned, [ColumnRenameMapping("app", "t", "a", "b", "cli")]
         ),
+        previous_definitions=previous,
+        next_definitions=next_,
     )
     # Keys sort by code point in both ports (#489), so the rename comes last.
     # The pinned invariant: REMOVE DEFAULT runs right before its MODIFY COLUMN.
@@ -162,4 +175,381 @@ def test_column_rename_keeps_remove_default_right_before_its_modify_column() -> 
         "ALTER TABLE app.t MODIFY COLUMN `code` REMOVE DEFAULT;",
         "ALTER TABLE app.t MODIFY COLUMN `code` Int64;",
         "ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;",
+    ]
+
+
+def test_column_rename_keeps_an_add_column_after_the_add_column_its_default_reads() -> None:
+    # #681: the rename pipeline re-sorts the alters by key; `Total` sorts
+    # before `price`, but its DEFAULT reads `price`.
+    def t(columns: list[dict[str, Any]]) -> TableDefinition:
+        return table(
+            database="app",
+            name="t",
+            engine="MergeTree()",
+            primary_key=["id"],
+            order_by=["id"],
+            columns=[{"name": "id", "type": "UInt64"}, *columns],
+        )
+
+    previous = [t([{"name": "a", "type": "String"}])]
+    next_ = [t([
+        {"name": "b", "type": "String"},
+        {"name": "price", "type": "UInt64"},
+        {"name": "Total", "type": "UInt64", "default": SQLExpression(expression="price + 1")},
+    ])]
+    planned = plan_diff(previous, next_)
+    plan = apply_selected_rename_suggestions(
+        planned,
+        build_explicit_column_rename_suggestions(
+            planned, [ColumnRenameMapping("app", "t", "a", "b", "cli")]
+        ),
+        previous_definitions=previous,
+        next_definitions=next_,
+    )
+    assert [op.sql for op in plan.operations] == [
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `price` UInt64;",
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `Total` UInt64 DEFAULT price + 1;",
+        "ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;",
+    ]
+
+
+# ---------- column statements ordered with the column renames (#746, #758) ----------
+
+
+def _t(columns: list[dict[str, Any]]) -> TableDefinition:
+    return table(
+        database="app",
+        name="t",
+        engine="MergeTree()",
+        primary_key=["id"],
+        order_by=["id"],
+        columns=[{"name": "id", "type": "UInt64"}, *columns],
+    )
+
+
+def _renamed(
+    previous: list[SchemaDefinition], next_: list[SchemaDefinition], from_: str, to: str
+) -> list[str]:
+    planned = plan_diff(previous, next_)
+    plan = apply_selected_rename_suggestions(
+        planned,
+        build_explicit_column_rename_suggestions(
+            planned, [ColumnRenameMapping("app", "t", from_, to, "cli")]
+        ),
+        previous_definitions=previous,
+        next_definitions=next_,
+    )
+    return [op.sql for op in plan.operations]
+
+
+def _expr(sql: str) -> SQLExpression:
+    return SQLExpression(expression=sql)
+
+
+def test_renames_a_column_before_the_add_columns_that_read_its_new_name() -> None:
+    assert _renamed(
+        [_t([{"name": "a", "type": "String"}])],
+        [_t([
+            {"name": "b", "type": "String"},
+            {"name": "Copy", "type": "String", "default_kind": "MATERIALIZED",
+             "default": _expr("concat(`b`, '!')")},
+            {"name": "a_len", "type": "UInt64", "default_kind": "ALIAS", "default": _expr("length(b)")},
+            {"name": "c_plain", "type": "String"},
+        ])],
+        "a",
+        "b",
+    ) == [
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `c_plain` String;",
+        "ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;",
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `Copy` String MATERIALIZED concat(`b`, '!');",
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a_len` UInt64 ALIAS length(b);",
+    ]
+
+
+def test_renames_a_column_before_the_modify_column_that_reads_its_new_name() -> None:
+    assert _renamed(
+        [_t([{"name": "a", "type": "String"}, {"name": "code", "type": "String", "default": _expr("a")}])],
+        [_t([{"name": "b", "type": "String"}, {"name": "code", "type": "String", "default": _expr("b")}])],
+        "a",
+        "b",
+    ) == [
+        "ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;",
+        "ALTER TABLE app.t MODIFY COLUMN `code` String DEFAULT b;",
+    ]
+
+
+def test_keeps_a_modify_column_after_the_add_column_it_reads_when_a_rename_moves() -> None:
+    # Reordering only the ADDs and the RENAME left the MODIFY of `d` in its
+    # slot, before the ADD of `c` it reads.
+    assert _renamed(
+        [_t([{"name": "a", "type": "UInt64"}, {"name": "d", "type": "UInt64"}])],
+        [_t([
+            {"name": "c", "type": "UInt64", "default": _expr("length('abc')")},
+            {"name": "d", "type": "UInt64", "default": _expr("c + 1")},
+            {"name": "length", "type": "UInt64"},
+        ])],
+        "a",
+        "length",
+    ) == [
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `c` UInt64 DEFAULT length('abc');",
+        "ALTER TABLE app.t MODIFY COLUMN `d` UInt64 DEFAULT c + 1;",
+        "ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `length`;",
+    ]
+
+
+def test_keeps_a_chain_of_reads_in_order_around_a_rename() -> None:
+    assert _renamed(
+        [_t([{"name": "a", "type": "UInt64"}, {"name": "d", "type": "UInt64"}])],
+        [_t([
+            {"name": "b", "type": "UInt64"},
+            {"name": "c", "type": "UInt64", "default": _expr("b + 1")},
+            {"name": "d", "type": "UInt64", "default": _expr("c + 1")},
+        ])],
+        "a",
+        "b",
+    ) == [
+        "ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;",
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `c` UInt64 DEFAULT b + 1;",
+        "ALTER TABLE app.t MODIFY COLUMN `d` UInt64 DEFAULT c + 1;",
+    ]
+
+
+def test_a_function_call_named_like_a_column_does_not_hold_back_the_rename() -> None:
+    # A function call named like the new column used to read it, which made a
+    # cycle that kept the ADD before the RENAME it reads.
+    assert _renamed(
+        [_t([{"name": "a", "type": "UInt64", "default": _expr("length('abc')")}])],
+        [_t([
+            {"name": "b", "type": "UInt64", "default": _expr("length('abc')")},
+            {"name": "length", "type": "UInt64", "default": _expr("b + 1")},
+        ])],
+        "a",
+        "b",
+    ) == [
+        "ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;",
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `length` UInt64 DEFAULT b + 1;",
+    ]
+
+
+def test_keeps_a_drop_column_after_the_modify_that_stops_reading_it() -> None:
+    assert _renamed(
+        [_t([
+            {"name": "a", "type": "UInt64"},
+            {"name": "b", "type": "UInt64", "default": _expr("c")},
+            {"name": "c", "type": "UInt64"},
+        ])],
+        [_t([
+            {"name": "b", "type": "UInt64", "default": _expr("z")},
+            {"name": "y", "type": "UInt64"},
+            {"name": "z", "type": "UInt64"},
+        ])],
+        "a",
+        "y",
+    ) == [
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `z` UInt64;",
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT z;",
+        "ALTER TABLE app.t DROP COLUMN IF EXISTS `c`;",
+        "ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `y`;",
+    ]
+
+
+def test_a_table_rename_keeps_the_planner_order_of_the_column_statements() -> None:
+    planned = plan_diff(
+        [_t([{"name": "Total", "type": "UInt64"}])],
+        [_t([
+            {"name": "Total", "type": "UInt64", "default": _expr("price + 1")},
+            {"name": "price", "type": "UInt64"},
+        ])],
+    )
+    plan = apply_explicit_table_renames(
+        planned, [TableRenameMapping("app", "old_t", "app", "t", "cli")]
+    )
+    assert [op.sql for op in plan.operations] == [
+        "RENAME TABLE IF EXISTS app.old_t TO app.t;",
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `price` UInt64;",
+        "ALTER TABLE app.t MODIFY COLUMN `Total` UInt64 DEFAULT price + 1;",
+    ]
+
+
+def test_column_rename_keeps_index_constraint_and_projection_drops_before_the_drop_column() -> None:
+    # ClickHouse rejects a DROP COLUMN while a skip index, constraint or
+    # projection still reads the column; plan_diff drops those first (#747).
+    previous = [
+        table(
+            database="app",
+            name="t",
+            engine="MergeTree()",
+            primary_key=["id"],
+            order_by=["id"],
+            columns=[
+                {"name": "id", "type": "UInt64"},
+                {"name": "a", "type": "String"},
+                {"name": "x", "type": "String"},
+            ],
+            indexes=[{"name": "idx_x", "expression": "x", "type": "bloom_filter", "granularity": 1}],
+            constraints=[{"name": "c_x", "check": "x != ''"}],
+            projections=[{"name": "p_x", "query": "SELECT x ORDER BY x"}],
+        )
+    ]
+    next_ = [
+        table(
+            database="app",
+            name="t",
+            engine="MergeTree()",
+            primary_key=["id"],
+            order_by=["id"],
+            columns=[{"name": "id", "type": "UInt64"}, {"name": "b", "type": "String"}],
+        )
+    ]
+    planned = plan_diff(previous, next_)
+    plan = apply_selected_rename_suggestions(
+        planned,
+        build_explicit_column_rename_suggestions(
+            planned, [ColumnRenameMapping("app", "t", "a", "b", "cli")]
+        ),
+        previous_definitions=previous,
+        next_definitions=next_,
+    )
+    assert [op.sql for op in plan.operations] == [
+        "ALTER TABLE app.t DROP CONSTRAINT IF EXISTS `c_x`;",
+        "ALTER TABLE app.t DROP INDEX IF EXISTS `idx_x`;",
+        "ALTER TABLE app.t DROP PROJECTION IF EXISTS `p_x`;",
+        "ALTER TABLE app.t DROP COLUMN IF EXISTS `x`;",
+        "ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;",
+    ]
+
+
+# ---------- a table TTL change stays between the columns it reads and drops (#769) ----------
+
+
+def _with_ttl(columns: list[dict[str, Any]], ttl: str) -> TableDefinition:
+    return table(
+        database="app",
+        name="t",
+        engine="MergeTree()",
+        primary_key=["id"],
+        order_by=["id"],
+        columns=[{"name": "id", "type": "UInt64"}, *columns],
+        ttl=ttl,
+    )
+
+
+def test_ttl_change_keeps_its_order_with_a_column_rename() -> None:
+    assert _renamed(
+        [_with_ttl(
+            [{"name": "a", "type": "UInt64"}, {"name": "x", "type": "DateTime"}], "x + INTERVAL 1 DAY"
+        )],
+        [_with_ttl(
+            [{"name": "b", "type": "UInt64"}, {"name": "y", "type": "DateTime"}], "y + INTERVAL 1 DAY"
+        )],
+        "a",
+        "b",
+    ) == [
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `y` DateTime;",
+        "ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;",
+        "ALTER TABLE app.t MODIFY TTL y + INTERVAL 1 DAY;",
+        "ALTER TABLE app.t DROP COLUMN IF EXISTS `x`;",
+    ]
+
+
+def test_ttl_change_keeps_its_order_with_a_table_rename() -> None:
+    planned = plan_diff(
+        [_with_ttl([{"name": "x", "type": "DateTime"}], "x + INTERVAL 1 DAY")],
+        [_with_ttl([{"name": "y", "type": "DateTime"}], "y + INTERVAL 1 DAY")],
+    )
+    plan = apply_explicit_table_renames(
+        planned, [TableRenameMapping("app", "old_t", "app", "t", "cli")]
+    )
+    assert [op.sql for op in plan.operations] == [
+        "RENAME TABLE IF EXISTS app.old_t TO app.t;",
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `y` DateTime;",
+        "ALTER TABLE app.t MODIFY TTL y + INTERVAL 1 DAY;",
+        "ALTER TABLE app.t DROP COLUMN IF EXISTS `x`;",
+    ]
+
+
+# ---------- a cycle breaker runs first in tables with a column rename (#775, #827) ----------
+
+
+def _named(name: str, columns: list[dict[str, Any]]) -> TableDefinition:
+    return table(
+        database="app",
+        name=name,
+        engine="MergeTree()",
+        primary_key=["id"],
+        order_by=["id"],
+        columns=[{"name": "id", "type": "UInt64"}, *columns],
+    )
+
+
+def _u(name: str, expression: str | None = None) -> dict[str, Any]:
+    column: dict[str, Any] = {"name": name, "type": "UInt64"}
+    if expression is not None:
+        column["default"] = _expr(expression)
+    return column
+
+
+def test_cycle_breaker_runs_first_with_a_column_rename_in_one_of_two_tables() -> None:
+    # ClickHouse rewrites every expression that reads a renamed column to its
+    # new name, so a column rename keeps the column on the repair's graph.
+    before = [_u("a"), _u("b", "c"), _u("c", "a")]
+    after = [_u("a", "b"), _u("b", "id"), _u("c", "id")]
+    assert _renamed(
+        [_named("t", [*before, _u("x")]), _named("v", before)],
+        [_named("t", [*after, _u("y")]), _named("v", after)],
+        "x",
+        "y",
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT id;",
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;",
+        "ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;",
+        "ALTER TABLE app.t RENAME COLUMN IF EXISTS `x` TO `y`;",
+        "ALTER TABLE app.v MODIFY COLUMN `b` UInt64 DEFAULT id;",
+        "ALTER TABLE app.v MODIFY COLUMN `a` UInt64 DEFAULT b;",
+        "ALTER TABLE app.v MODIFY COLUMN `c` UInt64 DEFAULT id;",
+    ]
+
+
+def test_cycle_breaker_runs_first_with_the_renamed_column_on_the_cycle() -> None:
+    # `a DEFAULT b` closes a -> b -> x (renamed y) -> a until `b` changes.
+    assert _renamed(
+        [_named("t", [_u("a"), _u("b", "x"), _u("x", "a")])],
+        [_named("t", [_u("a", "b"), _u("b", "id"), _u("y", "a")])],
+        "x",
+        "y",
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT id;",
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;",
+        "ALTER TABLE app.t RENAME COLUMN IF EXISTS `x` TO `y`;",
+    ]
+
+
+def test_a_modify_that_only_follows_the_rename_does_not_break_the_cycle() -> None:
+    # `b DEFAULT x` -> `b DEFAULT y` reads the same column, so `c` breaks the cycle.
+    assert _renamed(
+        [_named("t", [_u("a"), _u("b", "x"), _u("x", "c"), _u("c", "a")])],
+        [_named("t", [_u("a", "b"), _u("b", "y"), _u("y", "c"), _u("c", "id")])],
+        "x",
+        "y",
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;",
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;",
+        "ALTER TABLE app.t RENAME COLUMN IF EXISTS `x` TO `y`;",
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT y;",
+    ]
+
+
+# ClickHouse 26.3 rewrites a read of a column renamed to `true` as the literal
+# and one renamed to `not` as the operator, so those keep the sorted order.
+@pytest.mark.parametrize("to", ["TRUE", "Not"])
+def test_a_rename_to_a_literal_word_keeps_the_sorted_order(to: str) -> None:
+    assert _renamed(
+        [_named("t", [_u("a"), _u("b", "x"), _u("x", "a")])],
+        [_named("t", [_u("a", "b"), _u("b", "id"), _u(to, "a")])],
+        "x",
+        to,
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;",
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT id;",
+        f"ALTER TABLE app.t RENAME COLUMN IF EXISTS `x` TO `{to}`;",
     ]

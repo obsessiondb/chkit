@@ -225,4 +225,46 @@ describe('read-only commands (#402)', () => {
     },
     120_000,
   )
+
+  // #790: a user whose constraints fix async_insert = 1 stops with
+  // insert_settings_fixed before --apply writes anything, the journal schema
+  // upgrade included; plan mode does not check. chkit-py: test_read_only_user_e2e.py.
+  test.skipIf(onObsessionDB)('migrate --apply refuses a user with async_insert fixed at 1 before the journal is upgraded', async () => {
+    const executor = createLiveExecutor(env)
+    const user: User = { name: `${createPrefix('fixed_insert')}user`, password: crypto.randomUUID() }
+    const project = await createProject('fixed_insert', [admin, user])
+    const missingJournal = createJournalTableName('fixed_insert_missing')
+    try {
+      await executor.command(`CREATE USER ${quoteIdent(user.name)} IDENTIFIED BY '${user.password}' SETTINGS async_insert = 1 CONST`)
+      await executor.command(`GRANT ALL ON ${quoteIdent(env.clickhouseDatabase)}.* TO ${quoteIdent(user.name)}`)
+      await executor.command(`GRANT SELECT ON system.* TO ${quoteIdent(user.name)}`)
+      json(project.cli(admin, ['generate', '--name', 'init', '--json']), 'generate')
+      await executor.command(
+        `CREATE TABLE ${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(project.journalTable)} (name String, applied_at DateTime64(3, 'UTC'), checksum String, chkit_version String) ENGINE = ReplacingMergeTree(applied_at) ORDER BY name`,
+      )
+
+      const fixed = {
+        code: 'insert_settings_fixed',
+        message: 'Setting async_insert is fixed at 1 for this ClickHouse user, and chkit migrate needs async_insert = 0 so that a statement it records as applied is stored. Nothing ran.',
+      }
+      expect(json(project.cli(user, ['migrate', '--apply', '--json']), 'migrate --apply', 1).error).toEqual(fixed)
+      // An override at the fixed value is checked as sent, and still refused:
+      // chkit's own journal writes send its default.
+      const override = json(project.cli(user, ['migrate', '--apply', '--json', '--setting', 'async_insert=true']), 'migrate --apply --setting', 1)
+      expect(override.error).toEqual(fixed)
+      const columns = await executor.query<{ name: string }>(
+        `SELECT name FROM system.columns WHERE database = '${env.clickhouseDatabase}' AND table = '${project.journalTable}' ORDER BY position`,
+      )
+      expect(columns.map((column) => column.name)).toEqual(['name', 'applied_at', 'checksum', 'chkit_version'])
+
+      expect(json(project.cli(user, ['migrate', '--json'], missingJournal), 'migrate (plan)')).toMatchObject({ mode: 'plan' })
+    } finally {
+      await executor.command(`DROP USER IF EXISTS ${quoteIdent(user.name)}`)
+      for (const name of [project.table, project.journalTable, missingJournal]) {
+        await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(name)} SYNC`)
+      }
+      await rm(project.dir, { recursive: true, force: true })
+      await executor.close()
+    }
+  }, 120_000)
 })

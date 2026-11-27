@@ -5,13 +5,16 @@ from __future__ import annotations
 import decimal
 import re
 import threading
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
+from unittest.mock import MagicMock
 
 import pytest
 
 from chkit.cli.commands import migrate_async_apply
+from chkit.cli.commands.migrate_abandon import abandon_migration_state
 from chkit.cli.commands.migrate_async_apply import (
     AsyncApplyInput,
     apply_async_statement,
@@ -21,30 +24,42 @@ from chkit.cli.commands.migrate_async_apply import (
     upsert_operation,
 )
 from chkit.cli.commands.migrate_errors import MigrateError
-from chkit.cli.journal_store import MigrationRowState, OperationState
-from chkit.clickhouse.client import QueryResult, QueryStatus
+from chkit.cli.commands.migrate_query_intents import QueryContext
+from chkit.cli.journal_store import (
+    EveryCopyRead,
+    MigrationRowState,
+    OperationState,
+    operation_as_stored,
+)
+from chkit.clickhouse.client import QueryResult, QueryStatus, SubmitNotSentError
 
 # The server clock differs from the client clock on purpose: the query_log
 # bound must come from the server.
 SERVER_NOW_MS = 1_700_000_100_000
 SERVER_DATABASE = "analytics"
-# SERVER_NOW_MS minus the 2 s skew margin.
-SUBMISSION_BOUND = "2023-11-14T22:14:58.000Z"
 # How long the attempt an attach finds has been running.
 RUNNING_ELAPSED_MS = 30_000
-# SERVER_NOW_MS minus RUNNING_ELAPSED_MS and the 2 s skew margin.
-ATTACH_BOUND = "2023-11-14T22:14:28.000Z"
-# A retry's id is its own (#701): its polls count every query_log entry from
-# an hour before SERVER_NOW_MS, a bound that only lets query_log prune.
+# Every attempt's id is its own (#701, #767): its polls count every query_log
+# entry from an hour before SERVER_NOW_MS, a bound that only lets query_log prune.
 RETRY_BOUND = "2023-11-14T21:15:00.000Z"
 _UUID_SHAPE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+# The id an earlier release gave a statement's first attempt on SERVER_DATABASE.
+_QUERY_ID = make_deterministic_query_id(
+    SERVER_DATABASE, "_chkit_migrations", "20260101_000000_async.sql", 0
+)
+_ATTEMPT_MARKER = migrate_async_apply.ATTEMPT_RECORD_MARKER
+_PREPARED_MARKER = migrate_async_apply.PREPARED_RECORD_MARKER
 
 
-def _retry_query_id(submitted: list[tuple[str, str | None]]) -> str:
-    """The id a retry submitted under: a random one, never the statement's first id (#701)."""
+def _submitted_query_id(submitted: list[tuple[str, str | None]]) -> str:
+    """The id an attempt submitted under: a random one, never the statement's
+    earlier first id (#701, #767)."""
     assert len(submitted) == 1
     query_id = submitted[0][1] or ""
     assert _UUID_SHAPE.match(query_id), query_id
+    assert query_id != make_deterministic_query_id(
+        SERVER_DATABASE, "_chkit_migrations", "20260101_000000_async.sql", 0
+    )
     return query_id
 SERVER_TIME_QUERY = (
     "query: SELECT toUnixTimestamp64Milli(now64(3)) AS now_ms, currentDatabase() AS database"
@@ -186,6 +201,11 @@ def test_upsert_operation_sorts_by_index() -> None:
 class _FakeJournalStore:
     state: MigrationRowState | None = None
     writes: list[MigrationRowState] | None = None
+    # False is a journal without the operation_fingerprints column, which
+    # stores no fence (#767).
+    fingerprints: bool = True
+    # Whether a journal read covers every copy of the journal (#767).
+    every_copy: bool = True
 
     def __post_init__(self) -> None:
         if self.writes is None:
@@ -194,10 +214,30 @@ class _FakeJournalStore:
     def read_migration_state(self, _name: str) -> MigrationRowState | None:
         return self.state
 
+    def read_stored_operation(self, _name: str, index: int) -> OperationState | None:
+        if self.state is None:
+            return None
+        return next((op for op in self.state.operations if op.operation_index == index), None)
+
+    def stores_attempt_fences(self) -> bool:
+        return self.fingerprints
+
+    def read_operation_on_every_copy(self, name: str, index: int) -> EveryCopyRead:
+        if not self.every_copy:
+            return EveryCopyRead(covered=False, op=None)
+        return EveryCopyRead(covered=True, op=self.read_stored_operation(name, index))
+
     def write_migration_state(self, state: MigrationRowState) -> None:
         assert self.writes is not None
         self.writes.append(state)
-        self.state = state
+        # As the journal returns it.
+        self.state = state.model_copy(
+            update={
+                "operations": [
+                    operation_as_stored(op, self.fingerprints) for op in state.operations
+                ]
+            }
+        )
 
 
 class _ScriptedClient:
@@ -228,7 +268,7 @@ class _ScriptedClient:
         self.events: list[str] = []
         self._submit_raises = submit_raises
 
-    def query(self, statement: str) -> QueryResult:
+    def query(self, statement: str, settings: object = None) -> QueryResult:
         self.events.append(f"query: {statement}")
         return QueryResult(
             column_names=["now_ms", "database"],
@@ -240,7 +280,12 @@ class _ScriptedClient:
         statement: str,
         query_id: str | None = None,
         settings: dict[str, Any] | None = None,
+        *,
+        before_send: Any = None,
     ) -> str:
+        if before_send is not None:
+            before_send()
+            before_send.commit()
         self.events.append("submit")
         self.submitted.append((statement, query_id))
         self.sent_settings.append(("submit", settings))
@@ -255,6 +300,7 @@ class _ScriptedClient:
         after_time: str | None = None,
         every_replica: bool = False,
         running_only: bool = False,
+        include_before_start: bool = False,
     ) -> QueryStatus:
         self.events.append("status")
         self.status_ids.append(query_id)
@@ -286,7 +332,9 @@ def _input(
     defaults: dict[str, Any] = {
         "client": client,
         "journal_store": journal,
-        "sql": "ALTER TABLE db.t MODIFY COLUMN x UInt64",
+        # An INSERT: only a SELECT or an INSERT runs nothing when the server
+        # rejects it before it starts (#767); TS's BASE_INPUT is one too.
+        "sql": "INSERT INTO db.t SELECT 1",
         "migration_name": "20260101_000000_async.sql",
         "migration_checksum": "abc",
         "statement_index": 0,
@@ -313,58 +361,85 @@ def test_apply_async_happy_path_writes_started_then_completed() -> None:
     result = apply_async_statement(_input(client=client, journal=journal))
     assert result.kind == "completed"
     assert result.operation.status == "completed"
-    assert client.submitted == [
-        (
-            "ALTER TABLE db.t MODIFY COLUMN x UInt64",
-            make_deterministic_query_id(
-                SERVER_DATABASE, "_chkit_migrations", "20260101_000000_async.sql", 0
-            ),
-        )
-    ]
+    # A first attempt gets a random id of its own too (#767).
+    query_id = _submitted_query_id(client.submitted)
+    assert client.submitted == [("INSERT INTO db.t SELECT 1", query_id)]
     # Without migrate --setting the submission carries no settings.
     assert client.sent_settings == [("submit", None)]
     assert journal.writes is not None
     # Two writes: started + completed
     statuses = [w.operations[0].status for w in journal.writes]
-    assert statuses == ["started", "completed"]
-    # The in-flight check looks for any running query with this id; the polls
-    # after submitting only count queries started after the server-time bound.
-    assert client.after_times == [None, SUBMISSION_BOUND, SUBMISSION_BOUND]
-    # The server time is read before the in-flight check (an attach would
-    # need it) and again right before the submission.
-    assert client.events == [
-        SERVER_TIME_QUERY, "status", SERVER_TIME_QUERY, "submit", "status", "status"
-    ]
-
-
-def test_apply_async_already_running_skips_submit() -> None:
-    client = _ScriptedClient(
-        statuses=[
-            # initial in-flight check returns running
-            QueryStatus(status="running", elapsed_ms=RUNNING_ELAPSED_MS),
-            QueryStatus(status="finished", duration_ms=1000),  # next poll terminal
-        ]
+    assert statuses == ["started", "started", "completed"]
+    # The started record names the id and is fenced before the submit (#767).
+    prepared, started = journal.writes[0].operations[0], journal.writes[1].operations[0]
+    assert (prepared.query_id, prepared.last_error, prepared.attempt_fenced) == (
+        query_id, _PREPARED_MARKER, True
     )
-    journal = _FakeJournalStore()
-    apply_async_statement(_input(client=client, journal=journal))
-    # No submit call — we attached to in-flight
+    assert (started.query_id, started.last_error, started.attempt_fenced) == (
+        query_id, _ATTEMPT_MARKER, True
+    )
+    # The in-flight check looks for a running query under the id an earlier
+    # release would have used; the polls read the attempt's own id.
+    assert client.status_ids == [_QUERY_ID, query_id, query_id]
+    assert client.after_times == [None, RETRY_BOUND, RETRY_BOUND]
+    assert client.events == [SERVER_TIME_QUERY, "status", "submit", "status", "status"]
+
+
+_LEGACY_ID = "f2d1c4e0-1111-2222-3333-444455556666"
+
+
+def _running_prior(kind: str) -> MigrationRowState | None:
+    if kind == "none":
+        return None
+    op = _op("started" if kind == "started" else "failed").model_copy(
+        update={"query_id": _LEGACY_ID, "last_error": "" if kind == "started" else "boom"}
+    )
+    return _state(op, checksum="abc").model_copy(update={"name": "20260101_000000_async.sql"})
+
+
+@pytest.mark.parametrize("kind", ["none", "started", "failed"])
+def test_apply_async_running_query_without_a_fenced_record_stops_instead_of_attaching(
+    kind: str,
+) -> None:
+    """#767: only a fenced record's id names the running attempt alone. Any
+    other id an earlier release may have reused, so polls could take an
+    earlier attempt's QueryFinish for this one's outcome. The run stops and
+    writes nothing. #463: a statement an older chkit journaled is still
+    checked under its journaled id."""
+    client = _ScriptedClient(
+        statuses=[QueryStatus(status="running", written_rows=50, elapsed_ms=RUNNING_ELAPSED_MS)]
+    )
+    journal = _FakeJournalStore(state=_running_prior(kind))
+    checked_id = _QUERY_ID if kind == "none" else _LEGACY_ID
+    with pytest.raises(MigrateError) as info:
+        apply_async_statement(
+            _input(client=client, journal=journal, before_retry="TRUNCATE TABLE db.t")
+        )
+    assert info.value.code == "async_outcome_unknown"
+    reason = (
+        "but the journal records that attempt as failed, so chkit does not attach to it, and "
+        "the next chkit migrate --apply runs the statement again (after its before-retry SQL, "
+        "when it has one)"
+        if kind == "failed"
+        else "but its query id was not recorded by this chkit release for that attempt alone, "
+        "so chkit cannot tell its outcome from system.query_log once it ends"
+    )
+    assert info.value.message == (
+        "Async migration step alter_table_modify_column (statement 1 of "
+        f"20260101_000000_async.sql, query_id {checked_id}) is still running on the server, "
+        f"{reason}. Nothing was submitted and no before-retry SQL ran. Wait for it to finish, "
+        f"or stop it with KILL QUERY WHERE query_id = '{checked_id}'. A stopped statement can "
+        "still have applied effects (an ALTER's mutation keeps running, see system.mutations), "
+        "so check what it applied and reconcile before you run chkit migrate --apply again: "
+        "until its outcome is known, migrate stops with async_outcome_unknown."
+    )
+    assert client.status_ids == [checked_id]
+    assert client.after_times == [None]
+    assert client.running_only == [True]
+    assert client.every_replica == [True]
     assert client.submitted == []
-    # The poll only counts queries that started with the attached attempt.
-    assert client.after_times == [None, ATTACH_BOUND]
-    assert client.events == [SERVER_TIME_QUERY, "status", "status"]
-
-
-def test_apply_async_attach_without_elapsed_keeps_unbounded_lookup() -> None:
-    client = _ScriptedClient(
-        statuses=[
-            QueryStatus(status="running"),
-            QueryStatus(status="finished", written_rows=1, duration_ms=100),
-        ]
-    )
-    result = apply_async_statement(_input(client=client, journal=_FakeJournalStore()))
-    assert result.kind == "completed"
-    # Without its start, a bound could exclude the attempt's own entry.
-    assert client.after_times == [None, "1970-01-01 00:00:00"]
+    assert client.executed == []
+    assert journal.writes == []
 
 
 def test_apply_async_already_completed_skips_entirely() -> None:
@@ -397,36 +472,11 @@ def test_apply_async_already_completed_skips_entirely() -> None:
     assert client.submitted == []
 
 
-def test_apply_async_keeps_the_journaled_query_id() -> None:
-    # #463: an older chkit derived the id from the migration alone. A statement
-    # it journaled keeps that id, so an upgrade mid-load still finds the attempt.
-    legacy_id = "f2d1c4e0-1111-2222-3333-444455556666"
-    prior = _op("started").model_copy(update={"query_id": legacy_id})
-    client = _ScriptedClient(
-        statuses=[
-            QueryStatus(status="running", written_rows=5, elapsed_ms=RUNNING_ELAPSED_MS),
-            QueryStatus(status="finished", written_rows=12, duration_ms=12_000),
-        ]
-    )
-    journal = _FakeJournalStore(state=_state(prior, checksum="abc"))
-    result = apply_async_statement(
-        _input(
-            client=client,
-            journal=journal,
-            migration_name="m.sql",
-            before_retry="TRUNCATE TABLE db.t",
-        )
-    )
-    assert result.kind == "completed"
-    assert client.status_ids == [legacy_id, legacy_id]
-    assert client.submitted == []
-    assert client.executed == []
-    assert journal.writes is not None
-    # The attach journals the attempt started (#672), under its journaled id.
-    assert [w.operations[0].query_id for w in journal.writes] == [legacy_id, legacy_id]
-
-
-def test_apply_async_failed_status_raises_and_writes_failure() -> None:
+def test_apply_async_a_failure_while_it_runs_keeps_the_fenced_record_and_stops() -> None:
+    """#767 (rounds 3 and 4): a statement that fails while it runs can leave
+    some of its writes applied, so the run stops with async_outcome_unknown
+    and writes nothing: the fenced started record keeps the attempt's
+    identity for the operator to reconcile."""
     client = _ScriptedClient(
         statuses=[
             QueryStatus(status="unknown"),
@@ -434,12 +484,17 @@ def test_apply_async_failed_status_raises_and_writes_failure() -> None:
         ]
     )
     journal = _FakeJournalStore()
-    with pytest.raises(RuntimeError, match="ALTER failed"):
+    with pytest.raises(MigrateError) as info:
         apply_async_statement(_input(client=client, journal=journal))
-    assert journal.writes is not None
-    assert any(
-        w.operations and w.operations[0].status == "failed" for w in journal.writes
+    assert info.value.code == "async_outcome_unknown"
+    assert "failed while it ran: ALTER failed. A statement that fails while it runs" in (
+        info.value.message
     )
+    assert journal.writes is not None
+    assert [w.operations[0].status for w in journal.writes] == ["started", "started"]
+    assert journal.state is not None
+    recorded = journal.state.operations[0]
+    assert (recorded.last_error, recorded.attempt_fenced) == (_ATTEMPT_MARKER, True)
 
 
 def test_apply_async_gives_up_after_poll_error_budget_with_ts_message() -> None:
@@ -448,18 +503,18 @@ def test_apply_async_gives_up_after_poll_error_budget_with_ts_message() -> None:
         statuses=[QueryStatus(status="unknown")]
         + [poll_error] * (migrate_async_apply.MAX_TRANSIENT_POLL_ERRORS + 1)
     )
-    query_id = make_deterministic_query_id(
-        SERVER_DATABASE, "_chkit_migrations", "20260101_000000_async.sql", 0
-    )
-    with pytest.raises(RuntimeError) as raised:
+    with pytest.raises(MigrateError) as raised:
         apply_async_statement(_input(client=client, journal=_FakeJournalStore()))
-    # Same text as the TS port, byte for byte: a multiplication sign, not "x".
-    assert str(raised.value) == (
-        f"Async migration step alter_table_modify_column (query_id {query_id}): "
-        "polling failed 21\u00d7 (ClickHouse request failed: error code: 524). "
-        "The load may still be running server-side — re-run "
-        "`chkit migrate --apply` to re-attach."
-    )
+    query_id = _submitted_query_id(client.submitted)
+    # #767 (round 4): the poll budget ends without an outcome, as in TS. Same
+    # text as the TS port: a multiplication sign, not "x".
+    assert raised.value.code == "async_outcome_unknown"
+    assert (
+        f"(statement 1 of 20260101_000000_async.sql, query_id {query_id}): the journal "
+        "records an attempt of it and no replica runs it, but chkit cannot tell whether it "
+        "finished: polling failed 21\u00d7 in a row (ClickHouse request failed: error code: "
+        "524). Nothing was submitted"
+    ) in raised.value.message
 
 
 def test_apply_async_resubmit_runs_before_retry(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -475,6 +530,8 @@ def test_apply_async_resubmit_runs_before_retry(monkeypatch: pytest.MonkeyPatch)
         finished_at="2026-01-01T00:00:01.000",
         last_error="connection lost",
         fingerprint="",
+        # A failure the server recorded for the id (#767).
+        attempt_fenced=True,
     )
     state = MigrationRowState(
         name="20260101_000000_async.sql",
@@ -508,16 +565,18 @@ def test_apply_async_resubmit_runs_before_retry(monkeypatch: pytest.MonkeyPatch)
     ]
     # The check reads the recorded attempt's id; the retry submits and polls
     # under an id of its own, so every query_log entry of it counts (#701).
-    retry_id = _retry_query_id(client.submitted)
+    retry_id = _submitted_query_id(client.submitted)
     assert retry_id != prior.query_id
     assert client.status_ids == [prior.query_id, retry_id]
-    assert client.submitted == [("ALTER TABLE db.t MODIFY COLUMN x UInt64", retry_id)]
+    assert client.submitted == [("INSERT INTO db.t SELECT 1", retry_id)]
     assert client.after_times == [None, RETRY_BOUND]
     # The retry submits right after the check, without waiting on the server clock.
     assert client.events == [SERVER_TIME_QUERY, "status", "submit", "status"]
     assert journal.writes is not None
-    assert journal.writes[0].operations[0].query_id == retry_id
-    assert journal.writes[0].operations[0].last_error == _ATTEMPT_MARKER
+    assert journal.writes[0].operations[0].last_error == _PREPARED_MARKER
+    assert journal.writes[1].operations[0].query_id == retry_id
+    assert journal.writes[1].operations[0].last_error == _ATTEMPT_MARKER
+    assert journal.writes[1].operations[0].attempt_fenced is True
     # #246: only the in-flight check, which decides on the retry, must read
     # every replica; a poll skips a replica it cannot reach.
     assert client.every_replica == [True, False]
@@ -608,7 +667,11 @@ def test_apply_async_accepts_changed_checksum_without_progress(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No statement completed or started (#233): the edited file runs again."""
-    journal = _FakeJournalStore(state=_state(_op("failed", last_error="Memory limit")))
+    journal = _FakeJournalStore(
+        state=_state(
+            _op("failed", last_error="Memory limit").model_copy(update={"attempt_fenced": True})
+        )
+    )
     client = _ScriptedClient(
         statuses=[
             QueryStatus(status="unknown"),
@@ -630,33 +693,76 @@ def test_apply_async_accepts_changed_checksum_without_progress(
     assert client.executed == ["TRUNCATE TABLE t"]
     assert len(client.submitted) == 1
     assert journal.writes is not None
-    assert [w.checksum for w in journal.writes] == ["NEW", "NEW"]
+    assert [w.checksum for w in journal.writes] == ["NEW", "NEW", "NEW"]
 
 
-# The id a statement with no journal row gets on SERVER_DATABASE.
-_QUERY_ID = make_deterministic_query_id(
-    SERVER_DATABASE, "_chkit_migrations", "20260101_000000_async.sql", 0
-)
 
 
 def test_apply_async_submit_rejected_before_start_is_recorded_failed() -> None:
+    """The server logs a statement it rejects before it starts as
+    ExceptionBeforeStart under the attempt's id: its recorded failure (#767)."""
     client = _ScriptedClient(
-        statuses=[QueryStatus(status="unknown")] * 3,
+        statuses=[
+            QueryStatus(status="unknown"),
+            QueryStatus(status="unknown"),
+            QueryStatus(
+                status="failed", error="Syntax error: failed at position 1", before_start=True
+            ),
+        ],
         submit_raises=RuntimeError("Syntax error: failed at position 1"),
     )
     journal = _FakeJournalStore()
     lines: list[str] = []
     with pytest.raises(RuntimeError, match="Syntax error"):
         apply_async_statement(_input(client=client, journal=journal, log=lines.append))
-    # The query never started, so the attempt is recorded as failed (#233):
-    # an edited file can then run again without --retry.
+    # The server recorded the failure, so the attempt is recorded failed
+    # (#233): an edited file can then run again without --retry.
     assert journal.writes is not None
-    assert [w.operations[0].status for w in journal.writes] == ["started", "failed"]
-    assert journal.writes[1].operations[0].last_error == (
-        "Syntax error: failed at position 1"
-    )
+    assert [w.operations[0].status for w in journal.writes] == ["started", "started", "failed"]
+    failed = journal.writes[2].operations[0]
+    assert (failed.last_error, failed.attempt_fenced) == ("Syntax error: failed at position 1", True)
     # The submit error is the command's error; no progress line repeats it (#561).
-    assert lines == [f"  alter_table_modify_column: submitting async (query_id={_QUERY_ID})"]
+    query_id = _submitted_query_id(client.submitted)
+    assert lines == [
+        f"  alter_table_modify_column: submitting async (query_id={query_id})",
+        "  alter_table_modify_column: status unknown — still polling (elapsed 0s)",
+    ]
+
+
+@pytest.mark.parametrize("intent_fails", [False, True])
+def test_async_intent_follows_started_write_and_precedes_unchanged_submit_id(
+    intent_fails: bool,
+) -> None:
+    client = _ScriptedClient([
+        QueryStatus(status="unknown"), QueryStatus(status="finished"),
+    ])
+    journal = _FakeJournalStore()
+    tracker = MagicMock()
+    recorded_ids: list[str] = []
+
+    def record(_context: QueryContext, query_id: str) -> None:
+        assert journal.state is not None
+        assert journal.state.operations[0].status == "started"
+        assert journal.state.operations[0].query_id == query_id
+        assert client.submitted == []
+        recorded_ids.append(query_id)
+        if intent_fails:
+            raise RuntimeError("intent unavailable")
+
+    tracker.record_async.side_effect = record
+    input_ = _input(client=client, journal=journal, query_tracker=tracker)
+    if intent_fails:
+        with pytest.raises(RuntimeError, match="intent unavailable"):
+            apply_async_statement(input_)
+        assert client.submitted == []
+        assert journal.state is not None
+        assert journal.state.operations[0].status == "started"
+    else:
+        apply_async_statement(input_)
+        assert [query_id for _sql, query_id in client.submitted] == recorded_ids
+    assert len(recorded_ids) == 1
+    assert _UUID_SHAPE.match(recorded_ids[0])
+    assert recorded_ids[0] != _QUERY_ID
 
 
 @pytest.mark.parametrize("submit_fails", [True, False])
@@ -671,19 +777,17 @@ def test_apply_async_poll_budget_exhausted_names_submit_error(submit_fails: bool
         submit_raises=RuntimeError("Authentication failed") if submit_fails else None,
     )
     journal = _FakeJournalStore()
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(MigrateError) as excinfo:
         apply_async_statement(_input(client=client, journal=journal))
-    submit_tail = (
-        " The submit request failed too (Authentication failed)." if submit_fails else ""
-    )
-    assert str(excinfo.value) == (
-        f"Async migration step alter_table_modify_column (query_id {_QUERY_ID}): "
-        f"polling failed 21\u00d7 (HTTP 502: bad gateway).{submit_tail} The load may still "
-        "be running server-side — re-run `chkit migrate --apply` to re-attach."
-    )
+    submit_tail = ", and the submit request failed (Authentication failed)" if submit_fails else ""
+    assert excinfo.value.code == "async_outcome_unknown"
+    assert (
+        f"polling failed 21\u00d7 in a row (HTTP 502: bad gateway){submit_tail}. Nothing was "
+        "submitted"
+    ) in excinfo.value.message
     # The outcome is unknown, so the attempt stays started for a re-run to re-attach.
     assert journal.writes is not None
-    assert [w.operations[0].status for w in journal.writes] == ["started"]
+    assert [w.operations[0].status for w in journal.writes] == ["started", "started"]
 
 
 def test_apply_async_submit_failing_while_query_runs_logs_poller_lines_only() -> None:
@@ -706,9 +810,10 @@ def test_apply_async_submit_failing_while_query_runs_logs_poller_lines_only() ->
     assert result.kind == "completed"
     assert len(client.submitted) == 1
     assert journal.writes is not None
-    assert [w.operations[0].status for w in journal.writes] == ["started", "completed"]
+    assert [w.operations[0].status for w in journal.writes] == ["started", "started", "completed"]
     assert lines == [
-        f"  alter_table_modify_column: submitting async (query_id={_QUERY_ID})",
+        f"  alter_table_modify_column: submitting async "
+        f"(query_id={_submitted_query_id(client.submitted)})",
         "  alter_table_modify_column: written=9 rows (72 B), elapsed 0s",
         "  alter_table_modify_column: finished — written=16 rows (128 B) in 8s",
     ]
@@ -732,36 +837,219 @@ def test_apply_async_submit_failing_after_the_query_ran_waits_for_query_log() ->
     result = apply_async_statement(_input(client=client, journal=journal, log=lines.append))
     assert result.kind == "completed"
     assert journal.writes is not None
-    assert [w.operations[0].status for w in journal.writes] == ["started", "completed"]
+    assert [w.operations[0].status for w in journal.writes] == ["started", "started", "completed"]
     assert lines == [
-        f"  alter_table_modify_column: submitting async (query_id={_QUERY_ID})",
+        f"  alter_table_modify_column: submitting async "
+        f"(query_id={_submitted_query_id(client.submitted)})",
         "  alter_table_modify_column: written=9 rows (72 B), elapsed 0s",
         "  alter_table_modify_column: status unknown — still polling (elapsed 0s)",
         "  alter_table_modify_column: finished — written=16 rows (128 B) in 8s",
     ]
 
 
-def test_apply_async_submit_failing_after_the_query_ran_gives_up_after_the_poll_budget() -> None:
+_REFUSED_TEXT = "Could not connect to ClickHouse at http://127.0.0.1:1 (connection refused)"
+
+
+@pytest.mark.parametrize(
+    "submit_error",
+    ["error code: 524", _REFUSED_TEXT, None],
+    # #800: only the executor's proof counts, never an error's text.
+    ids=["524", "text-names-refused", "acknowledged"],
+)
+def test_apply_async_unknown_polls_past_the_budget_stop_with_async_outcome_unknown(
+    submit_error: str | None,
+) -> None:
+    """#767 (round 2): a lost submit response is no evidence of failure. The
+    poller keeps the fenced started record, reads every replica once more
+    through a query_log flush, then stops with async_outcome_unknown."""
     client = _ScriptedClient(
         statuses=[
             QueryStatus(status="unknown"),  # initial in-flight check
             QueryStatus(status="running", written_rows=9, written_bytes=72),
             *[QueryStatus(status="unknown") for _ in range(21)],
+            # The final check of every replica, then 5 rechecks while query_log is flushed.
+            *[QueryStatus(status="unknown") for _ in range(6)],
         ],
-        submit_raises=RuntimeError("error code: 524"),
+        submit_raises=RuntimeError(submit_error) if submit_error else None,
+        strict=True,
     )
     journal = _FakeJournalStore()
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(MigrateError) as info:
         apply_async_statement(_input(client=client, journal=journal))
-    assert str(excinfo.value) == (
-        f"Async migration step alter_table_modify_column (query_id {_QUERY_ID}): "
-        "the submit request failed (error code: 524) and polling found no outcome 21\u00d7. "
-        "A re-run of `chkit migrate --apply` attaches to the query if it still runs and runs "
-        "the statement again if not."
-    )
-    # The outcome is unknown, so the attempt stays started.
+    tail = f", and the submit request failed ({submit_error})" if submit_error else ""
+    assert info.value.code == "async_outcome_unknown"
+    assert (
+        "chkit cannot tell whether it finished: polling found it neither running nor in "
+        f"system.query_log 20\u00d7 in a row{tail}. Nothing was submitted"
+    ) in info.value.message
+    assert client.every_replica[-6:] == [True] * 6
+    assert client.executed == []
+    # The outcome is unknown, so the attempt stays started, fenced.
     assert journal.writes is not None
-    assert [w.operations[0].status for w in journal.writes] == ["started"]
+    assert [w.operations[0].status for w in journal.writes] == ["started", "started"]
+
+
+def test_a_submit_that_never_reached_the_server_goes_back_to_prepared_and_stops_at_once() -> (
+    None
+):
+    """#800: a submit the executor proved was never sent (a refused connect, a
+    failed host lookup) ran nothing. The run puts the attempt back to prepared
+    and stops before its first poll, instead of polling ~2 min."""
+    not_sent = SubmitNotSentError(_REFUSED_TEXT)
+    client = _ScriptedClient(
+        statuses=[QueryStatus(status="unknown")], submit_raises=not_sent, strict=True
+    )
+    journal = _FakeJournalStore()
+    with pytest.raises(RuntimeError) as info:
+        apply_async_statement(_input(client=client, journal=journal))
+    query_id = _submitted_query_id(client.submitted)
+    assert str(info.value) == (
+        f"Async migration step alter_table_modify_column (query_id {query_id}) was not "
+        f"sent: the submit request never reached ClickHouse ({_REFUSED_TEXT}), so it was "
+        "not submitted. Re-run `chkit migrate --apply`: an attempt that was never sent "
+        "runs again."
+    )
+    assert info.value.__cause__ is not_sent
+    # The in-flight check before the submit, and no poll.
+    assert len(client.status_ids) == 1
+    assert client.executed == []
+    assert journal.writes is not None
+    assert [w.operations[0].last_error for w in journal.writes] == [
+        _PREPARED_MARKER,
+        _ATTEMPT_MARKER,
+        _PREPARED_MARKER,
+    ]
+    assert journal.writes[2].operations[0].query_id == query_id
+
+
+class _NotSentAfterRunningClient(_ScriptedClient):
+    """Its submit fails as never sent once a poll found the query running."""
+
+    def __init__(self, statuses: list[QueryStatus | BaseException]) -> None:
+        super().__init__(statuses, strict=True)
+        self._running_seen = threading.Event()
+
+    def submit(self, statement: str, query_id: str | None = None, *args: Any, **kwargs: Any) -> str:
+        self.submitted.append((statement, query_id))
+        self._running_seen.wait(timeout=5)
+        raise SubmitNotSentError(_REFUSED_TEXT)
+
+    def query_status(self, query_id: str, **kwargs: Any) -> QueryStatus:
+        if self._running_seen.is_set():
+            # The polls after it see the submit's error.
+            _wait_for_submit(0)
+        status = super().query_status(query_id, **kwargs)
+        if status.status == "running":
+            self._running_seen.set()
+        return status
+
+
+def test_a_not_sent_submit_error_after_a_poll_found_the_query_running_keeps_the_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#800: a poll that found the query proves it was sent, whatever the
+    submit's error claims: the run keeps the started record."""
+    # The submit fails only after the first polls, so the sleeps do not wait for it.
+    monkeypatch.setattr(
+        "chkit.cli.commands.migrate_async_apply.time.sleep", lambda _seconds: None
+    )
+    client = _NotSentAfterRunningClient(
+        statuses=[
+            QueryStatus(status="unknown"),
+            QueryStatus(status="running", written_rows=9, written_bytes=72),
+            *[QueryStatus(status="unknown") for _ in range(20 + 6)],
+        ]
+    )
+    journal = _FakeJournalStore()
+    with pytest.raises(MigrateError) as info:
+        apply_async_statement(_input(client=client, journal=journal))
+    assert info.value.code == "async_outcome_unknown"
+    assert f"20\u00d7 in a row, and the submit request failed ({_REFUSED_TEXT})" in (
+        info.value.message
+    )
+    assert journal.writes is not None
+    assert [w.operations[0].last_error for w in journal.writes] == [
+        _PREPARED_MARKER,
+        _ATTEMPT_MARKER,
+    ]
+
+
+class _NotSentAtFinalCheckClient(_ScriptedClient):
+    """Its submit fails as never sent while the final check of every replica runs."""
+
+    def __init__(self, statuses: list[QueryStatus | BaseException]) -> None:
+        super().__init__(statuses, strict=True)
+        self._final_check = threading.Event()
+
+    def submit(self, statement: str, query_id: str | None = None, *args: Any, **kwargs: Any) -> str:
+        self.submitted.append((statement, query_id))
+        self._final_check.wait(timeout=5)
+        raise SubmitNotSentError(_REFUSED_TEXT)
+
+    def query_status(self, query_id: str, **kwargs: Any) -> QueryStatus:
+        if self._final_check.is_set():
+            _wait_for_submit(0)
+        status = super().query_status(query_id, **kwargs)
+        # The check before the submit reads every replica too.
+        if kwargs.get("every_replica") and self.submitted:
+            self._final_check.set()
+            _wait_for_submit(0)
+        return status
+
+
+def test_a_not_sent_submit_error_after_the_final_check_found_the_query_keeps_the_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#800: the final check of every replica that finds the query counts too."""
+    monkeypatch.setattr(
+        "chkit.cli.commands.migrate_async_apply.time.sleep", lambda _seconds: None
+    )
+    client = _NotSentAtFinalCheckClient(
+        statuses=[
+            QueryStatus(status="unknown"),
+            *[QueryStatus(status="unknown") for _ in range(20)],
+            QueryStatus(status="running", written_rows=9, written_bytes=72),
+            QueryStatus(status="finished", written_rows=16, written_bytes=128, duration_ms=8000),
+        ]
+    )
+    journal = _FakeJournalStore()
+    result = apply_async_statement(_input(client=client, journal=journal))
+    assert result.kind == "completed"
+    assert journal.writes is not None
+    assert [w.operations[0].last_error for w in journal.writes] == [
+        _PREPARED_MARKER,
+        _ATTEMPT_MARKER,
+        "",
+    ]
+
+
+def test_apply_async_an_attach_that_polls_unknown_past_the_budget_stops() -> None:
+    """#767 (round 2): an attached attempt that disappears from
+    system.processes without a query_log entry stops the run too, instead of
+    polling forever."""
+    attempt = _op("started").model_copy(
+        update={
+            "query_id": "0b7f9a52-3c1d-4e8f-9a6b-2d4c8e1f7a30",
+            "last_error": _ATTEMPT_MARKER,
+            "fingerprint": "v1:load",
+            "attempt_fenced": True,
+        }
+    )
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="running", written_rows=1),
+            *[QueryStatus(status="unknown") for _ in range(21 + 6)],
+        ],
+        strict=True,
+    )
+    journal = _FakeJournalStore(state=_state(attempt, checksum="abc"))
+    with pytest.raises(MigrateError) as info:
+        apply_async_statement(
+            _input(client=client, journal=journal, migration_name="m.sql", fingerprint="v1:load")
+        )
+    assert info.value.code == "async_outcome_unknown"
+    assert client.submitted == []
+    assert journal.writes == []
 
 
 class _OpenSubmitClient(_ScriptedClient):
@@ -784,6 +1072,8 @@ class _OpenSubmitClient(_ScriptedClient):
         statement: str,
         query_id: str | None = None,
         settings: dict[str, Any] | None = None,
+        *,
+        before_send: Any = None,
     ) -> str:
         self.submitted.append((statement, query_id))
         ended = self.query_ended.wait(timeout=5)
@@ -800,6 +1090,7 @@ class _OpenSubmitClient(_ScriptedClient):
         after_time: str | None = None,
         every_replica: bool = False,
         running_only: bool = False,
+        include_before_start: bool = False,
     ) -> QueryStatus:
         status = super().query_status(
             query_id,
@@ -816,7 +1107,8 @@ def test_apply_async_polls_while_the_submit_request_is_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The submit does not block: progress lines come while the load runs, as
-    in TS, and the step returns once the request has closed."""
+    in TS, and the step returns once the outcome is journaled, without waiting
+    for the request to close (#767, round 6)."""
     monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _: None)
     client = _OpenSubmitClient(
         statuses=[
@@ -831,35 +1123,34 @@ def test_apply_async_polls_while_the_submit_request_is_open(
     result = apply_async_statement(_input(client=client, journal=journal, log=lines.append))
     assert result.kind == "completed"
     assert lines == [
-        f"  alter_table_modify_column: submitting async (query_id={_QUERY_ID})",
+        f"  alter_table_modify_column: submitting async "
+        f"(query_id={_submitted_query_id(client.submitted)})",
         "  alter_table_modify_column: written=4 rows (32 B), elapsed 0s",
         "  alter_table_modify_column: written=9 rows (72 B), elapsed 0s",
         "  alter_table_modify_column: finished — written=25 rows (200 B) in 25s",
     ]
-    assert client.events == [
+    assert [event for event in client.events if event != "submit returned"] == [
         SERVER_TIME_QUERY,
         "status",
-        SERVER_TIME_QUERY,
         "status",
         "status",
         "status",
-        "submit returned",
     ]
     assert journal.writes is not None
-    assert [w.operations[0].status for w in journal.writes] == ["started", "completed"]
+    assert [w.operations[0].status for w in journal.writes] == ["started", "started", "completed"]
 
 
 def test_apply_async_query_failing_while_the_submit_is_open_raises_the_polled_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The failure comes from query_log, as in TS; the submit error that
-    follows it is waited for, not raised."""
+    follows it is not waited for (#767, round 6), nor raised."""
     monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _: None)
     client = _OpenSubmitClient(
         statuses=[
             QueryStatus(status="unknown"),
             QueryStatus(status="running", written_rows=4, written_bytes=32),
-            QueryStatus(status="failed", error="Memory limit exceeded"),
+            QueryStatus(status="failed", error="Memory limit exceeded", before_start=True),
         ],
         submit_raises=RuntimeError("Memory limit exceeded (from the submit)"),
     )
@@ -868,11 +1159,10 @@ def test_apply_async_query_failing_while_the_submit_is_open_raises_the_polled_er
         apply_async_statement(_input(client=client, journal=journal))
     assert str(excinfo.value) == (
         "Async migration step alter_table_modify_column failed "
-        f"(query_id {_QUERY_ID}): Memory limit exceeded"
+        f"(query_id {_submitted_query_id(client.submitted)}): Memory limit exceeded"
     )
-    assert client.events[-1] == "submit returned"
     assert journal.writes is not None
-    assert [w.operations[0].status for w in journal.writes] == ["started", "failed"]
+    assert [w.operations[0].status for w in journal.writes] == ["started", "started", "failed"]
 
 
 def test_apply_async_interrupt_does_not_wait_for_the_open_submit(
@@ -914,8 +1204,11 @@ class _QueryLogClient(_ScriptedClient):
 
     def __init__(self, phases: list[str], *, attached_start: int, earlier_start: int,
                  submit_raises: BaseException | None = None,
-                 earlier_query_id: str | None = None) -> None:
+                 earlier_query_id: str | None = None,
+                 rejected: str | None = None) -> None:
         super().__init__(statuses=[], submit_raises=submit_raises)
+        # The ExceptionBeforeStart of a rejected submission under its own id.
+        self._rejected = rejected
         self._phases = phases
         self._attached_start = attached_start
         self._earlier_start = earlier_start
@@ -929,11 +1222,18 @@ class _QueryLogClient(_ScriptedClient):
         after_time: str | None = None,
         every_replica: bool = False,
         running_only: bool = False,
+        include_before_start: bool = False,
     ) -> QueryStatus:
         self.after_times.append(after_time)
         self.status_ids.append(query_id)
         self.every_replica.append(every_replica)
         phase = self._phases.pop(0) if self._phases else "flushed"
+        if (
+            self._rejected is not None
+            and not running_only
+            and query_id != self._earlier_query_id
+        ):
+            return QueryStatus(status="failed", error=self._rejected, before_start=True)
         if phase == "running":
             return QueryStatus(status="running", written_rows=1, elapsed_ms=RUNNING_ELAPSED_MS)
         after_sec = _whole_seconds(after_time)
@@ -945,32 +1245,14 @@ class _QueryLogClient(_ScriptedClient):
         return QueryStatus(status="unknown")
 
 
-def test_apply_async_attach_ignores_earlier_attempt_query_log_entries() -> None:
-    """query_log flush gap: an earlier attempt's QueryFinish must not count."""
-    attached_start = (SERVER_NOW_MS - RUNNING_ELAPSED_MS) // 1000
-    client = _QueryLogClient(
-        ["running", "running", "flush gap", "flush gap", "flushed"],
-        attached_start=attached_start,
-        earlier_start=attached_start - 3_600,
-    )
-    journal = _FakeJournalStore(
-        state=_state(_op("started"), checksum="abc").model_copy(
-            update={"name": "20260101_000000_async.sql"}
-        )
-    )
-    with pytest.raises(RuntimeError, match="Memory limit exceeded"):
-        apply_async_statement(_input(client=client, journal=journal))
-    assert client.after_times[1:] == [ATTACH_BOUND] * 4
-    assert journal.writes is not None
-    # Recorded as the attached attempt's failure, never as completed.
-    assert [w.operations[0].status for w in journal.writes] == ["started", "failed"]
-
-
 @pytest.mark.parametrize("prior", ["none", "abandoned"])
 def test_apply_async_new_submission_ignores_earlier_attempt(
     prior: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """After --abandon, query_log still holds the earlier attempt's QueryFinish."""
+    """query_log still holds an earlier attempt's QueryFinish under the id an
+    earlier release gave a statement's first attempt, also after --abandon
+    (#233). A submission that fails before it starts must not inherit it: its
+    id is its own (#767)."""
     # The earlier attempt started one 5 s poll interval before this submission.
     stale_start = (SERVER_NOW_MS - 5_000) // 1000
     earlier = _op("failed").model_copy(update={"query_id": _QUERY_ID})
@@ -980,6 +1262,7 @@ def test_apply_async_new_submission_ignores_earlier_attempt(
         earlier_start=stale_start,
         submit_raises=RuntimeError("Unknown table expression identifier 'default.src_typo'"),
         earlier_query_id=_QUERY_ID,
+        rejected="Unknown table expression identifier 'default.src_typo'",
     )
     _advance_clock(monkeypatch, client)
     state = (
@@ -995,19 +1278,16 @@ def test_apply_async_new_submission_ignores_earlier_attempt(
     journal = _FakeJournalStore(state=state)
     with pytest.raises(RuntimeError, match="src_typo"):
         apply_async_statement(_input(client=client, journal=journal))
-    # A first attempt's polls are bounded by its start; a retry polls an id of its own (#701).
-    poll = (
-        (_QUERY_ID, SUBMISSION_BOUND)
-        if prior == "none"
-        else (client.status_ids[1], RETRY_BOUND)
-    )
+    # Every attempt polls an id of its own (#701, #767).
+    poll = (client.status_ids[1], RETRY_BOUND)
     assert _UUID_SHAPE.match(poll[0])
+    assert poll[0] != _QUERY_ID
     assert all(
         call == poll for call in zip(client.status_ids[1:], client.after_times[1:], strict=True)
     )
     assert journal.writes is not None
     # Recorded as a failed attempt, never as completed.
-    assert [w.operations[0].status for w in journal.writes] == ["started", "failed"]
+    assert [w.operations[0].status for w in journal.writes] == ["started", "started", "failed"]
 
 
 # #556: TS prints the same lines for the same statuses (async-apply.test.ts
@@ -1146,24 +1426,11 @@ def test_apply_async_refuses_to_attach_to_a_running_attempt_of_other_sql() -> No
         apply_async_statement(_input(client=client, journal=journal, fingerprint="v1:new"))
     assert (
         "an earlier attempt with different SQL is still running on the server. Wait for "
-        f"it to finish or run KILL QUERY WHERE query_id = '{_QUERY_ID}'"
+        f"it to finish, or stop it with KILL QUERY WHERE query_id = '{_QUERY_ID}'. A stopped "
+        "statement can still have applied effects"
     ) in str(info.value)
     assert client.submitted == []
     assert journal.writes == []
-
-
-def test_apply_async_attach_records_the_fingerprint_of_the_attempt() -> None:
-    client = _ScriptedClient(
-        statuses=[
-            QueryStatus(status="running", elapsed_ms=RUNNING_ELAPSED_MS),
-            QueryStatus(status="finished", written_rows=1, duration_ms=1000),
-        ]
-    )
-    journal = _FakeJournalStore(state=_abandoned_running(""))
-    apply_async_statement(_input(client=client, journal=journal, fingerprint="v1:new"))
-    assert journal.writes
-    last = journal.writes[-1].operations[0]
-    assert (last.status, last.fingerprint) == ("completed", "")
 
 
 def test_apply_async_refuses_to_skip_a_completed_record_of_other_sql() -> None:
@@ -1182,16 +1449,56 @@ def test_apply_async_refuses_to_skip_a_completed_record_of_other_sql() -> None:
 # A run can leave a step started after its load finished on the server: the
 # poll budget ran out after a failed submit, or the run was killed before it
 # journaled the outcome. A re-run reads that attempt's outcome before it
-# compensates and resubmits. Same cases as async-apply.test.ts.
+# compensates and resubmits, when the record is fenced (#767). Same cases as
+# async-apply.test.ts.
 
 _RERUN_QUERY_ID = make_deterministic_query_id(SERVER_DATABASE, "_chkit_migrations", "m.sql", 0)
-_MARKER = migrate_async_apply.STARTED_RECORD_MARKER
-_ATTEMPT_MARKER = migrate_async_apply.ATTEMPT_RECORD_MARKER
-# The statement's first id is bounded by the record's start minus the skew margin.
-_RECORD_BOUND = "2026-05-26T09:59:58.000Z"
+# The random id this release recorded for an attempt before its submit.
+_OWN_ID = "0b7f9a52-3c1d-4e8f-9a6b-2d4c8e1f7a30"
+# The record's start minus the hour that only lets query_log prune.
+_RECORD_BOUND = "2026-05-26T09:00:00.000Z"
 # A started attempt without a query_log entry: the check, then 5 rechecks
 # while query_log is flushed (#701).
 _NO_ENTRY_CHECKS = [QueryStatus(status="unknown") for _ in range(6)]
+_NO_ENTRY_REASON = (
+    "system.query_log has no entry for its query id (query logging is off for the user, "
+    "query_log is flushed later than chkit waits, or the run stopped before it submitted "
+    "the statement)"
+)
+_UNVERIFIED_REASON = (
+    "the journal records it as failed, but not from a rejection the server recorded before "
+    "it started (an earlier chkit release recorded it, it failed while it ran, or a run lost "
+    "its submit response), so some of its writes may have been applied"
+)
+_WHILE_PROCESSING_REASON = (
+    "the server reports it failed while it ran (ExceptionWhileProcessing), and a statement "
+    "that fails while it runs can leave some of its writes applied (parts of an INSERT ... "
+    "SELECT, a DDL that ran on some hosts)"
+)
+_STALE_PREPARED_REASON = (
+    "the journal records it as prepared, not sent, but chkit cannot read every copy of the "
+    "journal to rule out a newer record of it (one that may have been sent)"
+)
+_UNFENCED_REASON = (
+    "an earlier chkit release recorded it, or the journal could not store the record's "
+    "fence (it has no operation_fingerprints column), so its query id may name earlier "
+    "attempts too"
+)
+
+
+def _outcome_unknown(query_id: str, reason: str) -> str:
+    return (
+        "Async migration step alter_table_modify_column (statement 1 of m.sql, query_id "
+        f"{query_id}): the journal records an attempt of it and no replica runs it, but "
+        f"chkit cannot tell whether it finished: {reason}. Nothing was submitted and no "
+        "before-retry SQL ran. Check in ClickHouse whether the statement's rows reached its "
+        "target. Then record what you found: chkit migrate --apply --mark-applied m.sql if "
+        "it applied all of its writes, or chkit migrate --apply --mark-not-applied m.sql once "
+        "nothing it applied is left (its before-retry SQL runs before it is submitted again), "
+        "and apply again; the statements recorded as completed do not run again. Or reconcile "
+        "every statement of m.sql that already ran and run chkit migrate --apply --abandon "
+        "m.sql, which runs the migration again from statement 1."
+    )
 
 
 def _iso_ms(ms: int) -> str:
@@ -1201,9 +1508,11 @@ def _iso_ms(ms: int) -> str:
 def _started_record(**overrides: Any) -> MigrationRowState:
     op = _op("started").model_copy(
         update={
+            "query_id": _OWN_ID,
             "started_at": "2026-05-26 10:00:00.000",
             "fingerprint": "v1:load",
             "last_error": _ATTEMPT_MARKER,
+            "attempt_fenced": True,
             **overrides,
         }
     )
@@ -1241,18 +1550,20 @@ def test_rerun_after_the_poll_budget_finds_the_finished_attempt() -> None:
         statuses=[
             QueryStatus(status="unknown"),
             QueryStatus(status="running", written_rows=9, written_bytes=72),
-            *[QueryStatus(status="unknown") for _ in range(21)],
+            *[QueryStatus(status="unknown") for _ in range(21 + 6)],
         ],
         submit_raises=RuntimeError("error code: 524"),
-        strict=True,
     )
-    with pytest.raises(RuntimeError, match="polling found no outcome 21\u00d7"):
+    with pytest.raises(MigrateError, match=r"cannot tell whether it finished"):
         apply_async_statement(_rerun_input(first, journal))
     assert journal.writes is not None
-    assert [w.operations[0].status for w in journal.writes] == ["started"]
-    # The attempt's start is recorded on the server clock, as this release's record.
-    assert journal.writes[0].operations[0].started_at == _iso_ms(SERVER_NOW_MS)
-    assert journal.writes[0].operations[0].last_error == _ATTEMPT_MARKER
+    assert [w.operations[0].status for w in journal.writes] == ["started", "started"]
+    query_id = _submitted_query_id(first.submitted)
+    started = journal.writes[1].operations[0]
+    # The attempt's start is recorded on the server clock, fenced, under the submitted id.
+    assert (started.query_id, started.started_at, started.last_error, started.attempt_fenced) == (
+        query_id, _iso_ms(SERVER_NOW_MS), _ATTEMPT_MARKER, True
+    )
 
     # Run 2: the load is no longer running and query_log has its QueryFinish.
     second = _ScriptedClient(
@@ -1267,19 +1578,20 @@ def test_rerun_after_the_poll_budget_finds_the_finished_attempt() -> None:
     assert result.kind == "completed"
     assert second.executed == []
     assert second.submitted == []
-    # One read of every replica, bounded by the start run 1 recorded.
-    assert second.after_times == [SUBMISSION_BOUND]
+    # One read of every replica, of the recorded id only.
+    assert second.status_ids == [query_id]
+    assert second.after_times == [RETRY_BOUND]
     assert second.every_replica == [True]
     assert second.running_only == [False]
-    assert [w.operations[0].status for w in journal.writes] == ["started", "completed"]
-    completed = journal.writes[1].operations[0]
-    assert completed.query_id == _RERUN_QUERY_ID
-    assert completed.started_at == _iso_ms(SERVER_NOW_MS)
-    assert completed.fingerprint == "v1:load"
+    assert [w.operations[0].status for w in journal.writes] == ["started", "started", "completed"]
+    completed = journal.writes[2].operations[0]
+    assert (completed.query_id, completed.started_at, completed.fingerprint) == (
+        query_id, _iso_ms(SERVER_NOW_MS), "v1:load"
+    )
     assert completed.last_error == ""
     assert lines == [
-        f"  alter_table_modify_column: previous attempt of query_id={_RERUN_QUERY_ID} "
-        "finished on the server — written=16 rows (128 B) in 8s, recording it as completed"
+        f"  alter_table_modify_column: previous attempt of query_id={query_id} finished on "
+        "the server — written=16 rows (128 B) in 8s, recording it as completed"
     ]
 
 
@@ -1289,7 +1601,9 @@ def test_rerun_of_a_started_attempt_that_failed_on_the_server_resubmits(
     client = _ScriptedClient(
         statuses=[
             QueryStatus(
-                status="failed", error="Code: 241. DB::Exception: Memory limit exceeded\nstack"
+                status="failed",
+                error="Code: 60. DB::Exception: Unknown table\nstack",
+                before_start=True,
             ),
             QueryStatus(status="finished", written_rows=16, duration_ms=8000),
         ],
@@ -1301,69 +1615,101 @@ def test_rerun_of_a_started_attempt_that_failed_on_the_server_resubmits(
     result = apply_async_statement(_rerun_input(client, journal, log=lines.append))
 
     assert result.kind == "completed"
-    assert client.after_times[0] == _RECORD_BOUND
-    assert client.running_only[0] is False
+    assert (client.status_ids[0], client.after_times[0], client.every_replica[0]) == (
+        _OWN_ID, _RECORD_BOUND, True
+    )
     assert client.executed == ["TRUNCATE TABLE db.t"]
-    retry_id = _retry_query_id(client.submitted)
-    assert retry_id != _RERUN_QUERY_ID
+    retry_id = _submitted_query_id(client.submitted)
+    assert retry_id != _OWN_ID
     assert lines[0] == (
-        f"  alter_table_modify_column: previous attempt of query_id={_RERUN_QUERY_ID} is no "
-        "longer running (status=failed: Code: 241. DB::Exception: Memory limit exceeded) — "
-        f"running before-retry then resubmitting as query_id={retry_id}"
+        f"  alter_table_modify_column: previous attempt of query_id={_OWN_ID} is no longer "
+        "running (status=failed: Code: 60. DB::Exception: Unknown table) — running "
+        f"before-retry then resubmitting as query_id={retry_id}"
     )
     assert journal.writes is not None
-    assert [w.operations[0].status for w in journal.writes] == ["failed", "started", "completed"]
-    assert journal.writes[0].operations[0].last_error == (
-        "Code: 241. DB::Exception: Memory limit exceeded\nstack"
+    assert [w.operations[0].status for w in journal.writes] == ["failed", "started", "started", "completed"]
+    failed = journal.writes[0].operations[0]
+    assert (failed.last_error, failed.attempt_fenced) == (
+        "Code: 60. DB::Exception: Unknown table\nstack", True
     )
 
 
-def test_rerun_of_a_started_attempt_without_a_query_log_entry_resubmits(
+def test_rerun_of_a_started_attempt_that_failed_while_it_ran_stops(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """#767 (round 3): a failure while it ran (ExceptionWhileProcessing) can
+    leave rows applied, so it stops the re-run like a missing outcome."""
     client = _ScriptedClient(
         statuses=[
-            *_NO_ENTRY_CHECKS,
-            QueryStatus(status="finished", written_rows=16, duration_ms=8000),
-        ],
-        strict=True,
-    )
-    sleeps = _advance_clock(monkeypatch, client)
-    journal = _FakeJournalStore(state=_started_record())
-    apply_async_statement(_rerun_input(client, journal))
-
-    # Checked once, then 5 times 2 s apart while query_log is flushed (#701).
-    assert client.status_ids[:6] == [_RERUN_QUERY_ID] * 6
-    assert client.after_times[:6] == [_RECORD_BOUND] * 6
-    assert client.every_replica[:6] == [True] * 6
-    assert sleeps[:5] == [2.0] * 5
-    assert client.executed == ["TRUNCATE TABLE db.t"]
-    assert len(client.submitted) == 1
-    assert journal.writes is not None
-    assert [w.operations[0].status for w in journal.writes] == ["failed", "started", "completed"]
-    assert journal.writes[0].operations[0].last_error == (
-        "no longer running and no outcome in system.query_log; retried"
-    )
-
-
-def test_rerun_without_before_retry_keeps_the_attempt_started_until_resubmitted(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    client = _ScriptedClient(
-        statuses=[
-            *_NO_ENTRY_CHECKS,
-            QueryStatus(status="finished", written_rows=16, duration_ms=8000),
+            QueryStatus(status="failed", error="Code: 241. DB::Exception: Memory limit exceeded")
         ],
         strict=True,
     )
     _advance_clock(monkeypatch, client)
     journal = _FakeJournalStore(state=_started_record())
-    apply_async_statement(_rerun_input(client, journal, before_retry=None))
+    with pytest.raises(MigrateError) as info:
+        apply_async_statement(_rerun_input(client, journal))
+    assert info.value.code == "async_outcome_unknown"
+    assert info.value.message == _outcome_unknown(_OWN_ID, _WHILE_PROCESSING_REASON)
+    assert client.executed == []
+    assert client.submitted == []
+    assert journal.writes == []
 
-    # Nothing is compensated, so a re-run may still find its QueryFinish.
+
+@pytest.mark.parametrize("before_retry", ["TRUNCATE TABLE db.t", None], ids=["with", "without"])
+def test_a_fenced_started_attempt_without_a_query_log_entry_stops(
+    before_retry: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#767 (Codex review of #770, 770b): an attempt with no evidence may have
+    finished (query logging off, a late flush) or never been submitted. Its
+    record stays as it is, and nothing is compensated or submitted, with or
+    without before-retry SQL."""
+    client = _ScriptedClient(statuses=list(_NO_ENTRY_CHECKS), strict=True)
+    sleeps = _advance_clock(monkeypatch, client)
+    journal = _FakeJournalStore(state=_started_record())
+    with pytest.raises(MigrateError) as info:
+        apply_async_statement(_rerun_input(client, journal, before_retry=before_retry))
+    assert info.value.code == "async_outcome_unknown"
+    assert info.value.message == _outcome_unknown(_OWN_ID, _NO_ENTRY_REASON)
+    # Checked once, then 5 times 2 s apart while query_log is flushed (#701).
+    assert client.status_ids == [_OWN_ID] * 6
+    assert client.after_times == [_RECORD_BOUND] * 6
+    assert client.every_replica == [True] * 6
+    assert sleeps == [2.0] * 5
+    assert client.executed == []
+    assert client.submitted == []
+    assert journal.writes == []
+
+
+def test_after_async_outcome_unknown_an_abandon_lets_the_next_apply_submit_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stop leaves a way out: abandon, then apply, which compensates and submits once."""
+    journal = _FakeJournalStore(state=_started_record())
+    with pytest.raises(MigrateError) as info:
+        apply_async_statement(
+            _rerun_input(_ScriptedClient(statuses=list(_NO_ENTRY_CHECKS), strict=True), journal)
+        )
+    assert info.value.code == "async_outcome_unknown"
+    assert journal.state is not None
+    abandon_migration_state(journal.state, journal_store=journal)
+
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="unknown"),
+            QueryStatus(status="finished", written_rows=16, duration_ms=8000),
+        ],
+        strict=True,
+    )
+    _advance_clock(monkeypatch, client)
+    result = apply_async_statement(_rerun_input(client, journal))
+
+    assert result.kind == "completed"
+    assert (client.status_ids[0], client.after_times[0], client.running_only[0]) == (
+        _OWN_ID, None, True
+    )
+    assert client.executed == ["TRUNCATE TABLE db.t"]
     assert len(client.submitted) == 1
-    assert journal.writes is not None
-    assert [w.operations[0].status for w in journal.writes] == ["started", "completed"]
 
 
 class _LostResponseClient(_ScriptedClient):
@@ -1383,17 +1729,17 @@ def test_rerun_after_a_compensation_that_stopped_the_run_compensates_again(
     journals the new attempt, must leave a record whose QueryFinish a re-run
     does not take for the outcome: the rows it loaded were truncated."""
     journal = _FakeJournalStore(state=_started_record())
-    # Run 1: no outcome yet; the TRUNCATE ran, but its response was lost.
-    first = _LostResponseClient(statuses=list(_NO_ENTRY_CHECKS), strict=True)
+    # Run 1: the attempt failed; the TRUNCATE ran, but its response was lost.
+    first = _LostResponseClient(
+        statuses=[QueryStatus(status="failed", error="boom", before_start=True)], strict=True
+    )
     with pytest.raises(RuntimeError, match="socket hang up"):
         apply_async_statement(_rerun_input(first, journal))
     assert journal.writes is not None
     assert [w.operations[0].status for w in journal.writes] == ["failed"]
-    assert journal.writes[0].operations[0].last_error == (
-        "no longer running and no outcome in system.query_log; retried"
-    )
 
-    # Run 2: the first attempt's QueryFinish is in query_log by now.
+    # Run 2: query_log would now answer for the id, but a failed record is
+    # checked in system.processes only.
     second = _ScriptedClient(
         statuses=[
             QueryStatus(status="finished", written_rows=16, duration_ms=8000),
@@ -1411,22 +1757,38 @@ def test_rerun_after_a_compensation_that_stopped_the_run_compensates_again(
 
 
 class _KilledBeforeSubmitJournal(_FakeJournalStore):
-    """The run stops after it journaled its attempt, before the submit leaves."""
+    """The run is killed after it journaled its attempt, before the submit leaves.
 
-    def read_migration_state(self, name: str) -> MigrationRowState | None:
+    A kill runs no cleanup: once it hit, nothing the process would still write
+    reaches the journal. (Ctrl-C does run cleanup, and puts the record back to
+    prepared, #767.)
+    """
+
+    killed = False
+
+    def read_stored_operation(self, name: str, index: int) -> OperationState | None:
         assert self.writes is not None
-        if any(op.status == "started" for w in self.writes for op in w.operations):
+        # Once the attempt moved to "may have been sent", before its submit.
+        if any(
+            op.last_error == _ATTEMPT_MARKER for w in self.writes for op in w.operations
+        ):
+            self.killed = True
             msg = "killed"
             raise KeyboardInterrupt(msg)
-        return super().read_migration_state(name)
+        return super().read_stored_operation(name, index)
+
+    def write_migration_state(self, state: MigrationRowState) -> None:
+        if self.killed:
+            return
+        super().write_migration_state(state)
 
 
-class _RunOneFinishClient(_ScriptedClient):
-    """query_log holds run 1's QueryFinish only; other ids answer as scripted."""
+class _FinishedIdClient(_ScriptedClient):
+    """query_log holds a QueryFinish of one id only; other ids answer as scripted."""
 
-    def __init__(self, run_one_query_id: str, statuses: list[QueryStatus | BaseException]) -> None:
+    def __init__(self, finished_query_id: str, statuses: list[QueryStatus | BaseException]) -> None:
         super().__init__(statuses=statuses, strict=True)
-        self._run_one_query_id = run_one_query_id
+        self._finished_query_id = finished_query_id
 
     def query_status(
         self,
@@ -1435,75 +1797,47 @@ class _RunOneFinishClient(_ScriptedClient):
         after_time: str | None = None,
         every_replica: bool = False,
         running_only: bool = False,
+        include_before_start: bool = False,
     ) -> QueryStatus:
         answer = super().query_status(
             query_id, after_time=after_time, every_replica=every_replica, running_only=running_only
         )
-        if query_id == self._run_one_query_id:
+        if query_id == self._finished_query_id:
             return QueryStatus(status="finished", written_rows=0, duration_ms=10)
         return answer
 
 
-def test_a_rerun_never_takes_an_earlier_attempts_finish_for_the_retry_that_followed(
+def test_a_rerun_never_takes_an_earlier_attempts_finish_for_an_attempt_killed_before_submit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#701: every attempt submits under an id of its own, so a re-run never
-    takes an earlier attempt's QueryFinish for a later attempt's outcome,
-    however close together they started."""
-    run_one_start = _iso_ms(SERVER_NOW_MS - 1_000)
-    journal = _KilledBeforeSubmitJournal(state=_started_record(started_at=run_one_start))
-    # Run 2, a second after run 1's attempt: no outcome yet; it compensates,
-    # journals its own attempt, and stops before its submit leaves.
-    second = _ScriptedClient(statuses=list(_NO_ENTRY_CHECKS), strict=True)
-    _advance_clock(monkeypatch, second)
+    """#701, #767: every attempt submits under an id of its own, so a re-run
+    never takes an earlier attempt's QueryFinish for a later attempt's
+    outcome. A run killed between its journal write and its submit leaves an
+    attempt without evidence, which stops the re-run."""
+    journal = _KilledBeforeSubmitJournal()
+    first = _ScriptedClient(statuses=[QueryStatus(status="unknown")], strict=True)
     with pytest.raises(KeyboardInterrupt, match="killed"):
-        apply_async_statement(_rerun_input(second, journal))
+        apply_async_statement(_rerun_input(first, journal))
+    assert first.submitted == []
     assert journal.writes is not None
-    assert [w.operations[0].status for w in journal.writes] == ["failed", "started"]
-    run_two_query_id = journal.writes[1].operations[0].query_id
-    assert _UUID_SHAPE.match(run_two_query_id)
-    assert journal.writes[1].operations[0].started_at == _iso_ms(SERVER_NOW_MS)
-    assert journal.writes[1].operations[0].last_error == _ATTEMPT_MARKER
+    assert [w.operations[0].status for w in journal.writes] == ["started", "started"]
+    recorded_id = journal.writes[0].operations[0].query_id
+    assert _UUID_SHAPE.match(recorded_id)
+    assert recorded_id != _RERUN_QUERY_ID
 
-    assert second.submitted == []
-    # Run 3: query_log now holds run 1's QueryFinish, and nothing of run 2's attempt.
-    rerun_journal = _FakeJournalStore(state=journal.state)
-    third = _RunOneFinishClient(
-        _RERUN_QUERY_ID,
-        [*_NO_ENTRY_CHECKS, QueryStatus(status="finished", written_rows=16, duration_ms=8000)],
-    )
-    _advance_clock(monkeypatch, third)
-    result = apply_async_statement(_rerun_input(third, rerun_journal))
-
-    # Every check reads run 2's id, from an hour before its recorded start.
-    assert third.status_ids[:6] == [run_two_query_id] * 6
-    assert third.after_times[:6] == [_iso_ms(SERVER_NOW_MS - 3_600_000) + "Z"] * 6
-    assert third.executed == ["TRUNCATE TABLE db.t"]
-    assert _retry_query_id(third.submitted) not in (_RERUN_QUERY_ID, run_two_query_id)
-    assert result.operation.status == "completed"
-
-
-class _RunAFinishClient(_ScriptedClient):
-    """query_log holds run A's QueryFinish; other ids answer as scripted."""
-
-    def __init__(self, run_a_query_id: str, statuses: list[QueryStatus | BaseException]) -> None:
-        super().__init__(statuses=statuses, strict=True)
-        self._run_a_query_id = run_a_query_id
-
-    def query_status(
-        self,
-        query_id: str,
-        *,
-        after_time: str | None = None,
-        every_replica: bool = False,
-        running_only: bool = False,
-    ) -> QueryStatus:
-        answer = super().query_status(
-            query_id, after_time=after_time, every_replica=every_replica, running_only=running_only
-        )
-        if query_id == self._run_a_query_id:
-            return QueryStatus(status="finished", written_rows=16, duration_ms=8000)
-        return answer
+    # query_log holds an earlier attempt's QueryFinish under the statement's
+    # earlier first id, and nothing of the recorded id.
+    rerun = _FinishedIdClient(_RERUN_QUERY_ID, list(_NO_ENTRY_CHECKS))
+    _advance_clock(monkeypatch, rerun)
+    plain = _FakeJournalStore(state=journal.state)
+    with pytest.raises(MigrateError) as info:
+        apply_async_statement(_rerun_input(rerun, plain))
+    assert info.value.code == "async_outcome_unknown"
+    assert info.value.message == _outcome_unknown(recorded_id, _NO_ENTRY_REASON)
+    assert set(rerun.status_ids) == {recorded_id}
+    assert rerun.executed == []
+    assert rerun.submitted == []
+    assert plain.writes == []
 
 
 def test_a_rerun_never_takes_a_concurrent_runs_finished_retry_for_its_own_attempt(
@@ -1526,11 +1860,10 @@ def test_a_rerun_never_takes_a_concurrent_runs_finished_retry_for_its_own_attemp
     )
     _advance_clock(monkeypatch, run_a)
     apply_async_statement(_rerun_input(run_a, _FakeJournalStore(state=failed)))
-    run_a_query_id = _retry_query_id(run_a.submitted)
+    run_a_query_id = _submitted_query_id(run_a.submitted)
     # Run B read the same failed record.
     journal_b = _KilledBeforeSubmitJournal(state=failed)
     run_b = _ScriptedClient(statuses=[QueryStatus(status="unknown")], strict=True)
-    _advance_clock(monkeypatch, run_b)
     with pytest.raises(KeyboardInterrupt, match="killed"):
         apply_async_statement(_rerun_input(run_b, journal_b))
     assert run_b.executed == ["TRUNCATE TABLE db.t"]
@@ -1540,48 +1873,72 @@ def test_a_rerun_never_takes_a_concurrent_runs_finished_retry_for_its_own_attemp
     assert run_b_record.query_id != run_a_query_id
 
     # The re-run: query_log has run A's QueryFinish only.
-    rerun = _RunAFinishClient(
-        run_a_query_id,
-        [*_NO_ENTRY_CHECKS, QueryStatus(status="finished", written_rows=16, duration_ms=8000)],
-    )
+    rerun = _FinishedIdClient(run_a_query_id, list(_NO_ENTRY_CHECKS))
     _advance_clock(monkeypatch, rerun)
-    apply_async_statement(_rerun_input(rerun, _FakeJournalStore(state=journal_b.state)))
+    with pytest.raises(MigrateError) as info:
+        apply_async_statement(_rerun_input(rerun, _FakeJournalStore(state=journal_b.state)))
+    assert info.value.code == "async_outcome_unknown"
+    assert rerun.executed == []
+    assert rerun.submitted == []
 
-    assert rerun.executed == ["TRUNCATE TABLE db.t"]
-    assert len(rerun.submitted) == 1
+
+# #767: a started record without the fence names an id that earlier attempts
+# may share (a first attempt's deterministic id, or an id an older release
+# reused for every attempt), or one an older release may have compensated
+# without recording it (a #701 retry id, then a TRUNCATE by a release that did
+# not know the marker). Its QueryFinish is never taken for the outcome, and
+# before-retry SQL cannot tell whether the rows landed either, so the run stops
+# before it writes or runs anything.
+_LEGACY_RECORDS: list[tuple[str, dict[str, Any], bool]] = [
+    (
+        "before-672",
+        {"query_id": _RERUN_QUERY_ID, "last_error": "", "fingerprint": "", "attempt_fenced": False},
+        True,
+    ),
+    ("672", {"query_id": _RERUN_QUERY_ID, "last_error": "submitted; a retry reads its outcome from system.query_log", "attempt_fenced": False}, True),
+    ("701-first-id", {"query_id": _RERUN_QUERY_ID, "attempt_fenced": False}, True),
+    ("701-retry-id", {"attempt_fenced": False}, True),
+    ("no-fingerprint-column", {"fingerprint": ""}, False),
+]
 
 
-def test_a_started_record_of_the_release_before_701_keeps_the_bounded_check(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("before_retry", ["TRUNCATE TABLE db.t", None], ids=["with", "without"])
+@pytest.mark.parametrize(
+    ("overrides", "fingerprints"),
+    [(overrides, fingerprints) for _label, overrides, fingerprints in _LEGACY_RECORDS],
+    ids=[label for label, _overrides, _fingerprints in _LEGACY_RECORDS],
+)
+def test_an_unfenced_started_record_is_checked_in_processes_only_and_stops(
+    overrides: dict[str, Any], fingerprints: bool, before_retry: str | None
 ) -> None:
-    """A record of the release before #701 names an id that earlier attempts
-    may share, so it keeps that release's check: bounded by its recorded
-    start, and a missing entry is not waited for. The retry gets an id of its own."""
+    # query_log would answer QueryFinish for any id.
     client = _ScriptedClient(
-        statuses=[
-            QueryStatus(status="unknown"),
-            QueryStatus(status="finished", written_rows=16, duration_ms=8000),
-        ],
-        strict=True,
+        statuses=[QueryStatus(status="finished", written_rows=16, duration_ms=8000)], strict=True
     )
-    _advance_clock(monkeypatch, client)
-    journal = _FakeJournalStore(state=_started_record(last_error=_MARKER))
-    apply_async_statement(_rerun_input(client, journal))
-
-    retry_id = _retry_query_id(client.submitted)
-    assert client.status_ids == [_RERUN_QUERY_ID, retry_id]
-    assert client.after_times == [_RECORD_BOUND, RETRY_BOUND]
-    assert client.executed == ["TRUNCATE TABLE db.t"]
+    journal = _FakeJournalStore(fingerprints=fingerprints)
+    journal.write_migration_state(_started_record(**overrides))
     assert journal.writes is not None
-    assert [w.operations[0].status for w in journal.writes] == ["failed", "started", "completed"]
-    assert journal.writes[1].operations[0].last_error == _ATTEMPT_MARKER
+    journal.writes.clear()
+    assert journal.state is not None
+    query_id = journal.state.operations[0].query_id
+    with pytest.raises(MigrateError) as info:
+        apply_async_statement(_rerun_input(client, journal, before_retry=before_retry))
+    assert info.value.code == "async_outcome_unknown"
+    assert info.value.message == _outcome_unknown(query_id, _UNFENCED_REASON)
+    assert client.status_ids == [query_id]
+    assert client.after_times == [None]
+    assert client.running_only == [True]
+    assert client.every_replica == [True]
+    assert client.executed == []
+    assert client.submitted == []
+    assert journal.writes == []
 
 
 def test_a_started_attempt_that_a_recheck_finds_running_is_attached_to(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A started attempt of this release that is running by a recheck (its
-    submit reached the server late) is attached to, not resubmitted."""
+    """A fenced attempt that a recheck finds running (its submit reached the
+    server late) is attached to, not resubmitted."""
     client = _ScriptedClient(
         statuses=[
             QueryStatus(status="unknown"),
@@ -1591,53 +1948,25 @@ def test_a_started_attempt_that_a_recheck_finds_running_is_attached_to(
         strict=True,
     )
     _advance_clock(monkeypatch, client)
-    journal = _FakeJournalStore(state=_started_record())
-    result = apply_async_statement(_rerun_input(client, journal))
-
+    result = apply_async_statement(
+        _rerun_input(client, _FakeJournalStore(state=_started_record()))
+    )
     assert result.kind == "completed"
     assert client.executed == []
     assert client.submitted == []
 
 
-@pytest.mark.parametrize("before_retry", ["TRUNCATE TABLE db.t", None], ids=["with", "without"])
-def test_an_older_releases_started_record_is_checked_in_processes_only(
-    before_retry: str | None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An older release's started record has a client-clock start, and a retry
-    by that release may have run before-retry SQL without journaling the
-    attempt failed first, so its QueryFinish is not the statement's outcome."""
-    client = _ScriptedClient(
-        statuses=[
-            QueryStatus(status="finished", written_rows=16, duration_ms=8000),
-            QueryStatus(status="finished", written_rows=16, duration_ms=8000),
-        ],
-        strict=True,
-    )
-    _advance_clock(monkeypatch, client)
-    journal = _FakeJournalStore(state=_started_record(last_error=""))
-    apply_async_statement(_rerun_input(client, journal, before_retry=before_retry))
-
-    assert client.after_times[0] is None
-    assert client.running_only[0] is True
-    assert client.executed == ([] if before_retry is None else [before_retry])
-    assert len(client.submitted) == 1
-
-
-# Only a started attempt of this statement's SQL can have finished unseen: a
-# failed one has its outcome, a sync record never ran under this id, and an
-# attempt of other SQL that finished did not run this statement.
 @pytest.mark.parametrize(
     "overrides",
     [
         {"status": "failed", "finished_at": "2026-05-26 10:05:00.000", "last_error": "boom"},
         {"query_id": ""},
-        {"fingerprint": "v1:other"},
     ],
-    ids=["failed attempt", "started record without query id", "started attempt of other SQL"],
+    ids=["failed-attempt", "no-query-id"],
 )
-def test_rerun_reads_system_processes_only_for(
-    overrides: dict[str, Any], monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_rerun_reads_system_processes_only_for(overrides: dict[str, Any]) -> None:
+    """Only a started attempt can have finished unseen: a failed one has its
+    outcome, and a sync record never ran under this id."""
     client = _ScriptedClient(
         statuses=[
             QueryStatus(status="finished", written_rows=16, duration_ms=8000),
@@ -1645,68 +1974,41 @@ def test_rerun_reads_system_processes_only_for(
         ],
         strict=True,
     )
-    _advance_clock(monkeypatch, client)
-    journal = _FakeJournalStore(state=_started_record(**overrides))
-    apply_async_statement(_rerun_input(client, journal, before_retry=None))
-
+    apply_async_statement(
+        _rerun_input(
+            client, _FakeJournalStore(state=_started_record(**overrides)), before_retry=None
+        )
+    )
     assert client.after_times[0] is None
-    assert client.every_replica[0] is True
     assert client.running_only[0] is True
     assert len(client.submitted) == 1
 
 
-def test_an_attach_journals_the_attempt_started_and_a_rerun_records_its_finish() -> None:
-    """An attach under a failed record (an attempt kept by --abandon, or one
-    that a retry journaled failed) records the attempt started, so a run that
-    stops while it polls leaves a record a re-run reads from query_log."""
-    journal = _FakeJournalStore(
-        state=_started_record(
-            status="failed", finished_at="2026-05-26 10:05:00.000", last_error="boom"
-        )
-    )
+def test_an_attach_leaves_the_fenced_record_and_a_rerun_records_its_finish() -> None:
+    """#767 (770b): an attach writes nothing before the outcome, so a run
+    killed while it polls leaves the fenced record as it was, and a re-run
+    reads the same id with the same bound."""
+    journal = _FakeJournalStore(state=_started_record())
     first = _ScriptedClient(
         statuses=[
-            QueryStatus(status="running", written_rows=5, elapsed_ms=RUNNING_ELAPSED_MS),
+            QueryStatus(status="running", written_rows=5),
             *[RuntimeError("HTTP 502: bad gateway") for _ in range(21)],
-        ],
-        strict=True,
+        ]
     )
-    with pytest.raises(RuntimeError, match="polling failed 21\u00d7"):
+    with pytest.raises(MigrateError, match="polling failed 21\u00d7"):
         apply_async_statement(_rerun_input(first, journal, before_retry=None))
-    assert journal.writes is not None
-    assert [w.operations[0].status for w in journal.writes] == ["started"]
-    started = journal.writes[0].operations[0]
-    assert started.started_at == _iso_ms(SERVER_NOW_MS - RUNNING_ELAPSED_MS)
-    assert started.last_error == _MARKER
-    assert started.fingerprint == "v1:load"
+    assert journal.writes == []
+    assert set(first.status_ids[1:]) == {_OWN_ID}
+    assert set(first.after_times[1:]) == {_RECORD_BOUND}
 
     second = _ScriptedClient(
-        statuses=[QueryStatus(status="finished", written_rows=16, duration_ms=8000)],
-        strict=True,
+        statuses=[QueryStatus(status="finished", written_rows=16, duration_ms=8000)], strict=True
     )
     result = apply_async_statement(_rerun_input(second, journal, before_retry=None))
-
     assert result.kind == "completed"
-    assert second.after_times[0] == ATTACH_BOUND
+    assert second.status_ids == [_OWN_ID]
+    assert second.after_times == [_RECORD_BOUND]
     assert second.submitted == []
-
-
-def test_an_attach_keeps_the_start_a_record_of_this_release_holds() -> None:
-    """The elapsed time is observed after the server time the attach reads, so
-    a start derived from both can lie earlier than the attempt's own."""
-    client = _ScriptedClient(
-        statuses=[
-            QueryStatus(status="running", written_rows=5, elapsed_ms=RUNNING_ELAPSED_MS),
-            QueryStatus(status="finished", written_rows=16, duration_ms=8000),
-        ],
-        strict=True,
-    )
-    journal = _FakeJournalStore(state=_started_record(started_at="2023-11-14 22:14:59.000"))
-    apply_async_statement(_rerun_input(client, journal))
-
-    assert journal.writes is not None
-    assert journal.writes[0].operations[0].status == "started"
-    assert journal.writes[0].operations[0].started_at == "2023-11-14 22:14:59.000"
 
 
 def test_a_user_that_cannot_read_query_log_is_told_which_grant_it_lacks() -> None:
@@ -1720,17 +2022,20 @@ def test_a_user_that_cannot_read_query_log_is_told_which_grant_it_lacks() -> Non
         ]
     )
     journal = _FakeJournalStore(state=_started_record())
-    with pytest.raises(RuntimeError) as raised:
+    with pytest.raises(MigrateError) as raised:
         apply_async_statement(_rerun_input(client, journal))
+    # The attempt's outcome stays unknown (#782).
+    assert raised.value.code == "async_outcome_unknown"
     message = str(raised.value)
-    assert (
-        "the ClickHouse user cannot read system.query_log, which tells whether the "
-        "previous attempt finished (Code: 497." in message
+    assert message.startswith(
+        "Async migration step alter_table_modify_column (query_id "
+        f"{_OWN_ID}): the ClickHouse user cannot read system.query_log, which tells whether "
+        "the previous attempt finished (Code: 497."
     )
     assert message.endswith(
-        "Nothing was resubmitted and no before-retry SQL ran. Grant SELECT ON "
-        "system.query_log to the user; until then a re-run of `chkit migrate --apply` "
-        "stops here too."
+        "). Nothing was resubmitted and no before-retry SQL ran. Grant SELECT ON "
+        "system.query_log to the user; until then a re-run of `chkit migrate --apply` stops "
+        "here too."
     )
     assert client.submitted == []
     assert client.executed == []
@@ -1742,13 +2047,12 @@ def test_a_user_that_cannot_read_query_log_is_told_which_grant_it_lacks() -> Non
 )
 def test_rerun_reads_a_zoned_start_time_with_that_zone(started_at: str) -> None:
     client = _ScriptedClient(
-        statuses=[QueryStatus(status="finished", written_rows=16, duration_ms=8000)],
-        strict=True,
+        statuses=[QueryStatus(status="finished", written_rows=16, duration_ms=8000)]
     )
-    journal = _FakeJournalStore(state=_started_record(started_at=started_at))
-    apply_async_statement(_rerun_input(client, journal))
-
-    assert client.after_times[0] == "2026-05-26T09:59:58.000Z"
+    apply_async_statement(
+        _rerun_input(client, _FakeJournalStore(state=_started_record(started_at=started_at)))
+    )
+    assert client.after_times[0] == _RECORD_BOUND
 
 
 def test_a_rerun_before_query_log_has_the_finished_attempt_waits_for_it(
@@ -1759,12 +2063,12 @@ def test_a_rerun_before_query_log_has_the_finished_attempt_waits_for_it(
     journal = _FakeJournalStore()
     first = _ScriptedClient(
         statuses=[
+            QueryStatus(status="unknown"),
             QueryStatus(status="running", written_rows=9, written_bytes=72),
             *[RuntimeError("HTTP 502: bad gateway") for _ in range(21)],
-        ],
-        strict=True,
+        ]
     )
-    with pytest.raises(RuntimeError, match="polling failed 21\u00d7"):
+    with pytest.raises(MigrateError, match="polling failed 21\u00d7"):
         apply_async_statement(_rerun_input(first, journal))
 
     # Run 2: the load ended; its QueryFinish reaches query_log on the third check.
@@ -1783,7 +2087,7 @@ def test_a_rerun_before_query_log_has_the_finished_attempt_waits_for_it(
     assert second.executed == []
     assert second.submitted == []
     assert journal.writes is not None
-    assert [w.operations[0].status for w in journal.writes] == ["started", "completed"]
+    assert [w.operations[0].status for w in journal.writes] == ["started", "started", "completed"]
 
 
 class _SkewedReplicaClient(_ScriptedClient):
@@ -1801,6 +2105,7 @@ class _SkewedReplicaClient(_ScriptedClient):
         after_time: str | None = None,
         every_replica: bool = False,
         running_only: bool = False,
+        include_before_start: bool = False,
     ) -> QueryStatus:
         # A resubmission's own load finishes at once.
         if self.submitted:
@@ -1816,7 +2121,7 @@ def test_a_rerun_finds_a_retried_attempt_that_ran_on_a_replica_3s_behind(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#701: a retried attempt that ran on a replica whose clock is 3 s behind
-    the one that gave its recorded start, more than the skew margin."""
+    the one that gave its recorded start."""
     journal = _FakeJournalStore(
         state=_started_record(
             status="failed", finished_at="2026-05-26 10:05:00.000", last_error="boom"
@@ -1831,7 +2136,7 @@ def test_a_rerun_finds_a_retried_attempt_that_ran_on_a_replica_3s_behind(
         strict=True,
     )
     _advance_clock(monkeypatch, first)
-    with pytest.raises(RuntimeError, match="polling failed 21\u00d7"):
+    with pytest.raises(MigrateError, match="polling failed 21\u00d7"):
         apply_async_statement(_rerun_input(first, journal))
     assert journal.writes is not None
     retried = journal.writes[-1].operations[0]
@@ -1852,14 +2157,11 @@ def test_a_rerun_finds_a_retried_attempt_that_ran_on_a_replica_3s_behind(
 
 
 class _EarlierFinishClient(_ScriptedClient):
-    """query_log holds an earlier attempt's QueryFinish of the id; the submit is rejected."""
+    """query_log holds an earlier attempt's QueryFinish of the deterministic id; the submit is rejected."""
 
-    def __init__(self, earlier_start_sec: int) -> None:
-        super().__init__(
-            statuses=[],
-            submit_raises=RuntimeError("Code: 216. QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING"),
-        )
-        self._earlier_start_sec = earlier_start_sec
+    def __init__(self) -> None:
+        super().__init__(statuses=[], submit_raises=RuntimeError("Code: 60. UNKNOWN_TABLE"))
+        self.polled: list[str] = []
 
     def query_status(
         self,
@@ -1868,16 +2170,19 @@ class _EarlierFinishClient(_ScriptedClient):
         after_time: str | None = None,
         every_replica: bool = False,
         running_only: bool = False,
+        include_before_start: bool = False,
     ) -> QueryStatus:
         if running_only:
             return QueryStatus(status="unknown")
-        if self._earlier_start_sec >= _whole_seconds(after_time):
+        self.polled.append(query_id)
+        if query_id == _RERUN_QUERY_ID:
             return QueryStatus(status="finished", written_rows=2, duration_ms=10)
-        return QueryStatus(status="unknown")
+        # The rejected submission's ExceptionBeforeStart under its own id.
+        return QueryStatus(status="failed", error="Code: 60. UNKNOWN_TABLE", before_start=True)
 
 
 class _SlowJournalStore(_FakeJournalStore):
-    """Each write takes 6 s of the client's server clock."""
+    """Each write and read takes 6 s of the client's server clock."""
 
     client: Any = None
 
@@ -1885,16 +2190,923 @@ class _SlowJournalStore(_FakeJournalStore):
         self.client.now_ms += 6_000
         super().write_migration_state(state)
 
+    def read_migration_state(self, name: str) -> MigrationRowState | None:
+        self.client.now_ms += 6_000
+        return super().read_migration_state(name)
 
-def test_a_first_attempts_polls_ignore_an_earlier_attempt_that_finished_during_the_writes() -> None:
-    """Codex review of #701: the statement's first id is shared with an
-    attempt whose record was lost. Its polls are bounded by the server time
-    read after the journal writes, which can take long, so that attempt's
-    QueryFinish is not taken for a rejected submission's."""
-    client = _EarlierFinishClient((SERVER_NOW_MS - 1_000) // 1000)
+    def read_stored_operation(self, name: str, index: int) -> OperationState | None:
+        self.client.now_ms += 6_000
+        return super().read_stored_operation(name, index)
+
+
+def test_a_first_attempts_polls_ignore_an_earlier_attempt_of_the_deterministic_id() -> None:
+    """#767 (Codex review of #770, 770d): an earlier attempt finished under the
+    statement's deterministic first id, and the journal writes before this
+    submission were slow. The submission is rejected; its polls read its own
+    id only, so the earlier QueryFinish is never taken for its outcome."""
+    client = _EarlierFinishClient()
     journal = _SlowJournalStore()
     journal.client = client
-    with pytest.raises(RuntimeError, match="QUERY_WITH_SAME_ID"):
+    with pytest.raises(RuntimeError, match="UNKNOWN_TABLE"):
         apply_async_statement(_rerun_input(client, journal, before_retry=None))
     assert journal.writes is not None
-    assert [w.operations[0].status for w in journal.writes] == ["started", "failed"]
+    assert [w.operations[0].status for w in journal.writes] == ["started", "started", "failed"]
+    assert client.polled
+    assert _RERUN_QUERY_ID not in client.polled
+
+
+class _DroppingJournalStore(_FakeJournalStore):
+    """A journal whose writes do not reach it."""
+
+    def write_migration_state(self, state: MigrationRowState) -> None:
+        pass
+
+
+def test_an_attempt_the_journal_does_not_return_after_its_started_write_is_not_submitted() -> None:
+    """The random id is known only to the journal, so it is never submitted
+    when the journal does not return the started record (#767)."""
+    client = _ScriptedClient(statuses=[QueryStatus(status="unknown")], strict=True)
+    with pytest.raises(
+        RuntimeError,
+        match="the journal did not return the attempt's record, so it was not submitted",
+    ):
+        apply_async_statement(_rerun_input(client, _DroppingJournalStore()))
+    assert client.submitted == []
+
+
+@pytest.mark.parametrize(
+    "last_error",
+    ["no longer running and no outcome in system.query_log; retried", "error code: 524"],
+    ids=["721-no-outcome", "lost-response"],
+)
+def test_an_unverified_failed_record_stops_with_async_outcome_unknown(last_error: str) -> None:
+    """#767 (round 2): a failed record that no server rejection or abandon
+    recorded may have finished. It is checked in system.processes only and
+    stops the run before anything is written or run."""
+    client = _ScriptedClient(
+        statuses=[QueryStatus(status="finished", written_rows=16, duration_ms=8000)], strict=True
+    )
+    journal = _FakeJournalStore(
+        state=_started_record(
+            status="failed",
+            finished_at="2026-05-26 10:05:00.000",
+            last_error=last_error,
+            attempt_fenced=False,
+        )
+    )
+    with pytest.raises(MigrateError) as info:
+        apply_async_statement(_rerun_input(client, journal))
+    assert info.value.code == "async_outcome_unknown"
+    assert info.value.message == _outcome_unknown(_OWN_ID, _UNVERIFIED_REASON)
+    assert (client.status_ids, client.running_only) == ([_OWN_ID], [True])
+    assert client.executed == []
+    assert client.submitted == []
+    assert journal.writes == []
+
+
+def test_a_lost_submit_response_is_no_failure_the_polls_find_the_committed_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#767 (round 2): the submit's response is lost after the INSERT
+    committed, and the first polls run before query_log has its QueryFinish.
+    The attempt is never journaled failed, so nothing is compensated or
+    submitted again: the polls find the QueryFinish."""
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="unknown"),
+            QueryStatus(status="unknown"),
+            QueryStatus(status="unknown"),
+            QueryStatus(status="finished", written_rows=16, duration_ms=8000),
+        ],
+        submit_raises=RuntimeError("HTTP 524 after commit"),
+        strict=True,
+    )
+    _advance_clock(monkeypatch, client)
+    journal = _FakeJournalStore()
+    result = apply_async_statement(_rerun_input(client, journal))
+    assert result.kind == "completed"
+    assert len(client.submitted) == 1
+    assert client.executed == []
+    assert journal.writes is not None
+    assert [w.operations[0].status for w in journal.writes] == ["started", "started", "completed"]
+
+
+def test_an_attempt_the_journal_stores_without_its_fence_is_not_submitted() -> None:
+    """#767 (round 2): a journal that cannot store the fence gets no submit."""
+    client = _ScriptedClient(statuses=[QueryStatus(status="unknown")], strict=True)
+    journal = _FakeJournalStore(fingerprints=False)
+    with pytest.raises(MigrateError) as info:
+        apply_async_statement(_rerun_input(client, journal))
+    assert info.value.code == "async_attempt_unfenced"
+    assert "ADD COLUMN IF NOT EXISTS operation_fingerprints Array(String)" in info.value.message
+    assert client.submitted == []
+
+
+class _NeverSettlingSubmitClient(_ScriptedClient):
+    """Its submit request never settles, as a proxy holding the socket open."""
+
+    def __init__(self, statuses: list[QueryStatus | BaseException]) -> None:
+        super().__init__(statuses=statuses, strict=True)
+        self.release = threading.Event()
+
+    def submit(
+        self,
+        statement: str,
+        query_id: str | None = None,
+        settings: dict[str, Any] | None = None,
+        *,
+        before_send: Any = None,
+    ) -> str:
+        if before_send is not None:
+            before_send()
+            before_send.commit()
+        self.submitted.append((statement, query_id))
+        self.release.wait(timeout=30)
+        return query_id or "auto-id"
+
+
+def test_a_submit_that_never_settles_does_not_keep_the_run_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#767 (round 3): after the final check the run stops with
+    async_outcome_unknown without waiting for the submit, so the migrate lock
+    is released; the check starts at the 20th unknown poll."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+    client = _NeverSettlingSubmitClient(
+        [QueryStatus(status="unknown") for _ in range(1 + 20 + 6)]
+    )
+    journal = _FakeJournalStore()
+    started = time.monotonic()
+    try:
+        with pytest.raises(MigrateError) as info:
+            apply_async_statement(_input(client=client, journal=journal))
+    finally:
+        client.release.set()
+    assert time.monotonic() - started < 10
+    assert info.value.code == "async_outcome_unknown"
+    assert "20\u00d7 in a row" in info.value.message
+    # The check before the submit, 20 polls, then the final check and 5 rechecks.
+    assert len(client.status_ids) == 1 + 20 + 6
+    assert journal.writes is not None
+    assert [w.operations[0].status for w in journal.writes] == ["started", "started"]
+
+
+def test_a_submission_given_up_before_it_is_sent_never_starts() -> None:
+    """#767 (round 3): a request not sent when the run gave up never starts."""
+    sent: list[str] = []
+
+    def submit(before_send: Any) -> None:
+        release.wait(timeout=5)
+        before_send()
+        sent.append("sent")
+
+    release = threading.Event()
+    submission = migrate_async_apply._Submission(submit)
+    submission.start()
+    submission.abandon()
+    release.set()
+    assert submission.wait() is not None
+    assert sent == []
+
+
+def test_a_failed_poll_request_resets_the_unknown_poll_count() -> None:
+    """#767 (round 3): only unknown polls in a row count; a failed poll
+    request starts the count again."""
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="unknown"),
+            *[QueryStatus(status="unknown") for _ in range(19)],
+            RuntimeError("HTTP 502: bad gateway"),
+            *[QueryStatus(status="unknown") for _ in range(19)],
+            QueryStatus(status="finished", written_rows=1, duration_ms=10),
+        ],
+        strict=True,
+    )
+    result = apply_async_statement(_input(client=client, journal=_FakeJournalStore()))
+    assert result.kind == "completed"
+    # No final check of every replica: the in-flight check alone reads them all.
+    assert client.every_replica.count(True) == 1
+
+
+def test_a_run_without_the_migrate_lock_stops_before_an_async_statement() -> None:
+    """#767 (round 3): a run that holds no migrate lock (the target database
+    did not exist when it started) never submits an async statement."""
+    client = _ScriptedClient(statuses=[QueryStatus(status="unknown")], strict=True)
+    journal = _FakeJournalStore()
+    with pytest.raises(MigrateError) as info:
+        apply_async_statement(_input(client=client, journal=journal, lockless_bootstrap=True))
+    assert info.value.code == "async_needs_lock"
+    assert "Run chkit migrate --apply again" in info.value.message
+    assert client.submitted == []
+    assert journal.writes == []
+
+
+def test_a_run_with_the_lock_off_stops_before_an_async_statement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#810: a run with CHKIT_MIGRATE_LOCK=off holds no lock either, so it
+    stops the same way unless CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK accepts the risk."""
+    monkeypatch.setenv("CHKIT_MIGRATE_LOCK", "off")
+    monkeypatch.delenv("CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK", raising=False)
+    client = _ScriptedClient(statuses=[QueryStatus(status="unknown")], strict=True)
+    journal = _FakeJournalStore()
+    with pytest.raises(MigrateError) as info:
+        apply_async_statement(_input(client=client, journal=journal))
+    assert info.value.code == "async_needs_lock"
+    assert "CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK=1" in info.value.message
+    assert client.submitted == []
+    assert journal.writes == []
+
+
+def test_async_without_lock_submits_with_the_lock_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#810: CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK=1 accepts the risk."""
+    monkeypatch.setenv("CHKIT_MIGRATE_LOCK", "off")
+    monkeypatch.setenv("CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK", "1")
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="unknown"),
+            QueryStatus(status="finished", written_rows=1, duration_ms=10),
+        ],
+        strict=True,
+    )
+    result = apply_async_statement(_input(client=client, journal=_FakeJournalStore()))
+    assert result.kind == "completed"
+    assert len(client.submitted) == 1
+
+
+class _LaggingJournal(_FakeJournalStore):
+    """Its server read-back misses the record until ``lag`` is cleared."""
+
+    lag: bool = True
+
+    def read_stored_operation(self, name: str, index: int) -> OperationState | None:
+        return None if self.lag else super().read_stored_operation(name, index)
+
+
+def test_an_attempt_whose_read_back_lags_stays_prepared_and_the_next_run_submits_it_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#767 (round 3): a read-back that lags keeps the attempt prepared, never
+    sent, so the next run runs it again without an abandon."""
+    first = _ScriptedClient(statuses=[QueryStatus(status="unknown")], strict=True)
+    sleeps = _advance_clock(monkeypatch, first)
+    journal = _LaggingJournal()
+    with pytest.raises(RuntimeError, match="an attempt that was never sent runs again"):
+        apply_async_statement(_rerun_input(first, journal))
+    assert first.submitted == []
+    assert sleeps == [1.0] * 4
+    assert journal.writes is not None
+    assert [w.operations[0].last_error for w in journal.writes] == [_PREPARED_MARKER]
+    prepared_id = journal.writes[0].operations[0].query_id
+
+    journal.lag = False
+    second = _ScriptedClient(
+        statuses=[
+            *_NO_ENTRY_CHECKS,
+            QueryStatus(status="finished", written_rows=16, duration_ms=8000),
+        ],
+        strict=True,
+    )
+    _advance_clock(monkeypatch, second)
+    result = apply_async_statement(_rerun_input(second, journal))
+    assert result.kind == "completed"
+    # The prepared id is looked up on every replica first: nothing of it.
+    assert set(second.status_ids[:6]) == {prepared_id}
+    assert second.every_replica[:6] == [True] * 6
+    assert len(second.submitted) == 1
+    assert second.submitted[0][1] != prepared_id
+    # #767 (round 4): it ran nothing, so no before-retry SQL runs.
+    assert second.executed == []
+
+
+def test_a_submit_that_never_reached_the_server_is_submitted_again_by_the_next_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#800: a submit that never reached the server leaves the attempt
+    prepared, so the next run submits it once, without an abandon or its
+    before-retry SQL."""
+    first = _ScriptedClient(
+        statuses=[QueryStatus(status="unknown")],
+        submit_raises=SubmitNotSentError(
+            "Could not connect to ClickHouse at http://chkit.invalid:8123 (host not found)"
+        ),
+        strict=True,
+    )
+    _advance_clock(monkeypatch, first)
+    journal = _FakeJournalStore()
+    with pytest.raises(
+        RuntimeError, match="was not sent: the submit request never reached ClickHouse"
+    ):
+        apply_async_statement(_rerun_input(first, journal))
+    not_sent_id = first.submitted[0][1]
+
+    second = _ScriptedClient(
+        statuses=[
+            *_NO_ENTRY_CHECKS,
+            QueryStatus(status="finished", written_rows=16, duration_ms=8000),
+        ],
+        strict=True,
+    )
+    _advance_clock(monkeypatch, second)
+    result = apply_async_statement(_rerun_input(second, journal))
+    assert result.kind == "completed"
+    assert set(second.status_ids[:6]) == {not_sent_id}
+    assert second.every_replica[:6] == [True] * 6
+    assert len(second.submitted) == 1
+    assert second.submitted[0][1] != not_sent_id
+    assert second.executed == []
+
+
+class _FlakyReadJournal(_FakeJournalStore):
+    """Its first read-backs fail as a gateway error."""
+
+    failures: int = 2
+
+    def read_stored_operation(self, name: str, index: int) -> OperationState | None:
+        if self.failures > 0:
+            self.failures -= 1
+            msg = "HTTP 502: bad gateway"
+            raise RuntimeError(msg)
+        return super().read_stored_operation(name, index)
+
+
+def test_a_read_back_that_fails_is_tried_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="unknown"),
+            QueryStatus(status="finished", written_rows=1, duration_ms=10),
+        ],
+        strict=True,
+    )
+    _advance_clock(monkeypatch, client)
+    result = apply_async_statement(_rerun_input(client, _FlakyReadJournal()))
+    assert result.kind == "completed"
+    assert len(client.submitted) == 1
+
+
+class _SecondReadLagsJournal(_FakeJournalStore):
+    """The move to "may have been sent" never reads back."""
+
+    def read_stored_operation(self, name: str, index: int) -> OperationState | None:
+        op = super().read_stored_operation(name, index)
+        return None if op is not None and op.last_error == _ATTEMPT_MARKER else op
+
+
+def test_an_attempt_whose_second_read_back_fails_goes_back_to_prepared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _ScriptedClient(statuses=[QueryStatus(status="unknown")], strict=True)
+    _advance_clock(monkeypatch, client)
+    journal = _SecondReadLagsJournal()
+    with pytest.raises(RuntimeError, match="was not submitted"):
+        apply_async_statement(_rerun_input(client, journal))
+    assert client.submitted == []
+    assert journal.writes is not None
+    assert [w.operations[0].last_error for w in journal.writes] == [
+        _PREPARED_MARKER, _ATTEMPT_MARKER, _PREPARED_MARKER
+    ]
+
+
+class _StalePreparedJournal(_FakeJournalStore):
+    """A replica read returns the prepared row; the journal's newest record is
+    the move to "may have been sent"."""
+
+    def read_stored_operation(self, name: str, index: int) -> OperationState | None:
+        op = super().read_stored_operation(name, index)
+        if op is None:
+            return None
+        return op.model_copy(update={"last_error": _ATTEMPT_MARKER})
+
+
+@pytest.mark.parametrize("every_copy", [False, True], ids=["one-copy-read", "newer-record"])
+def test_a_prepared_record_that_a_fresh_read_does_not_confirm_stops(
+    every_copy: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#767 (round 4): a prepared row read from a lagging replica is no proof
+    the attempt was never sent. Unless a read of every copy of the journal
+    still holds it prepared, the run stops and keeps the record."""
+    client = _ScriptedClient(statuses=list(_NO_ENTRY_CHECKS), strict=True)
+    _advance_clock(monkeypatch, client)
+    journal_cls = _StalePreparedJournal if every_copy else _FakeJournalStore
+    journal = journal_cls(
+        state=_started_record(last_error=_PREPARED_MARKER), every_copy=every_copy
+    )
+    with pytest.raises(MigrateError) as info:
+        apply_async_statement(_rerun_input(client, journal))
+    assert info.value.code == "async_outcome_unknown"
+    assert info.value.message == _outcome_unknown(_OWN_ID, _STALE_PREPARED_REASON)
+    assert client.executed == []
+    assert client.submitted == []
+    assert journal.writes == []
+
+
+@pytest.mark.parametrize("failure", ["polls", "final-check"])
+def test_a_poll_budget_exit_with_a_submit_that_never_settles_stops_at_once(
+    failure: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#767 (round 4): every exit of the poll budget (failed polls, a failed
+    final check) gives up on the submit and stops with async_outcome_unknown,
+    without waiting for a submit that never settles."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+    statuses: list[QueryStatus | BaseException] = (
+        [QueryStatus(status="unknown"), *[RuntimeError("HTTP 502") for _ in range(21)]]
+        if failure == "polls"
+        else [
+            QueryStatus(status="unknown"),
+            *[QueryStatus(status="unknown") for _ in range(20)],
+            RuntimeError("ALL_CONNECTION_TRIES_FAILED"),
+        ]
+    )
+    client = _NeverSettlingSubmitClient(statuses)
+    started = time.monotonic()
+    try:
+        with pytest.raises(MigrateError) as info:
+            apply_async_statement(_input(client=client, journal=_FakeJournalStore()))
+    finally:
+        client.release.set()
+    assert time.monotonic() - started < 10
+    assert info.value.code == "async_outcome_unknown"
+    expected = (
+        "polling failed 21\u00d7 in a row (HTTP 502)"
+        if failure == "polls"
+        else "the final check of every replica failed (ALL_CONNECTION_TRIES_FAILED)."
+    )
+    assert expected in info.value.message
+
+
+
+def test_a_failure_while_it_runs_does_not_wait_for_a_submit_that_never_settles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#767 (round 5): a statement that fails while it runs stops the run with
+    async_outcome_unknown at once, as every stop without an outcome does,
+    without waiting for a submit a proxy holds open; the fenced started
+    record stays."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+    client = _NeverSettlingSubmitClient(
+        [
+            QueryStatus(status="unknown"),
+            QueryStatus(status="failed", error="Code: 395. throwIf", before_start=False),
+        ]
+    )
+    journal = _FakeJournalStore()
+    started = time.monotonic()
+    try:
+        with pytest.raises(MigrateError) as info:
+            apply_async_statement(_input(client=client, journal=journal))
+    finally:
+        client.release.set()
+    assert time.monotonic() - started < 10
+    assert info.value.code == "async_outcome_unknown"
+    assert "failed while it ran" in info.value.message
+    assert [state.operations[0].status for state in journal.writes or []] == ["started", "started"]
+
+
+@pytest.mark.parametrize("outcome", ["QueryFinish", "ExceptionBeforeStart"])
+def test_a_settled_outcome_does_not_wait_for_a_submit_that_never_settles(
+    outcome: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#767 (round 6): a settled outcome is journaled, then the run ends
+    without waiting for a submit a proxy holds open."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+    settled = (
+        QueryStatus(status="finished", written_rows=1, duration_ms=10)
+        if outcome == "QueryFinish"
+        else QueryStatus(status="failed", error="Code: 60. UNKNOWN_TABLE", before_start=True)
+    )
+    client = _NeverSettlingSubmitClient([QueryStatus(status="unknown"), settled])
+    journal = _FakeJournalStore()
+    started = time.monotonic()
+    try:
+        if outcome == "QueryFinish":
+            assert apply_async_statement(_input(client=client, journal=journal)).kind == "completed"
+        else:
+            with pytest.raises(RuntimeError, match="UNKNOWN_TABLE"):
+                apply_async_statement(_input(client=client, journal=journal))
+    finally:
+        client.release.set()
+    assert time.monotonic() - started < 10
+    writes = journal.writes or []
+    assert writes[-1].operations[0].status == (
+        "completed" if outcome == "QueryFinish" else "failed"
+    )
+
+
+class _RejectingTerminalJournal(_FakeJournalStore):
+    def write_migration_state(self, state: MigrationRowState) -> None:
+        if state.operations[0].status != "started":
+            msg = "journal write rejected"
+            raise RuntimeError(msg)
+        super().write_migration_state(state)
+
+
+@pytest.mark.parametrize("outcome", ["QueryFinish", "ExceptionBeforeStart"])
+def test_a_rejected_terminal_journal_write_does_not_wait_for_a_submit_that_never_settles(
+    outcome: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#767 (round 7): a terminal journal write that is rejected detaches the
+    submit too, and the run stops with the journal's error."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+    settled = (
+        QueryStatus(status="finished", written_rows=1, duration_ms=10)
+        if outcome == "QueryFinish"
+        else QueryStatus(status="failed", error="Code: 60. UNKNOWN_TABLE", before_start=True)
+    )
+    client = _NeverSettlingSubmitClient([QueryStatus(status="unknown"), settled])
+    started = time.monotonic()
+    try:
+        with pytest.raises(RuntimeError, match="journal write rejected"):
+            apply_async_statement(_input(client=client, journal=_RejectingTerminalJournal()))
+    finally:
+        client.release.set()
+    assert time.monotonic() - started < 10
+
+
+def test_a_started_alter_rejected_before_it_started_stops_the_rerun(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#767 (Opus review): an ExceptionBeforeStart shows nothing ran only for a
+    SELECT or an INSERT. A killed ALTER ... UPDATE logs one while its mutation
+    still completes, so its re-run stops instead of compensating."""
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(
+                status="failed",
+                error="Code: 394. DB::Exception: Query was cancelled",
+                before_start=True,
+            ),
+        ],
+        strict=True,
+    )
+    _advance_clock(monkeypatch, client)
+    journal = _FakeJournalStore(state=_started_record())
+    with pytest.raises(MigrateError) as info:
+        apply_async_statement(
+            _rerun_input(client, journal, sql="ALTER TABLE db.t UPDATE v = v + 100 WHERE 1")
+        )
+    assert info.value.code == "async_outcome_unknown"
+    assert "rejected before it started (ExceptionBeforeStart)" in info.value.message
+    assert client.executed == []
+    assert client.submitted == []
+    assert journal.writes == []
+
+
+def test_an_alter_rejected_before_it_started_while_polling_keeps_its_fenced_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#767 (Opus review): during polling too, an ExceptionBeforeStart of a
+    statement other than a SELECT or an INSERT is no proof that it applied
+    nothing: the fenced started record stays, and the run stops."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="unknown"),
+            QueryStatus(
+                status="failed",
+                error="Code: 341. DB::Exception: Value passed to throwIf",
+                before_start=True,
+            ),
+        ]
+    )
+    journal = _FakeJournalStore()
+    with pytest.raises(MigrateError) as info:
+        apply_async_statement(
+            _input(client=client, journal=journal, sql="ALTER TABLE db.t UPDATE v = throwIf(k = 4) WHERE 1")
+        )
+    assert info.value.code == "async_outcome_unknown"
+    assert "system.mutations" in info.value.message
+    assert [w.operations[0].status for w in journal.writes or []] == ["started", "started"]
+    assert client.executed == []
+
+
+def test_a_failed_query_tracking_write_before_the_submit_puts_the_attempt_back_to_prepared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#767 (Opus review): a failure after the attempt was journaled as one
+    that may have been sent, but before its submit, puts the record back to
+    prepared, so the next run resolves it without an abandon."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+
+    class _FailingTracker:
+        def record_async(self, *_args: Any) -> None:
+            msg = "tracking write failed"
+            raise RuntimeError(msg)
+
+    client = _ScriptedClient(statuses=[QueryStatus(status="unknown")])
+    journal = _FakeJournalStore()
+    with pytest.raises(RuntimeError, match="tracking write failed"):
+        apply_async_statement(
+            _input(client=client, journal=journal, query_tracker=cast(Any, _FailingTracker()))
+        )
+    assert client.submitted == []
+    assert [w.operations[0].last_error for w in journal.writes or []] == [
+        _PREPARED_MARKER,
+        "submitted under its own query id; a retry reads its outcome from system.query_log",
+        _PREPARED_MARKER,
+    ]
+
+
+def test_ctrl_c_before_the_submit_puts_the_attempt_back_to_prepared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#767 (Opus re-review): Ctrl-C between the "may have been sent" record
+    and the submit puts the record back to prepared too, and still stops."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+
+    class _InterruptedTracker:
+        def record_async(self, *_args: Any) -> None:
+            raise KeyboardInterrupt
+
+    client = _ScriptedClient(statuses=[QueryStatus(status="unknown")])
+    journal = _FakeJournalStore()
+    with pytest.raises(KeyboardInterrupt):
+        apply_async_statement(
+            _input(client=client, journal=journal, query_tracker=cast(Any, _InterruptedTracker()))
+        )
+    assert client.submitted == []
+    assert [w.operations[0].last_error for w in journal.writes or []][-1] == _PREPARED_MARKER
+
+
+def test_a_revert_to_prepared_that_fails_names_the_abandon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#767 (Opus re-review): when the record cannot go back to prepared, the
+    error says the next run needs an abandon."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+
+    class _FailingTracker:
+        def record_async(self, *_args: Any) -> None:
+            msg = "tracking write failed"
+            raise RuntimeError(msg)
+
+    class _NoRevertJournal(_FakeJournalStore):
+        def write_migration_state(self, state: MigrationRowState) -> None:
+            writes = self.writes or []
+            if len(writes) == 2:
+                msg = "journal unavailable"
+                raise RuntimeError(msg)
+            super().write_migration_state(state)
+
+    client = _ScriptedClient(statuses=[QueryStatus(status="unknown")])
+    with pytest.raises(RuntimeError) as info:
+        apply_async_statement(
+            _input(
+                client=client,
+                journal=_NoRevertJournal(),
+                query_tracker=cast(Any, _FailingTracker()),
+            )
+        )
+    message = str(info.value)
+    assert "tracking write failed" in message
+    assert "journal unavailable" in message
+    assert "--abandon 20260101_000000_async.sql" in message
+    assert client.submitted == []
+
+
+class _InterruptedBeforeSubmitJournal(_FakeJournalStore):
+    """Ctrl-C after the attempt was journaled, before its submit: cleanup runs."""
+
+    interrupted = False
+
+    def read_stored_operation(self, name: str, index: int) -> OperationState | None:
+        assert self.writes is not None
+        if not self.interrupted and any(
+            op.last_error == _ATTEMPT_MARKER for w in self.writes for op in w.operations
+        ):
+            self.interrupted = True
+            raise KeyboardInterrupt
+        return super().read_stored_operation(name, index)
+
+
+def test_a_rerun_after_ctrl_c_before_the_submit_sends_the_attempt_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#767 (Opus re-review): Ctrl-C before the submit puts the record back to
+    prepared; nothing was sent, so the re-run submits it once, with no
+    before-retry SQL: the record never shows an attempt that may have run."""
+    journal = _InterruptedBeforeSubmitJournal()
+    first = _ScriptedClient(statuses=[QueryStatus(status="unknown")], strict=True)
+    with pytest.raises(KeyboardInterrupt):
+        apply_async_statement(_rerun_input(first, journal))
+    assert first.submitted == []
+    assert journal.state is not None
+    assert journal.state.operations[0].last_error == _PREPARED_MARKER
+
+    rerun = _ScriptedClient(
+        statuses=[
+            *_NO_ENTRY_CHECKS,
+            QueryStatus(status="finished", written_rows=16, duration_ms=8000),
+        ],
+        strict=True,
+    )
+    _advance_clock(monkeypatch, rerun)
+    result = apply_async_statement(_rerun_input(rerun, _FakeJournalStore(state=journal.state)))
+    assert result.kind == "completed"
+    assert rerun.executed == []
+    assert len(rerun.submitted) == 1
+
+
+class _ParkedSubmitClient(_ScriptedClient):
+    """Its submit runs through the guard in steps a test releases: before the
+    request starts (``connect``), after it connected (``write``) and once its
+    bytes are written (``written``). ``sent`` lists the requests written."""
+
+    def __init__(self, statuses: list[QueryStatus | BaseException]) -> None:
+        super().__init__(statuses=statuses)
+        self.connect = threading.Event()
+        self.write = threading.Event()
+        self.written = threading.Event()
+        self.writing = threading.Event()
+        self.sent: list[str] = []
+        self.done = threading.Event()
+
+    def submit(
+        self,
+        statement: str,
+        query_id: str | None = None,
+        settings: dict[str, Any] | None = None,
+        *,
+        before_send: Any = None,
+    ) -> str:
+        try:
+            self.connect.wait(timeout=30)
+            before_send()
+            self.write.wait(timeout=30)
+            before_send.begin_write()
+            self.writing.set()
+            self.written.wait(timeout=30)
+            self.sent.append(statement)
+            before_send.end_write()
+            return query_id or "auto-id"
+        finally:
+            self.done.set()
+
+
+def _interrupt_as_the_submit_thread_starts(
+    monkeypatch: pytest.MonkeyPatch, after_start: Any = None
+) -> None:
+    """Ctrl-C right after the submit thread started, as it lands while
+    ``Thread.start`` returns."""
+    real_start = threading.Thread.start
+
+    def start(thread: threading.Thread) -> None:
+        real_start(thread)
+        if thread.name == migrate_async_apply.SUBMIT_THREAD_NAME:
+            if after_start is not None:
+                after_start()
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+
+
+def _last_marker(journal: _FakeJournalStore) -> str:
+    return [w.operations[0].last_error for w in journal.writes or []][-1]
+
+
+def test_ctrl_c_as_the_submit_thread_starts_cancels_the_submit_and_reverts_to_prepared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ctrl-C while the submit thread starts gives the submit up before the
+    run releases its migrate lock: the request never starts, and the record
+    goes back to prepared, since nothing was sent."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+    _interrupt_as_the_submit_thread_starts(monkeypatch)
+    client = _ParkedSubmitClient(statuses=[QueryStatus(status="unknown")])
+    journal = _FakeJournalStore()
+    with pytest.raises(KeyboardInterrupt):
+        apply_async_statement(_input(client=client, journal=journal))
+    # The migrate lock is released here; then the parked send resumes.
+    client.connect.set()
+    client.write.set()
+    client.written.set()
+    assert client.done.wait(timeout=5)
+    assert client.sent == []
+    assert _last_marker(journal) == _PREPARED_MARKER
+
+
+def test_ctrl_c_as_the_submit_thread_starts_after_the_request_was_written_keeps_the_fence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request already written is not taken back: the record stays "may have
+    been sent", so the next run reads its outcome instead of submitting again."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+    client = _ParkedSubmitClient(statuses=[QueryStatus(status="unknown")])
+    client.connect.set()
+    client.write.set()
+    client.written.set()
+    _interrupt_as_the_submit_thread_starts(monkeypatch, lambda: client.done.wait(timeout=5))
+    journal = _FakeJournalStore()
+    with pytest.raises(KeyboardInterrupt):
+        apply_async_statement(_input(client=client, journal=journal))
+    assert client.sent == ["INSERT INTO db.t SELECT 1"]
+    assert _last_marker(journal) == _ATTEMPT_MARKER
+
+
+def test_ctrl_c_as_the_submit_thread_starts_waits_for_a_write_under_way(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request being written keeps the run, and its migrate lock, until it
+    is written; its record stays "may have been sent"."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+    client = _ParkedSubmitClient(statuses=[QueryStatus(status="unknown")])
+    client.connect.set()
+    client.write.set()
+
+    def finish_the_write_later() -> None:
+        assert client.writing.wait(timeout=5)
+        threading.Timer(0.3, client.written.set).start()
+
+    _interrupt_as_the_submit_thread_starts(monkeypatch, finish_the_write_later)
+    journal = _FakeJournalStore()
+    with pytest.raises(KeyboardInterrupt):
+        apply_async_statement(_input(client=client, journal=journal))
+    assert client.sent == ["INSERT INTO db.t SELECT 1"]
+    assert _last_marker(journal) == _ATTEMPT_MARKER
+
+
+def test_ctrl_c_before_the_submit_thread_is_created_reverts_to_prepared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ctrl-C after the attempt's record and before its submit exists puts the
+    record back to prepared, and nothing is sent."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+
+    def interrupted(_ms: int) -> str:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(migrate_async_apply, "_query_log_lower_bound", interrupted)
+    client = _ParkedSubmitClient(statuses=[QueryStatus(status="unknown")])
+    journal = _FakeJournalStore()
+    with pytest.raises(KeyboardInterrupt):
+        apply_async_statement(_input(client=client, journal=journal))
+    assert client.sent == []
+    assert not client.done.is_set()
+    assert _last_marker(journal) == _PREPARED_MARKER
+
+
+def test_ctrl_c_while_a_failed_run_waits_for_its_submit_cancels_the_submit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run that failed waits for its submit request; Ctrl-C during that wait
+    gives the submit up before the migrate lock is released, so a request
+    still connecting never writes."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+    real_join = threading.Thread.join
+
+    def join(thread: threading.Thread, timeout: float | None = None) -> None:
+        if thread.name == migrate_async_apply.SUBMIT_THREAD_NAME:
+            # The send connects only after the interrupted wait.
+            threading.Timer(0.3, client.write.set).start()
+            raise KeyboardInterrupt
+        real_join(thread, timeout)
+
+    monkeypatch.setattr(threading.Thread, "join", join)
+    client = _ParkedSubmitClient(
+        statuses=[
+            QueryStatus(status="unknown"),
+            QueryStatus(status="running", written_rows=1, written_bytes=8),
+        ]
+    )
+    client.connect.set()
+    client.written.set()
+
+    def log(line: str) -> None:
+        # A failure that does not give the submit up, as a closed stdout.
+        if "written=" in line:
+            msg = "log failed"
+            raise RuntimeError(msg)
+
+    with pytest.raises(KeyboardInterrupt):
+        apply_async_statement(_input(client=client, journal=_FakeJournalStore(), log=log))
+    client.write.set()
+    assert client.done.wait(timeout=5)
+    assert client.sent == []
+
+
+def test_a_second_abandon_does_not_wait_for_the_connect_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run that gave the submit up already does not wait out the connect
+    timeout a second time when its stop unwinds (#793)."""
+    # The connect wait is the timeout plus a 5 s margin: 0.5 s here.
+    monkeypatch.setattr(migrate_async_apply, "SUBMIT_CONNECT_TIMEOUT_SECONDS", -4.5)
+    release = threading.Event()
+
+    def submit(before_send: Any) -> None:
+        before_send()
+        release.wait(timeout=30)
+        before_send.begin_write()
+
+    submission = migrate_async_apply._Submission(submit)
+    submission.start()
+    try:
+        deadline = time.monotonic() + 5
+        while submission._state != "connecting" and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert submission.abandon() is False
+        began = time.monotonic()
+        assert submission.abandon_unsent() is False
+        assert time.monotonic() - began < 0.25
+    finally:
+        release.set()
+    assert submission.wait() is not None

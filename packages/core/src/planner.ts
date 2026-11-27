@@ -2,7 +2,6 @@ import { type CanonicalizeOptions, canonicalizeDefinitions, definitionKey } from
 import { compareCodePoints } from './order.js'
 import { diffByName, diffClauses, diffSettings } from './diff-primitives.js'
 import type {
-  ColumnDefaultValue,
   ColumnDefinition,
   ColumnRenameSuggestion,
   DictionaryDefinition,
@@ -37,12 +36,12 @@ import {
   renderAlterRemoveColumnExpression,
   renderAlterResetSetting,
   renderDictionarySQL,
-  columnTypeFingerprint,
-  columnCodecFingerprint,
   keyFingerprint,
   toCreateSQL,
 } from './sql.js'
-import { literalDefaultFingerprint, parseColumnDefault, renderDefault } from './column-default.js'
+import type { ColumnStatementDefinitions } from './column-cycle-repair.js'
+import { orderColumnStatements } from './column-order.js'
+import { normalizeColumn, shapeKey } from './column-shape.js'
 import { constraintKind } from './constraint.js'
 import { readonlySettingsFingerprint } from './table-settings.js'
 import { sqlExpressionFingerprint } from './sql-normalizer.js'
@@ -195,31 +194,6 @@ function recreateDropRisk(oldDef: TableDefinition): RiskLevel {
 interface TableDiffResult {
   operations: MigrationOperation[]
   renameSuggestions: ColumnRenameSuggestion[]
-}
-
-function normalizeColumn(
-  column: ColumnDefinition
-): Omit<ColumnDefinition, 'name' | 'renamedFrom' | 'nullable' | 'codec'> & { codec: string } {
-  const { name: _name, renamedFrom: _renamedFrom, type: _type, nullable: _nullable, codec: _codec, ...rest } = column
-  // Compare what the DSL renders: inline Nullable(T) and nullable: true are
-  // equivalent, while an additional or differently placed wrapper is not.
-  return {
-    // ClickHouse stores `Decimal(10,2)` as `Decimal(10, 2)` (#466).
-    type: columnTypeFingerprint(column),
-    ...rest,
-    ...(column.default === undefined ? {} : { default: defaultFingerprint(column.default) }),
-    // Codecs compare in the form ClickHouse stores them, like drift (#465).
-    codec: columnCodecFingerprint(column),
-  }
-}
-
-// A literal compares by the SQL it renders, so the literal 7 and the
-// expression '7' that pull reads back are the same default (#466). An
-// expression keeps its comments, which the snapshot records as written.
-function defaultFingerprint(value: ColumnDefaultValue): string {
-  const parsed = parseColumnDefault(value)
-  const sql = parsed.kind === 'expression' ? parsed.sql : renderDefault(value)
-  return literalDefaultFingerprint(sql) ?? sql
 }
 
 function normalizeColumnWithoutCodec(
@@ -411,15 +385,6 @@ function dictionaryLifetimeFingerprint(lifetime: string): string {
 // the same tuple, and `((s))`, `(s)` and `s` the same expression.
 function indexComparisonShape(index: SkipIndexDefinition): SkipIndexDefinition {
   return { ...index, expression: sqlExpressionFingerprint(index.expression) }
-}
-
-function shapeKey(value: unknown): string {
-  return JSON.stringify(value, sortObjectKeys)
-}
-
-function sortObjectKeys(_key: string, value: unknown): unknown {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return value
-  return Object.fromEntries(Object.entries(value).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
 }
 
 function diffDictionary(
@@ -767,6 +732,8 @@ export function planDiff(
   const ordered = orderOperations(operations.sort(compareOperations), {
     drop: invertDependencyGraph(buildDependencyGraph(oldCanonical)),
     create: buildDependencyGraph(newCanonical),
+    previous: oldCanonical,
+    next: newCanonical,
   })
 
   const riskSummary: Record<RiskLevel, number> = { safe: 0, caution: 0, danger: 0 }
@@ -819,18 +786,19 @@ function alterRank(op: MigrationOperation): number {
 /**
  * Reorders the drop and create segments of a (rank, key)-sorted plan by object
  * dependencies (#231): drops run dependents first, creates run dependencies
- * first. Alters and create_database keep their place.
+ * first. Alters and create_database keep their place, except that the column
+ * statements of a table are ordered by the columns they read and remove.
  */
 function orderOperations(
   sorted: MigrationOperation[],
-  prerequisites: { drop: DependencyGraph; create: DependencyGraph }
+  prerequisites: { drop: DependencyGraph; create: DependencyGraph } & ColumnStatementDefinitions
 ): MigrationOperation[] {
   const drops = sorted.filter((op) => operationRank(op) === 0)
   const middle = sorted.filter((op) => operationRank(op) === 1 || operationRank(op) === 2)
   const creates = sorted.filter((op) => operationRank(op) >= 3)
   return [
     ...orderByDependencies(drops, (op) => op.key, (key) => prerequisites.drop.get(key) ?? []),
-    ...middle,
+    ...orderColumnStatements(middle, prerequisites, []),
     ...orderByDependencies(creates, (op) => op.key, (key) => prerequisites.create.get(key) ?? []),
   ]
 }

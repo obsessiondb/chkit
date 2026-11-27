@@ -29,9 +29,9 @@ The integrations copy editable TypeScript schemas, API readers, and pipelines in
 
 1. **Install an integration.** Use `chkit add` to copy a provider template into the project, then configure the app credentials and ClickHouse connection.
 2. **Prepare the tables.** [chkit Schema](/getting-started/) defines destination tables and generates reviewable migrations. Apply them before the first sync.
-3. **Run and repeat.** `chkit ingest` pulls API records, writes them to ClickHouse, and saves checkpoints after successful writes. Schedule recurring runs through cron, CI, or an existing scheduler.
+3. **Run and repeat.** `chkit sync` pulls API records, writes them to ClickHouse, and saves checkpoints after successful writes. Schedule recurring runs through cron, CI, or an existing scheduler.
 
-Sync uses the `@chkit/plugin-ingest` package and the `chkit ingest` command.
+Sync uses the `@chkit/plugin-sync` package and the `chkit sync` command.
 
 Each run is a finite API pull. Checkpoints support incremental syncs and recovery; destination keys and versioning handle replayed rows. Record coverage and deletion behavior vary by integration.
 
@@ -55,5 +55,5 @@ Use [destinations and transformations](/api-sync/destinations/) to shape tables 
 - [Apps & integrations](/integrations/): choose an app and follow its setup guide.
 - [Sync quickstart](/api-sync/quickstart/): install the beta packages and run a first source.
 - [Sync CLI](/sync/cli/): template and stream commands.
-- [Sync plugin reference](/plugins/ingest/): TypeScript configuration and APIs.
+- [Sync plugin reference](/plugins/sync/): TypeScript configuration and APIs.
 - [Publish a registry](/api-sync/registry-authoring/): distribute custom provider templates.

@@ -76,6 +76,9 @@ def _payload(snapshot_file: str, *, database_missing: bool = False) -> DriftPayl
             ObjectDriftDetail(
                 code="query_mismatch", object="app.v", expected="SELECT 1", actual="SELECT 2"
             ),
+            ObjectDriftDetail(
+                code="layout_mismatch", object="app.d", expected="HASHED()", actual="FLAT()"
+            ),
         ],
         table_drift=[TABLE_DRIFT],
         database_missing=database_missing,
@@ -116,6 +119,7 @@ def test_json_matches_the_ts_payload(tmp_path: Path, monkeypatch: pytest.MonkeyP
         {"code": "missing_object", "object": "table:app.gone", "expectedKind": "table"},
         {"code": "extra_object", "object": "view:app.stray", "actualKind": "view"},
         {"code": "query_mismatch", "object": "app.v", "expected": "SELECT 1", "actual": "SELECT 2"},
+        {"code": "layout_mismatch", "object": "app.d", "expected": "HASHED()", "actual": "FLAT()"},
     ]
     assert list(payload["tableDrift"][0]) == [
         "table", "reasonCodes", "missingColumns", "extraColumns", "changedColumns",
@@ -162,6 +166,9 @@ def test_text_matches_the_ts_sections(tmp_path: Path, monkeypatch: pytest.Monkey
         "- query_mismatch app.v\n"
         "  expected=SELECT 1\n"
         "  actual=SELECT 2\n"
+        "- layout_mismatch app.d\n"
+        "  expected=HASHED()\n"
+        "  actual=FLAT()\n"
         "\n"
         "Table shape drift:\n"
         "- app.events\n"

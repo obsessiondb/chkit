@@ -1,6 +1,6 @@
 # Attio CRM ingestion
 
-This is your source code: edit the API readers, schemas, views, and `pipeline.ts` directly. It uses the [chkit CLI](https://www.npmjs.com/package/chkit), `@chkit/core`, and `@chkit/plugin-ingest`; there is no runtime connection to the template registry.
+This is your source code: edit the API readers, schemas, views, and `pipeline.ts` directly. It uses the [chkit CLI](https://www.npmjs.com/package/chkit), `@chkit/core`, and `@chkit/plugin-sync`; there is no runtime connection to the template registry.
 
 ## First run
 
@@ -21,11 +21,11 @@ Review `config.ts` before the first migration. The default target database is `d
 
 ```sh
 bunx chkit check
-bunx chkit ingest list --tag provider:attio
+bunx chkit sync list --tag provider:attio
 bunx chkit generate --name add_attio
 # Review the generated SQL.
 bunx chkit migrate --apply
-bunx chkit ingest run --tag provider:attio
+bunx chkit sync run --tag provider:attio
 ```
 
 The schema uses native JSON (ClickHouse 25.3 or newer). A direct ClickHouse connection is required; workbench-only execution is not supported. Use an external scheduler to repeat the run command, with one ingestion process per project/target at a time.
@@ -69,13 +69,13 @@ Object streams use `<sourceId>.records.<ref>` and `<sourceId>.object_attributes.
 To run all configured records streams:
 
 ```sh
-bunx chkit ingest run --tag provider:attio --tag resource:records
+bunx chkit sync run --tag provider:attio --tag resource:records
 ```
 
 To run only People records:
 
 ```sh
-bunx chkit ingest run --tag provider:attio --tag resource:records --tag object:people
+bunx chkit sync run --tag provider:attio --tag resource:records --tag object:people
 ```
 
 Record streams carry `resource:records` and `object:<ref>`. Object-attribute streams carry `resource:object_attributes` and `object:<ref>`; entries/list-attribute streams carry their resource tag and `list:<ref>`.
@@ -112,4 +112,4 @@ For a custom install path, point the command at that folder's `tests/attio.test.
 
 ## Smoke check
 
-After a migration and one successful run, inspect `chkit ingest status --tag provider:attio` and query `SELECT count() FROM default.attio_records_raw FINAL`. Compare a known record's retained `raw.data` with its Attio API response. Run again after changing that record and verify its view reflects the new observation. This smoke check needs a real test workspace and database; the registry's sanitized fixture tests do not assert complete live API coverage.
+After a migration and one successful run, inspect `chkit sync status --tag provider:attio` and query `SELECT count() FROM default.attio_records_raw FINAL`. Compare a known record's retained `raw.data` with its Attio API response. Run again after changing that record and verify its view reflects the new observation. This smoke check needs a real test workspace and database; the registry's sanitized fixture tests do not assert complete live API coverage.

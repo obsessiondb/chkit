@@ -172,3 +172,65 @@ def test_unchanged_views_read_clean_and_changed_query_or_target_drifts(tmp_path:
             client.execute(f"DROP DICTIONARY IF EXISTS {database}.{statuses}")
             for name in (orders, by_day, by_day_alt):
                 client.execute(f"DROP TABLE IF EXISTS {database}.{name} SYNC")
+
+
+def test_stored_cte_and_udf_rewrites_preserve_real_drift(tmp_path: Path) -> None:
+    with _connect() as client:
+        database = client.database
+        prefix = create_prefix("stored_rewrites")
+        udf = prefix + "classify"
+        union_name, ai_name = prefix + "queue", prefix + "ai"
+        union = (
+            "WITH task_capture AS (SELECT number AS id FROM numbers(3)) "
+            "SELECT id FROM task_capture WHERE id IN (SELECT number FROM numbers(2)) "
+            "UNION ALL SELECT id FROM task_capture"
+        )
+        ai = f"SELECT {udf}(toString(number), map('lead', 'Qualified')) AS verdict FROM numbers(3)"
+        definitions: list[SchemaDefinition] = [
+            view(database=database, name=union_name, as_=union),
+            view(database=database, name=ai_name, as_=ai),
+        ]
+        snapshot = create_snapshot(canonicalize_definitions(definitions))
+
+        def drift() -> list[tuple[str, str]]:
+            payload = build_drift_payload(
+                client=client, meta_dir=tmp_path, snapshot=snapshot, database=database
+            )
+            return [(d.code, d.object) for d in payload.object_drift if prefix in d.object]
+
+        try:
+            client.execute(
+                f"CREATE FUNCTION {udf} AS (text, categories) -> "
+                "CAST(tuple(if(length(text) + length(toString(categories)) >= 0, 'unknown', 'unknown'), toFloat64(0)), "
+                "'Tuple(category String, confidence Float64)')"
+            )
+            for definition in definitions:
+                client.execute(to_create_sql(definition))
+            assert drift() == []
+            for changed in (
+                union.replace("numbers(3)", "numbers(4)"),
+                union.replace("UNION ALL", "UNION DISTINCT"),
+                union.replace("UNION ALL SELECT id", "UNION ALL SELECT id + 1 AS id"),
+                union.replace(
+                    "UNION ALL SELECT",
+                    "UNION ALL WITH task_capture AS (SELECT toUInt64(8) AS id) SELECT",
+                ),
+            ):
+                client.execute(f"CREATE OR REPLACE VIEW {database}.{union_name} AS {changed}")
+                assert drift() == [("query_mismatch", f"{database}.{union_name}")]
+            client.execute(f"CREATE OR REPLACE VIEW {database}.{union_name} AS {union}")
+            for changed in (
+                ai.replace("Qualified", "Unqualified"),
+                ai.replace("toString(number)", "concat('other', toString(number))"),
+            ):
+                client.execute(f"CREATE OR REPLACE VIEW {database}.{ai_name} AS {changed}")
+                assert drift() == [("query_mismatch", f"{database}.{ai_name}")]
+            client.execute(f"CREATE OR REPLACE VIEW {database}.{ai_name} AS {ai}")
+            assert drift() == []
+            assert not client.query(
+                "SELECT name FROM system.tables WHERE name='_chkit_drift_syntax'"
+            ).rows
+        finally:
+            for name in (union_name, ai_name):
+                client.execute(f"DROP VIEW IF EXISTS {database}.{name}")
+            client.execute(f"DROP FUNCTION IF EXISTS {udf}")
