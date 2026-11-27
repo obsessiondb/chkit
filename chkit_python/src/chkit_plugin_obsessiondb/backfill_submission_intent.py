@@ -67,8 +67,9 @@ def reconcile_submission_intent(
             f"An earlier submit of plan {plan_id} (started {started_at}) "
             f"may have created a job on service {service_slug}, and its job list shows none "
             "from that submit. Nothing was submitted. A request that timed out can still "
-            f"create its job: once the console shows no job for plan {plan_id} created since "
-            f"{started_at}, delete {path} and re-run."
+            "create its job later, and a re-run follows it once it is listed. Delete "
+            f"{path} and re-run only once you are sure that submit ended without creating "
+            f"a job for plan {plan_id}."
         )
         raise ValueError(msg)
     if saved is None:

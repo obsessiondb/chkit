@@ -811,8 +811,9 @@ describe('handleSubmit --plan-id', () => {
 			ok: false,
 			command: 'backfill submit',
 			error: `An earlier submit of plan ${planId} (started ${startedAt}) may have created a job on service svc, ` +
-				'and its job list shows none from that submit. Nothing was submitted. A request that timed out can still create its job: ' +
-				`once the console shows no job for plan ${planId} created since ${startedAt}, delete ${path} and re-run.`,
+				'and its job list shows none from that submit. Nothing was submitted. A request that timed out can still create its job later, ' +
+				'and a re-run follows it once it is listed. Delete ' +
+				`${path} and re-run only once you are sure that submit ended without creating a job for plan ${planId}.`,
 		})
 		expect(backend.calls).toEqual(['jobs/get', 'jobs/submit', 'jobs/list'])
 		expect(await readFile(path, 'utf8')).toBe(intent)

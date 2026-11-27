@@ -1238,8 +1238,9 @@ def test_refuses_an_unmatched_intent_even_when_the_complete_list_shows_the_marke
         "error": (
             f"An earlier submit of plan {PLAN_ID} (started {started_at}) may have created a "
             "job on service svc-1, and its job list shows none from that submit. Nothing was "
-            f"submitted. A request that timed out can still create its job: once the console "
-            f"shows no job for plan {PLAN_ID} created since {started_at}, delete {path} and re-run."
+            "submitted. A request that timed out can still create its job later, and a re-run "
+            f"follows it once it is listed. Delete {path} and re-run only once you are sure "
+            f"that submit ended without creating a job for plan {PLAN_ID}."
         ),
     }
     assert backend.calls == ["jobs/get", "jobs/submit", "jobs/list"]
