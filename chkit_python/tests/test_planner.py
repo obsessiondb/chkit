@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from chkit.core.canonical import canonicalize_definitions
-from chkit.core.model import ColumnDefinition, table
+from chkit.core.model import ColumnDefinition, SchemaDefinition, table
 from chkit.core.planner import plan_diff
 
 
-def _events_v1() -> list:
+def _events_v1() -> list[SchemaDefinition]:
     return canonicalize_definitions(
         [
             table(
@@ -25,7 +25,7 @@ def _events_v1() -> list:
     )
 
 
-def _events_v2() -> list:
+def _events_v2() -> list[SchemaDefinition]:
     return canonicalize_definitions(
         [
             table(

@@ -144,11 +144,13 @@ export async function runOnPlanCreated(
 export async function runOnBeforeApply(
   loaded: LoadedPlugin[],
   context: ChxOnBeforeApplyContext,
+  signal?: AbortSignal,
 ): Promise<string[]> {
   let statements = context.statements
   for (const item of loaded) {
     const hook = item.plugin.hooks?.onBeforeApply
     if (!hook) continue
+    signal?.throwIfAborted()
     debug(
       'hook',
       `onBeforeApply → ${item.plugin.manifest.name} (${context.migration}, ${statements.length} statements)`,

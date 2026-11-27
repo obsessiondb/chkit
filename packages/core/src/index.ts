@@ -1,8 +1,9 @@
 export * from './flags.js'
 export * from './model.js'
 export { isKafkaEngine, parseKafkaSettings, kafkaSettingFingerprint } from './kafka.js'
-export { engineName, isDistributedEngine, isMergeTreeEngine, supportsSortOrder } from './engine.js'
+export { engineName, isDistributedEngine, isMergeTreeEngine, replicatedEngineAsShared, supportsSortOrder } from './engine.js'
 export {
+  findMatchingParen,
   findQuoteEnd,
   findTopLevelSQLPattern,
   isQuoteChar,
@@ -11,6 +12,7 @@ export {
 export { identifierName, isTrivia, stringLiteralValue, tokenizeSQL, type SQLToken } from './sql-lexer.js'
 export { SYNTHESIZED_CONFIG_PATH, isSynthesizedConfigPath } from './config-path.js'
 export { hasConflictMarkers } from './conflict-markers.js'
+export { compareCodePoints } from './order.js'
 export {
   canonicalizeDefinition,
   canonicalizeDefinitions,
@@ -19,6 +21,9 @@ export {
   type CanonicalizeOptions,
 } from './canonical.js'
 export { planDiff } from './planner.js'
+export { isColumnStatement, orderColumnStatements } from './column-order.js'
+export type { ColumnStatementDefinitions } from './column-cycle-repair.js'
+export { columnRenameKey, type ColumnRename } from './column-reads.js'
 export {
   AUTO_MINMAX_INDEX_PREFIX,
   DEFAULT_INDEX_GRANULARITY,
@@ -100,8 +105,11 @@ export { createPluginRunner, wrapPluginRun, type PluginRunContext } from './plug
 export {
   splitSqlStatements,
   extractExecutableStatements,
+  extractExecutableStatementsWithComments,
   extractLegacyExecutableStatements,
+  type ExecutableStatementWithComments,
 } from './sql-splitter.js'
+export { statementFingerprint } from './sql-fingerprint.js'
 export { parseJsonEachRow, parseJsonEachRowLine, roundTripNumber } from './exact-json.js'
 export { t } from './clickhouse-type.js'
 export { p, type NamedParam } from './query-param.js'

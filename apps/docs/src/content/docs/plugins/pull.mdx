@@ -59,7 +59,7 @@ The plugin is designed for bootstrapping a chkit project from an existing ClickH
 
 ## Options
 
-- `outFile` (default: `./src/db/schema/pulled.ts`) — Output file path for the generated schema.
+- `outFile` (default: `./src/db/schema/pulled.ts`) — Output file path for the generated schema. Pull writes this path as given: a symlink there, even a dangling one, counts as an existing file and is replaced by the pulled file, not written through.
 - `databases` (default: `[]`, meaning all) — Filter to specific databases.
 - `overwrite` (default: `false`) — Allow overwriting an existing output file.
 - `introspect` (default: built-in) — Custom introspection function (advanced).

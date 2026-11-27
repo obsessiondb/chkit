@@ -43,6 +43,32 @@ export function supportsSortOrder(engine: string): boolean {
   return isMergeTreeEngine(engine) || NON_MERGE_TREE_SORT_ORDER_ENGINES.has(engineName(engine))
 }
 
+const REPLICATED_ENGINE_NAME = /^\s*Replicated([A-Za-z0-9_]*MergeTree)/
+// A Keeper path or replica name that the server drops: a string literal or a
+// heredoc. ObsessionDB keeps an expression path such as concat(...) as written.
+const REPLICATION_ARGUMENT = /^(?:'(?:[^'\\]|\\[\s\S]|'')*'|\$([A-Za-z0-9_]*)\$[\s\S]*\$\1\$)$/
+
+/**
+ * The engine a `Replicated*MergeTree` table has on a shared-storage server
+ * (ObsessionDB, ClickHouse Cloud), without the `Shared` prefix: the server
+ * drops the Keeper path and replica name and keeps the other arguments, so
+ * `ReplicatedReplacingMergeTree('/p', '{replica}', ver)` is stored as
+ * `SharedReplacingMergeTree(ver)`. Undefined for any other engine.
+ */
+export function replicatedEngineAsShared(engine: string): string | undefined {
+  const match = REPLICATED_ENGINE_NAME.exec(engine)
+  if (!match) return undefined
+  const rest = engine.slice(match[0].length).trim()
+  if (rest !== '' && !(rest.startsWith('(') && rest.endsWith(')'))) return undefined
+  const inner = rest.slice(1, -1)
+  const args = inner.trim() ? splitTopLevelComma(inner) : []
+  const [path, replica] = args
+  const kept = path !== undefined && replica !== undefined && REPLICATION_ARGUMENT.test(path) && REPLICATION_ARGUMENT.test(replica)
+    ? args.slice(2)
+    : args
+  return `${match[1]}(${kept.join(', ')})`
+}
+
 export function isDistributedEngine(engine: string): boolean {
   return engineName(engine) === 'Distributed'
 }

@@ -11,6 +11,7 @@ from chkit.core.canonical import canonicalize_definitions
 from chkit.core.model import (
     MigrationPlan,
     TableDefinition,
+    ValidationIssueCode,
     ViewDefinition,
     dictionary,
     materialized_view,
@@ -274,7 +275,7 @@ def with_ephemeral(**overrides: Any) -> TableDefinition:
     )
 
 
-def codes(definition: TableDefinition) -> list[str]:
+def codes(definition: TableDefinition) -> list[ValidationIssueCode]:
     # to_create_sql validates the definition as written; plan_diff, generate
     # and snapshot rebuild validate its canonical form. Both must agree.
     raw = [issue.code for issue in validate_definitions([definition])]

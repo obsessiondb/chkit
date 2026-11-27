@@ -34,7 +34,7 @@ class _Client:
     queries: list[str] = field(default_factory=list[str])
     executed: list[str] = field(default_factory=list[str])
 
-    def query(self, sql: str) -> _Result:
+    def query(self, sql: str, settings: object = None) -> _Result:
         self.queries.append(sql)
         error = self.fail(sql, self.executed)
         if error is not None:
@@ -103,8 +103,8 @@ def test_the_first_write_creates_the_journal_that_reads_found_missing() -> None:
         )
     )
 
-    assert client.executed[0].startswith("CREATE TABLE IF NOT EXISTS _chkit_migrations")
-    assert any(sql.startswith("INSERT INTO _chkit_migrations") for sql in client.executed)
+    assert client.executed[0].startswith("CREATE TABLE IF NOT EXISTS `default`._chkit_migrations")
+    assert any(sql.startswith("INSERT INTO `default`._chkit_migrations") for sql in client.executed)
 
 
 def test_an_up_to_date_journal_is_read_without_alter() -> None:
@@ -122,7 +122,9 @@ def test_a_journal_without_the_per_operation_columns_is_upgraded() -> None:
 
     store.read_journal()
 
-    assert len([sql for sql in client.executed if sql.startswith("ALTER TABLE")]) == 2
+    alters = [sql for sql in client.executed if sql.startswith("ALTER TABLE")]
+    assert len(alters) == 3
+    assert "ADD COLUMN IF NOT EXISTS operation_fingerprints Array(String) DEFAULT []" in alters[2]
 
 
 def test_a_read_fails_on_an_error_other_than_a_missing_journal() -> None:

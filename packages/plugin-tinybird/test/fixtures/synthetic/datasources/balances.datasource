@@ -1,0 +1,10 @@
+SCHEMA >
+    `account` String,
+    `balance` Int64,
+    `sign` Int8,
+    `version` UInt64
+
+ENGINE "VersionedCollapsingMergeTree"
+ENGINE_SORTING_KEY "account"
+ENGINE_SIGN "sign"
+ENGINE_VERSION "version"

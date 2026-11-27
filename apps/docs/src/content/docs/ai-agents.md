@@ -177,6 +177,7 @@ In TypeScript, plugins are npm packages registered in the `plugins` array of `cl
 | Generate **typed row models**: TypeScript types (and optional Zod schemas), or Pydantic models in Python: from the schema | [`@chkit/plugin-codegen`](/plugins/codegen/) | Keeps application row types in sync with the schema definitions. |
 | **Backfill** historical data into materialized views | [`@chkit/plugin-backfill`](/plugins/backfill/) | Partition/sort-key replay with checkpoints; inspect plan predicates and retry/engine semantics. |
 | Deploy to **ObsessionDB** | [`@chkit/plugin-obsessiondb`](/obsessiondb/overview/) | ObsessionDB connection and service selection; strips the `storage_policy` table setting when targeting non-ObsessionDB ClickHouse. |
+| Move a **Tinybird** project to chkit | [`@chkit/plugin-tinybird`](/plugins/tinybird/) | TypeScript only. Install the `chkit-tinybird` skill (`npx skills add obsessiondb/chkit --skill chkit-tinybird`): it walks the agent through finding or pulling the project, the import and what does not translate. |
 
 Install plugins for the project's stated requirements.
 
@@ -185,7 +186,7 @@ Install plugins for the project's stated requirements.
 chkit applies DDL to real databases. Treat the following as hard rules unless the user explicitly overrides them:
 
 :::caution
-- **Preview with `chkit migrate --json`.** This reports pending work without executing migration statements; connected setup can initialize the journal. Review the pending SQL, then apply with the authorization already supplied, or ask if the requested writes are not authorized. For populated structural changes, generate a [zero-downtime cutover](/guides/data-preserving-migrations/) (`chkit generate --cutover <db.table>=<key>`) instead of approving a generated DROP/CREATE. A plain `chkit migrate` in an interactive terminal can prompt to apply the plan.
+- **Preview with `chkit migrate --json`.** This reports pending work without executing migration statements; connected setup can initialize the journal. Review the pending SQL, then apply with the authorization already supplied, or ask if the requested writes are not authorized. For populated structural changes, generate a zero-downtime cutover (`chkit generate --cutover <db.table>=<key>`) instead of approving a generated DROP/CREATE. A plain `chkit migrate` in an interactive terminal can prompt to apply the plan.
 - **Recover a failed migration with the CLI, not by editing the journal.** Preview with `chkit migrate --retry <file> --json` or `chkit migrate --abandon <file> --json`, show the user the result, and add `--apply` once they confirm. Never delete rows from the `_chkit_migrations` table. See [failed migrations](/cli/migrate/#failed-migrations).
 - **Verify before applying against anything shared or production.** Run `chkit check` and `chkit drift` first; surface drift to the user rather than silently overwriting it. Some properties are [not compared](/cli/drift/#what-drift-does-not-compare).
 - **Generate, then review.** After `chkit generate`, read the migration SQL in `chkit/migrations/` and confirm it matches intent before applying. Migrations are forward-only DDL.

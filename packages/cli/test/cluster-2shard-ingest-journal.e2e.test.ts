@@ -3,11 +3,11 @@ import { describe, expect, test } from 'bun:test'
 import { createStatelessClickHouseExecutor, type ClickHouseExecutor } from '@chkit/clickhouse'
 import { table } from '@chkit/core'
 
-import { createClickHouseDestination, ingestionColumns } from '../../plugin-ingest/src/destination.js'
-import { runIngestion } from '../../plugin-ingest/src/executor.js'
-import { cursorState } from '../../plugin-ingest/src/incremental.js'
-import { createClickHouseJournal, journalTableSql } from '../../plugin-ingest/src/journal.js'
-import { definePipeline, defineStream, selectStreams } from '../../plugin-ingest/src/registry.js'
+import { createClickHouseDestination, ingestionColumns } from '../../plugin-sync/src/destination.js'
+import { runIngestion } from '../../plugin-sync/src/executor.js'
+import { cursorState } from '../../plugin-sync/src/incremental.js'
+import { createClickHouseJournal, journalTableSql } from '../../plugin-sync/src/journal.js'
+import { definePipeline, defineStream, selectStreams } from '../../plugin-sync/src/registry.js'
 import { createPrefix } from '../src/test/e2e-testkit.js'
 
 // The ingest journal on test/cluster/2shard (2 shards x 2 replicas). A run can

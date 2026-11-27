@@ -36,8 +36,8 @@ Global flags documented on [CLI Overview](/cli/overview/#global-flags).
 
 This command delegates to the codegen plugin's `codegen` command. The codegen plugin must be registered in your config's `plugins` array with `manifest.name` equal to `"codegen"`.
 
-If the codegen plugin is not configured, the command fails with:
-_"Codegen plugin is not configured. Add a plugin with manifest.name "codegen" to config.plugins."_
+If the codegen plugin is not configured, the command fails with exit code 1 and:
+_"Codegen plugin is not configured. Add it to config.plugins first."_ Under `--json` the error envelope has code `plugin_not_configured`.
 
 Generated insert helpers, named `ingest<TableName>`, pass typed rows to the supplied `Ingestor.insert` implementation. Request-body compression is enabled by default. Pass `{ compressed: false }` as the third argument to opt out for a specific call.
 

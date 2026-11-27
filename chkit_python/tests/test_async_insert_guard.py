@@ -28,7 +28,7 @@ class _QueryLogClient:
     replicas: int = 1
     queries: list[str] = field(default_factory=list[str])
 
-    def query(self, sql: str) -> _Rows:
+    def query(self, sql: str, settings: object = None) -> _Rows:
         self.queries.append(sql)
         if "system.one" in sql:
             return _Rows([{"replicas": self.replicas}])

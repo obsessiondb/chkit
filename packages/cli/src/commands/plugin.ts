@@ -1,8 +1,14 @@
 import { typedFlags, type ChxPluginCommand, type ParsedFlags } from '../plugins.js'
-import { forwardedCommandFlags, parsePluginCommandArgs, routeForwardedArgs } from '../runtime/command-dispatch.js'
+import {
+  findForwardedPlugin,
+  forwardedCommandFlags,
+  parsePluginCommandArgs,
+  reportStrayArgs,
+  routeForwardedArgs,
+} from '../runtime/command-dispatch.js'
 import { TABLE_FLAG } from '../runtime/global-flags.js'
 import { emitJson, printOutput } from '../runtime/json-output.js'
-import { UnknownFlagError, MissingFlagValueError } from '@chkit/core'
+import { compareCodePoints, UnknownFlagError, MissingFlagValueError } from '@chkit/core'
 import { resolveTableScope, tableKeysFromDefinitions } from '../runtime/table-scope.js'
 import { loadSchemaDefinitions } from '../runtime/schema-loader.js'
 
@@ -18,8 +24,11 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
   const jsonMode = flags['--json'] === true
 
   const { pluginName, commandName, commandArgs } = routeForwardedArgs(args)
+  // The built-in plugins (core, skill-hint) only carry chkit's own commands
+  // and hooks: `chkit plugin` covers the plugins of the config, as chkit-py.
+  const plugins = pluginRuntime.plugins.filter((entry) => !entry.internal)
 
-  if (pluginRuntime.plugins.length === 0) {
+  if (plugins.length === 0) {
     if (jsonMode) {
       emitJson('plugin', {
         error: 'No plugins configured. Add entries to config.plugins first.',
@@ -32,7 +41,7 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
 
   if (!pluginName) {
     const payload = {
-      plugins: pluginRuntime.plugins.map((entry) => ({
+      plugins: plugins.map((entry) => ({
         name: entry.plugin.manifest.name,
         version: entry.plugin.manifest.version ?? null,
         commands: (entry.plugin.commands ?? []).map((command) => ({
@@ -48,8 +57,10 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
     }
 
     console.log('Configured plugins:')
+    const hasSync = payload.plugins.some((plugin) => plugin.name === 'sync')
     for (const plugin of payload.plugins) {
-      console.log(`- ${plugin.name}${plugin.version ? ` (v${plugin.version})` : ''}`)
+      const name = plugin.name === 'ingest' && !hasSync ? 'sync' : plugin.name
+      console.log(`- ${name}${plugin.version ? ` (v${plugin.version})` : ''}`)
       if (plugin.commands.length === 0) {
         console.log('  (no commands)')
         continue
@@ -61,11 +72,9 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
     return 0
   }
 
-  const selectedPlugin = pluginRuntime.plugins.find(
-    (entry) => entry.plugin.manifest.name === pluginName
-  )
+  const selectedPlugin = findForwardedPlugin(plugins, pluginName)
   if (!selectedPlugin) {
-    const known = pluginRuntime.plugins.map((entry) => entry.plugin.manifest.name).sort()
+    const known = plugins.map((entry) => entry.plugin.manifest.name).sort(compareCodePoints)
     throw new Error(
       `Unknown plugin "${pluginName}". Available: ${known.length > 0 ? known.join(', ') : '(none)'}.`
     )
@@ -77,7 +86,7 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
       description: command.description ?? '',
     }))
     const payload = {
-      plugin: selectedPlugin.plugin.manifest.name,
+      plugin: pluginName,
       commands,
     }
 
@@ -87,11 +96,11 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
     }
 
     if (commands.length === 0) {
-      console.log(`Plugin "${selectedPlugin.plugin.manifest.name}" has no registered commands.`)
+      console.log(`Plugin "${pluginName}" has no registered commands.`)
       return 0
     }
 
-    console.log(`Plugin commands for "${selectedPlugin.plugin.manifest.name}":`)
+    console.log(`Plugin commands for "${pluginName}":`)
     for (const command of commands) {
       console.log(`- ${command.name}${command.description ? `: ${command.description}` : ''}`)
     }
@@ -111,7 +120,8 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
     }
     return 1
   }
-  const commandFlags = forwardedCommandFlags(pluginRuntime.plugins, pluginName, targetCommand)
+  const manifestName = selectedPlugin.plugin.manifest.name
+  const commandFlags = forwardedCommandFlags(pluginRuntime.plugins, manifestName, targetCommand)
   // Parse even when the command declares no flags, so an unknown flag is
   // rejected as in `chkit <plugin> <command>` instead of reaching the args (#491).
   // As there, the command gets its flags in `flags` and only the positionals
@@ -133,6 +143,11 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
     }
     throw error
   }
+  // A command that takes no arguments rejects them as core commands do (#659).
+  if (targetCommand.takesArgs === false && positionals.length > 0) {
+    reportStrayArgs('plugin', positionals, jsonMode)
+    return 1
+  }
 
   // Set only when the target command declares --table (#565).
   const tableSelector = typedFlags(mergedFlags, [TABLE_FLAG] as const)['--table']
@@ -146,7 +161,7 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
     tableScope = resolveTableScope(tableSelector, [])
   }
 
-  const exitCode = await pluginRuntime.runPluginCommand(pluginName, commandName, {
+  const exitCode = await pluginRuntime.runPluginCommand(manifestName, commandName, {
     config,
     configPath,
     jsonMode,

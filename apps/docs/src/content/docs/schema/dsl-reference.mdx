@@ -319,7 +319,7 @@ See the ClickHouse [data types reference](https://clickhouse.com/docs/sql-refere
 
 ### `nullable` (boolean, optional)
 
-When `true`, the column type is wrapped in `Nullable(...)` in the generated SQL.
+When `true`, the column type is wrapped in `Nullable(...)` in the generated SQL. A `LowCardinality(T)` type becomes `LowCardinality(Nullable(T))`, because ClickHouse rejects `Nullable(LowCardinality(T))`.
 
 An inline nullable type (`type: 'Nullable(String)'`) and `type: 'String', nullable: true` are equivalent in migration generation and drift checks. Use either form; setting `nullable: true` on an already nullable type adds another wrapper.
 
@@ -381,7 +381,7 @@ An expression may span lines and contain SQL comments. chkit removes the comment
 [`chkit drift`](/cli/drift/#expression-defaults) and [`chkit check`](/cli/check/) compare defaults with the live `default_expression` token by token, ignoring whitespace, comments, outer parentheses, and quotes around plain identifiers. A string stays a literal, so `default: 'now()'` drifts against a live `DEFAULT now()`.
 
 :::caution
-ClickHouse stores some expressions in a canonical form, such as `now()` for `NOW()`, `CAST(ts, 'String')` for `cast(ts as String)` or `ts::String`, and `now() + toIntervalDay(1)` for `now() + INTERVAL 1 DAY`. Write the stored form in `{ expression }` to avoid permanent drift; `chkit pull` and `system.columns` show it.
+ClickHouse stores some expressions in a canonical form, such as `now()` for `NOW()`, `CAST(ts, 'String')` for `cast(ts as String)` or `ts::String`, and `now() + toIntervalDay(1)` for `now() + INTERVAL 1 DAY`. `drift` passes expression defaults through ClickHouse's formatter and resolves function names through `system.functions`, so these rewrites (`CAST`, `toIntervalDay`, operator spacing and parentheses, `now` for `NOW`) do not drift; a rewrite neither step makes does. Write the stored form in `{ expression }` to avoid permanent drift; `chkit pull` and `system.columns` show it.
 :::
 
 **The `fn:` prefix.** A string that starts with `fn:` is the original spelling of an expression default and keeps working: `default: 'fn:now64(3)'` is equivalent to `default: { expression: 'now64(3)' }`. `chkit/meta/snapshot.json` stores both as `"fn:now64(3)"`, so switching between them generates no migration. Because of the prefix, a string literal cannot start with `fn:`; to store such a value, write the quoted literal as an expression: `default: { expression: "'fn:abc'" }`.
@@ -1361,4 +1361,4 @@ Changing a structural property on an existing table generates a `DROP TABLE` fol
 
 A comment change never recreates a view, materialized view or dictionary: recreating a materialized view would lose the rows its source receives in between. A change that recreates the object anyway, such as a new query, carries the new comment in its `CREATE`.
 
-On ObsessionDB, `MODIFY COMMENT` currently changes only the replica that runs it ([#407](https://github.com/obsessiondb/chkit/issues/407)), so `chkit drift` may report a `comment_mismatch` for a table, view, materialized view or dictionary until the server fix ships. Column comments are not affected.
+On ObsessionDB, `MODIFY COMMENT` currently changes only the replica that runs it, so `chkit drift` may report a `comment_mismatch` for a table, view, materialized view or dictionary until the server fix ships. Column comments are not affected.

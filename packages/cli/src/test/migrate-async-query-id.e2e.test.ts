@@ -13,6 +13,7 @@ import {
   createPrefix,
   formatTestDiagnostic,
   getLiveEnv,
+  heldLockClaim,
   pollUntil,
   quoteIdent,
   startCli,
@@ -26,7 +27,7 @@ import {
 
 const TIMEOUT_MS = 240_000
 const ROWS = 16
-// About 8 s at 0.5 s per row, so the other run starts while it still runs.
+// About 16 s at 1 s per row, so the other run starts, and a re-run takes the migrate lock, while it still runs.
 // It fails on row FAIL_AT in a database whose fail_marker has a row.
 const FAIL_AT = 12
 
@@ -42,7 +43,7 @@ interface Fixture {
 type Target = 'staging' | 'prod'
 
 describe('async migrate statements across databases (#463)', () => {
-  test("a run never takes the other database's failure, and the failed run retries its own load", async () => {
+  test("a run never takes the other database's failure, and the failed run retries its own load after an abandon", async () => {
     const fixture = await createFixture('qid_failure')
     const { executor, databases } = fixture
     try {
@@ -57,11 +58,19 @@ describe('async migrate statements across databases (#463)', () => {
       expect(await countEvents(fixture, 'prod')).toBe(ROWS)
       expect(failed.exitCode, formatTestDiagnostic('staging', failed)).toBe(1)
       expect(failed.stdout).toContain('failure in this database')
-      await waitForStatuses(fixture, 'staging', 'failed')
+      // It failed while it ran, so some of its rows may have landed (#767):
+      // the run stops until the operator reconciles and abandons.
+      expect(JSON.parse(failed.stdout).error).toMatchObject({ code: 'async_outcome_unknown' })
+      // Nothing is written, so the fenced started record keeps the attempt.
+      await waitForStatuses(fixture, 'staging', 'started')
+      const again = await migrate(fixture, 'staging').result
+      expect(again.exitCode, formatTestDiagnostic('staging re-run', again)).toBe(1)
+      expect(JSON.parse(again.stdout).error).toMatchObject({ code: 'async_outcome_unknown' })
 
-      // The retry finds its own failed attempt: it runs the before-retry SQL
-      // and loads once.
+      // After the abandon, the retry runs the before-retry SQL and loads once.
       await executor.command(`TRUNCATE TABLE ${quoteIdent(databases.staging)}.fail_marker`)
+      const abandoned = await migrate(fixture, 'staging', ['--abandon', fixture.migration]).result
+      expect(abandoned.exitCode, formatTestDiagnostic('staging abandon', abandoned)).toBe(0)
       const retried = await migrate(fixture, 'staging').result
       expect(retried.exitCode, formatTestDiagnostic('staging retry', retried)).toBe(0)
       expect(retried.stderr).toContain('load_table_data: running before-retry SQL')
@@ -79,7 +88,9 @@ describe('async migrate statements across databases (#463)', () => {
       killed.kill()
       expect((await killed.result).exitCode).not.toBe(0)
 
-      const resumed = await migrate(fixture, 'staging').result
+      // The killed run still holds the migrate lock (#716).
+      const claim = await heldLockClaim(fixture.executor, fixture.databases.staging, fixture.journalTable)
+      const resumed = await migrate(fixture, 'staging', ['--break-lock', claim]).result
       expect(resumed.exitCode, formatTestDiagnostic('staging re-run', resumed)).toBe(0)
       expect(resumed.stderr).toContain('attaching to in-flight query')
       expect(resumed.stderr).not.toContain('running before-retry SQL')
@@ -104,7 +115,7 @@ async function createFixture(label: string): Promise<Fixture> {
     [
       '-- operation: load_table_data key=table:events risk=caution mode=async',
       '-- before-retry: TRUNCATE TABLE events',
-      `INSERT INTO events SELECT number + throwIf(number = ${FAIL_AT} AND (SELECT count() FROM fail_marker) > 0, 'failure in this database') FROM numbers(${ROWS}) WHERE sleepEachRow(0.5) = 0 SETTINGS max_block_size = 1;`,
+      `INSERT INTO events SELECT number + throwIf(number = ${FAIL_AT} AND (SELECT count() FROM fail_marker) > 0, 'failure in this database') FROM numbers(${ROWS}) WHERE sleepEachRow(1) = 0 SETTINGS max_block_size = 1;`,
       '',
     ].join('\n'),
     'utf8',
@@ -156,10 +167,14 @@ async function dropFixture(fixture: Fixture): Promise<void> {
   await rm(fixture.dir, { recursive: true, force: true })
 }
 
-function migrate(fixture: Fixture, target: Target): { result: Promise<CliResult>; kill: () => void } {
+function migrate(
+  fixture: Fixture,
+  target: Target,
+  extraArgs: string[] = [],
+): { result: Promise<CliResult>; kill: () => void } {
   return startCli(
     fixture.dir,
-    ['migrate', '--config', fixture.configs[target], '--execute', '--json'],
+    ['migrate', '--config', fixture.configs[target], '--execute', '--json', ...extraArgs],
     { CHKIT_JOURNAL_TABLE: fixture.journalTable, CHKIT_E2E_PASSWORD: getLiveEnv().clickhousePassword, CI: '1' },
   )
 }

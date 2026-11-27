@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, Final, Literal, NamedTuple, TypeAlias
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
@@ -13,7 +13,6 @@ from chkit.core.codec_type import codec_value_types, codec_value_width
 from chkit.core.key_clause import split_top_level_comma
 from chkit.core.model import (
     ColumnCodec,
-    ColumnCodecSpec,
     GeneralColumnCodec,
     InvalidColumnCodec,
     PreprocessingColumnCodec,
@@ -24,9 +23,9 @@ from chkit.core.model import (
     _CodecT64,
     _CodecZSTD,
 )
-from chkit.core.sql_lexer import is_js_space, js_trim
+from chkit.core.sql_lexer import is_js_space, js_regex, js_trim
 
-CodecSpecInput: TypeAlias = ColumnCodecSpec | Mapping[str, Any] | list[ColumnCodec | Mapping[str, Any]]
+CodecSpecInput: TypeAlias = ColumnCodec | Mapping[str, Any] | Sequence[ColumnCodec | Mapping[str, Any]]
 """Loose input accepted by public entry points: dicts or models, single or list."""
 
 _GENERAL_KINDS: Final[frozenset[str]] = frozenset(
@@ -77,7 +76,7 @@ def _normalize_atom(atom: ColumnCodec | Mapping[str, Any]) -> ColumnCodec:
 
 
 def _to_list(spec: CodecSpecInput) -> list[ColumnCodec]:
-    if isinstance(spec, list):
+    if isinstance(spec, Sequence):
         return [_normalize_atom(a) for a in spec]
     return [_normalize_atom(spec)]
 
@@ -129,7 +128,7 @@ def render_codec(spec: CodecSpecInput) -> str:
 
 _ATOM_PATTERN: Final[re.Pattern[str]] = re.compile(r"^(\w+)(?:\(([^)]*)\))?$")
 _CODEC_WRAPPER_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^CODEC\s*\(([\s\S]*)\)\s*$", re.IGNORECASE
+    js_regex(r"^CODEC\s*\(([\s\S]*)\)\s*$"), re.IGNORECASE
 )
 
 

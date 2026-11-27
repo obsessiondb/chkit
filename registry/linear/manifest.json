@@ -5,8 +5,8 @@
   "title": "Linear",
   "description": "Editable Linear ingestion with nine independent raw resource streams, overlapping update windows, and complete issue history.",
   "dependencies": [
-    "@chkit/core@^0.2.0-beta.12",
-    "@chkit/plugin-ingest@^0.2.0-beta.12",
+    "@chkit/core@^0.2.0-beta.19",
+    "@chkit/plugin-sync@^0.2.0-beta.19",
     "zod@^4.3.6"
   ],
   "files": [
@@ -95,8 +95,14 @@
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.3.1",
+      "version": "0.3.2",
       "changelog": [
+        {
+          "version": "0.3.2",
+          "changes": [
+            "Use the `@chkit/plugin-sync` package and `chkit sync` commands with chkit 0.2.0-beta.19 or later."
+          ]
+        },
         {
           "version": "0.3.1",
           "changes": [
@@ -140,8 +146,8 @@
       "logo": "https://chkit.obsessiondb.com/logos/linear.svg",
       "language": "typescript",
       "license": "MIT",
-      "chkit": "^0.2.0-beta.12",
-      "ingest": "^0.2.0-beta.12",
+      "chkit": "^0.2.0-beta.19",
+      "ingest": "^0.2.0-beta.19",
       "clickhouse": ">=25.3.0",
       "root": "src/integrations/linear",
       "entry": "index.ts",
@@ -264,7 +270,7 @@
       "views": [],
       "sync": {
         "description": "One workspace pipeline groups nine independent raw streams. Seven resources use bounded updatedAt windows with five-minute overlap; issue relations and history use fullSync. Each stream completes only after destination acknowledgement.",
-        "schedule": "Run bunx chkit ingest run --tag provider:linear from a scheduler.",
+        "schedule": "Run bunx chkit sync run --tag provider:linear from a scheduler.",
         "deletions": "Deleted records and removed relations remain stored; absence is not a tombstone. Comments have their own update windows. Periodic reconciliation refreshes older observations and label renames beyond the issue overlap; retained legacy nested comments require deliberate migration."
       }
     }

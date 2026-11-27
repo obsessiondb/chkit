@@ -1,5 +1,24 @@
 # @chkit/plugin-pull
 
+## 0.2.0-beta.19
+
+### Patch Changes
+
+- Updated dependencies: `@chkit/core@0.2.0-beta.19`, `@chkit/clickhouse@0.2.0-beta.19`
+
+## 0.2.0-beta.18
+
+### Patch Changes
+
+- Updated dependencies: `@chkit/core@0.2.0-beta.18`, `@chkit/clickhouse@0.2.0-beta.18`
+
+## 0.2.0-beta.17
+
+### Patch Changes
+
+- 2f1e88c: `pull` preserves quoted refreshable-view `DEPENDS ON` names, including escaped backticks, dots, commas and keywords, and refuses to overwrite a dangling output symlink without `--force`.
+- Updated dependencies: `@chkit/core@0.2.0-beta.17`, `@chkit/clickhouse@0.2.0-beta.17`
+
 ## 0.2.0-beta.16
 
 ### Patch Changes

@@ -34,6 +34,7 @@ A few schema features depend on the ClickHouse version of your target:
 
 | Feature | Requirement |
 |---------|-------------|
+| [Zero-downtime cutover (`chkit generate --cutover`)](/cli/generate/#zero-downtime-cutover) | Requires **24.9+** for `ATTACH PARTITION ALL FROM`. The cutover's first statement refuses an older replica before creating anything. A cutover generated before chkit added this check stops at the `ATTACH` instead, after creating its shadow table, mirror and snapshot. |
 | Native `JSON` columns | Native JSON is production-ready on **25.3+**. For older targets, choose column types supported by the target server. See the [ClickHouse JSON reference](https://clickhouse.com/docs/reference/data-types/newjson). |
 | [Refreshable materialized views](/schema/refreshable-views/) | Production-ready on **24.10+** (no flag). Experimental and flag-gated on 23.12–24.9. chkit targets 24.10+. |
 | `set` data-skipping index | **ClickHouse 26+** requires the `set(0)` form rather than a bare `set`; chkit emits `set(maxRows)` accordingly. See the [DSL reference](/schema/dsl-reference/). |

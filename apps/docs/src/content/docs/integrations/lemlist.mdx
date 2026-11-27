@@ -16,7 +16,7 @@ bunx chkit add lemlist
 bunx chkit check
 bunx chkit generate --name add_lemlist
 bunx chkit migrate --apply
-bunx chkit ingest run --tag provider:lemlist
+bunx chkit sync run --tag provider:lemlist
 ```
 
 Set `LEMLIST_API_KEY` in the runtime environment before the ingestion run, or set `apiKey` in `src/integrations/lemlist/config.ts`. Edit the same file for the account namespace, page size (1–100), initial activity date, overlap, interval length, and optional conversation user IDs. `pipeline.ts` groups seven independent streams in one account pipeline; select resources with tags. `sources/` contains the readers; `client.ts` parses the configuration and owns authenticated requests, `paginate()` traversal, and payload validation. `index.ts` exports the pipeline and raw schema. Child readers discover their own campaigns, contacts, or users; they do not depend on other streams running first.
@@ -42,8 +42,8 @@ The [contacts reader](https://developer.lemlist.com/api-reference/endpoints/cont
 All five new resource envelopes contain `source_id` and provider fields under `data`; campaign leads, conversations, and messages also retain their parent IDs. See [destinations](/api-sync/destinations/). Contacts/companies row IDs encode `[sourceId, providerId]`, and the three child resources encode `[sourceId, parentId, providerId]`; conversations retain distinct user inbox views. Existing campaign/activity keys remain native `_id` and their original tables remain installation-specific. Perform joins, field transformations, and denormalization afterward in ClickHouse.
 
 ```sh
-bunx chkit ingest run --tag provider:lemlist --tag resource:activities --backfill reconcile-2026-10-04 --from 2000-01-01
-bunx chkit ingest status --tag provider:lemlist --json
+bunx chkit sync run --tag provider:lemlist --tag resource:activities --backfill reconcile-2026-10-04 --from 2000-01-01
+bunx chkit sync status --tag provider:lemlist --json
 ```
 
 Use a new backfill ID for each complete activity reconciliation; reusing an ID resumes that backfill. Narrowing a reused backfill's upper bound below its committed frontier is rejected. Full reads do not infer deletions; removed records remain stored. Pagination totals and continuations are validated, but live lists can change during retrieval and require replay. Lead exports require memory for one complete campaign response before bounded publication. Coverage remains limited to records accessible to the API key.
@@ -64,4 +64,4 @@ bun test src/integrations/lemlist/tests
 ## Related pages
 
 - [App registry](/integrations/)
-- [Ingestion plugin](/plugins/ingest/)
+- [Sync plugin](/plugins/sync/)

@@ -1,4 +1,4 @@
-import { HttpError, paginate, type Page, type SourceContext } from '@chkit/plugin-ingest'
+import { HttpError, paginate, type Page, type SourceContext } from '@chkit/plugin-sync'
 import { z } from 'zod'
 
 import { googleMeetReaderConfigSchema, type GoogleMeetReaderConfig } from './config.js'

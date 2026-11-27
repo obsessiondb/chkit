@@ -22,6 +22,7 @@ function op(
     startedAt: '2026-09-29 00:11:10.000',
     finishedAt: status === 'started' ? null : '2026-09-29 00:11:11.000',
     lastError: status === 'failed' ? 'Code: 60. Unknown table' : '',
+    fingerprint: '',
     ...extra,
   }
 }
@@ -156,8 +157,13 @@ describe('abandonReport', () => {
       migration: 'm.sql',
       checksum: 'c',
       completedStatements: 1,
-      operations: [op(0, 'completed'), op(1, 'failed')],
+      operations: [op(0, 'completed'), op(1, 'failed')].map(({ fingerprint: _, ...rest }) => rest),
     })
+  })
+
+  test('leaves the statement fingerprints out (#599)', () => {
+    const report = abandonReport(inProgress([op(0, 'completed', { fingerprint: 'v1:a' })]))
+    expect(Object.keys(report.operations[0] ?? {})).not.toContain('fingerprint')
   })
 
   test('counts statements that completed before an earlier abandon: they stay applied', () => {

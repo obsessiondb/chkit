@@ -1,0 +1,8 @@
+SCHEMA >
+    `event_type` LowCardinality(String),
+    `total` Decimal(38, 6),
+    `computed_at` DateTime
+
+ENGINE "MergeTree"
+ENGINE_PARTITION_KEY ""
+ENGINE_SORTING_KEY "tuple()"

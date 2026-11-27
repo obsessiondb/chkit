@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { setTimeout as sleep } from 'node:timers/promises'
+import { randomUUID } from 'node:crypto'
 
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
 
@@ -7,6 +7,7 @@ import { createRemoteExecutor } from '../../../plugin-obsessiondb/src/query/remo
 import {
   type AsyncApplyInput,
   applyAsyncStatement,
+  ATTEMPT_RECORD_MARKER,
   makeDeterministicQueryId,
 } from '../commands/migrate/async-apply.js'
 import type { JournalStore, MigrationRowState } from '../runtime/journal-store.js'
@@ -61,7 +62,7 @@ describe('async migrate statements through the ObsessionDB remote executor (live
     try {
       await run.createTable()
       expect((await applyAsyncStatement(statement)).kind).toBe('completed')
-      expect(journal.statuses()).toEqual(['started', 'completed'])
+      expect(journal.statuses()).toEqual(['started', 'started', 'completed'])
       expect((await applyAsyncStatement(statement)).kind).toBe('skipped')
       expect(await run.countRows(30)).toBe(30)
     } finally {
@@ -82,60 +83,80 @@ describe('async migrate statements through the ObsessionDB remote executor (live
     try {
       await run.createTable()
       expect((await applyAsyncStatement(statement)).kind).toBe('completed')
-      expect(journal.statuses()).toEqual(['started', 'completed'])
+      expect(journal.statuses()).toEqual(['started', 'started', 'completed'])
       expect(await run.countRows(3)).toBe(3)
     } finally {
       await run.cleanup()
     }
   }, TIMEOUT_MS)
 
+  // #767: a statement the server rejects before it starts has no
+  // QueryFinish; query_log records its ExceptionBeforeStart under the
+  // attempt's id, which is the failure that lets a re-run run it again.
+  test('a statement the server rejects is recorded failed from its query_log entry', async () => {
+    const run = startRun('remote_rejected')
+    const journal = createMemoryJournal(null)
+    const statement = run.statement({
+      migrationName: `20990101000000_${run.prefix}rejected.sql`,
+      journalStore: journal.store,
+      // A syntax error: the server rejects it before it starts.
+      sql: `INSERT INTO ${run.table} SELEC number FROM numbers(3)`,
+    })
+    try {
+      await expect(applyAsyncStatement(statement)).rejects.toThrow(/SYNTAX_ERROR/)
+      expect(journal.statuses()).toEqual(['started', 'started', 'failed'])
+    } finally {
+      await run.cleanup()
+    }
+  }, TIMEOUT_MS)
+
   // A run that lost its connection leaves the statement 'started' while its
-  // query runs on, and a re-run attaches to it. An earlier attempt with the
-  // same query id (one that was abandoned) finished before. query_log is
-  // flushed on a timer, so right after the attached attempt fails, the earlier
-  // attempt's QueryFinish can be the newest entry for the id.
-  test('an attach counts only query_log entries of the attempt it attaches to', async () => {
+  // query runs on, and a re-run attaches to it. An earlier attempt finished
+  // before under the id earlier releases gave a first attempt. The attached
+  // attempt's id is its own, recorded fenced before its submit (#767), so its
+  // polls read that id only and the earlier QueryFinish never counts.
+  test('an attach polls only the id its fenced record names', async () => {
     const run = startRun('remote_attach')
     const migrationName = `20990101000000_${run.prefix}attach.sql`
-    const queryId = makeDeterministicQueryId(getLiveEnv().clickhouseDatabase, '_chkit_migrations', migrationName, 0)
+    const earlierId = makeDeterministicQueryId(getLiveEnv().clickhouseDatabase, '_chkit_migrations', migrationName, 0)
+    const attachedId = randomUUID()
     try {
       await run.createTable()
-      await run.remote.submit(`INSERT INTO ${run.table} SELECT number FROM numbers(2)`, queryId)
-      const earlierAttemptEndedMs = await readServerNowMs(run.live)
+      await run.remote.submit(`INSERT INTO ${run.table} SELECT number FROM numbers(2)`, earlierId)
       const earlier = await pollUntil(
-        () => run.remote.queryStatus(queryId),
+        () => run.remote.queryStatus(earlierId),
         (status) => status.status === 'finished',
         { timeoutMs: 60_000 },
       )
       expect(earlier.status).toBe('finished')
-      // Start the attached attempt well past the bound's 2 s margin.
-      await sleep(4_000)
+      const attachedStartMs = await readServerNowMs(run.live)
       // Fails after about 6 s: one row per block, 0.5 s per row.
       const attached = run.remote
         .submit(
           `INSERT INTO ${run.table} SELECT number + throwIf(number = 12, 'attached attempt failed') + sleepEachRow(0.5) FROM numbers(20) SETTINGS max_block_size = 1`,
-          queryId,
+          attachedId,
         )
         .then(
           () => 'finished',
           (error: unknown) => String(error),
         )
       const running = await pollUntil(
-        () => run.remote.queryStatus(queryId),
+        () => run.remote.queryStatus(attachedId),
         (status) => status.status === 'running',
         { intervalMs: 100 },
       )
       expect(running.status).toBe('running')
 
-      const afterTimes: Array<string | undefined> = []
+      const calls: Array<{ queryId: string; afterTime?: string }> = []
       const db: ClickHouseExecutor = {
         ...run.remote,
         queryStatus: (id, options) => {
-          afterTimes.push(options?.afterTime)
+          calls.push({ queryId: id, afterTime: options?.afterTime })
           return run.remote.queryStatus(id, options)
         },
       }
-      const journal = createMemoryJournal(startedState(migrationName, queryId, run.operationKey))
+      const startedAt = new Date(attachedStartMs).toISOString().replace('Z', '')
+      const journal = createMemoryJournal(startedState(migrationName, attachedId, run.operationKey, { startedAt, fenced: true }))
       const lines: string[] = []
       const statement = {
         ...run.statement({
@@ -150,17 +171,45 @@ describe('async migrate statements through the ObsessionDB remote executor (live
 
       await expect(applyAsyncStatement(statement)).rejects.toThrow(/attached attempt failed/)
       expect(lines.some((line) => line.includes('attaching to in-flight query'))).toBe(true)
-      expect(journal.statuses()).toEqual(['failed'])
+      // The attach writes nothing, and a failure while it ran (#767) writes
+      // nothing either: the fenced started record keeps the attempt.
+      expect(journal.statuses()).toEqual([])
       expect(await attached).toContain('attached attempt failed')
 
-      // The in-flight check looks for any running query with the id. Every
-      // poll after it counts only queries that started after the earlier
-      // attempt had ended.
-      const [inFlightCheck, ...polls] = afterTimes
-      expect(inFlightCheck).toBeUndefined()
-      expect(polls.length).toBeGreaterThan(0)
-      expect(new Set(polls).size).toBe(1)
-      expect(Date.parse(polls[0] ?? '')).toBeGreaterThan(earlierAttemptEndedMs)
+      // Every check and poll reads the attached attempt's id, from an hour
+      // before its recorded start, which only lets query_log prune.
+      expect(calls.length).toBeGreaterThan(1)
+      expect(calls.every((call) => call.queryId === attachedId)).toBe(true)
+      expect(new Set(calls.map((call) => call.afterTime))).toEqual(new Set([new Date(attachedStartMs - 3_600_000).toISOString()]))
+    } finally {
+      await run.cleanup()
+    }
+  }, TIMEOUT_MS)
+
+  // #767: a record an earlier release wrote names an id that earlier attempts
+  // may share, so chkit cannot tell the running attempt's outcome from
+  // query_log once it ends. The run stops instead of attaching.
+  test('a running attempt under a record an earlier release wrote stops the run', async () => {
+    const run = startRun('remote_legacy')
+    const migrationName = `20990101000000_${run.prefix}legacy.sql`
+    const legacyId = makeDeterministicQueryId(getLiveEnv().clickhouseDatabase, '_chkit_migrations', migrationName, 0)
+    try {
+      await run.createTable()
+      // About 5 s: one row per block, 0.5 s per row.
+      const legacy = run.remote.submit(`INSERT INTO ${run.table} SELECT number + sleepEachRow(0.5) FROM numbers(10) SETTINGS max_block_size = 1`, legacyId)
+      const running = await pollUntil(
+        () => run.remote.queryStatus(legacyId),
+        (status) => status.status === 'running',
+        { intervalMs: 100 },
+      )
+      expect(running.status).toBe('running')
+      const journal = createMemoryJournal(startedState(migrationName, legacyId, run.operationKey))
+
+      await expect(
+        applyAsyncStatement(run.statement({ migrationName, journalStore: journal.store, sql: 'SELECT 1' })),
+      ).rejects.toMatchObject({ code: 'async_outcome_unknown', message: expect.stringContaining(`query_id ${legacyId}) is still running on the server`) })
+      expect(journal.statuses()).toEqual([])
+      await legacy
     } finally {
       await run.cleanup()
     }
@@ -269,6 +318,12 @@ function createMemoryJournal(initial: MigrationRowState | null) {
     async readMigrationState() {
       return state
     },
+    async readStoredOperation(_name, index) {
+      return state?.operations.find((op) => op.operationIndex === index)
+    },
+    async readOperationOnEveryCopy(name: string, index: number) {
+      return { covered: true as const, op: await this.readStoredOperation(name, index) }
+    },
     async writeMigrationState(next) {
       writes.push(next)
       state = next
@@ -278,8 +333,14 @@ function createMemoryJournal(initial: MigrationRowState | null) {
   return { store, statuses: () => writes.map((write) => write.operations[0]?.status) }
 }
 
-// What a run that lost its connection while the statement ran leaves behind.
-function startedState(migrationName: string, queryId: string, operationKey: string): MigrationRowState {
+// What a run that lost its connection while the statement ran leaves behind:
+// by default, a record an earlier release wrote.
+function startedState(
+  migrationName: string,
+  queryId: string,
+  operationKey: string,
+  attempt: { startedAt?: string; fenced?: boolean } = {},
+): MigrationRowState {
   return {
     name: migrationName,
     appliedAt: '1970-01-01 00:00:00.000',
@@ -293,9 +354,11 @@ function startedState(migrationName: string, queryId: string, operationKey: stri
         operationType: 'load_table_data',
         queryId,
         status: 'started',
-        startedAt: '2026-10-02 00:00:00.000',
+        startedAt: attempt.startedAt ?? '2026-10-02 00:00:00.000',
         finishedAt: null,
-        lastError: '',
+        lastError: attempt.fenced ? ATTEMPT_RECORD_MARKER : '',
+        fingerprint: '',
+        ...(attempt.fenced ? { attemptFenced: true } : {}),
       },
     ],
   }

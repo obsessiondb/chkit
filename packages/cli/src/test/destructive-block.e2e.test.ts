@@ -13,6 +13,7 @@ import {
   runCli,
   waitForColumn,
 } from './e2e-testkit.js'
+import { createIsolatedCliEnv } from './spawn-cli.js'
 
 describe('@chkit/cli destructive block e2e (#2)', () => {
   test('a hand-written DROP COLUMN with no markers is blocked, not silently applied', async () => {
@@ -109,7 +110,8 @@ async function runCliInTerminal(
   // HOME is cwd, with a recent dismissal of the skill-install prompt, so that prompt does not show.
   await mkdir(join(cwd, '.chkit'), { recursive: true })
   await writeFile(join(cwd, '.chkit/skill-hint.json'), JSON.stringify({ lastDismissed: new Date().toISOString() }))
-  const env: Record<string, string | undefined> = { ...process.env, ...extraEnv, HOME: cwd }
+  const isolated = createIsolatedCliEnv({ ...extraEnv, HOME: cwd })
+  const env = isolated.env
   delete env.CI
   const decoder = new TextDecoder()
   let output = ''
@@ -129,7 +131,7 @@ async function runCliInTerminal(
       },
     },
   })
-  const exitCode = await proc.exited
+  const exitCode = await proc.exited.finally(isolated.cleanup)
   proc.terminal?.close()
   return { exitCode, output }
 }

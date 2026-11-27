@@ -142,15 +142,52 @@ def backfill_paths(state_dir: Path | str, plan_id: str) -> BackfillPathSet:
 
 def write_json(file_path: str | Path, value: object) -> None:
     path = Path(file_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    mkdir_durably(path.parent)
     payload = (
         json.dumps(_jsonable(value), indent=2, default=_json_default) + "\n"
     )
-    # Write-then-replace so a crash mid-write never leaves a truncated
-    # checkpoint (resume depends on run.json always being parseable).
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(payload, encoding="utf-8")
+    # Write, sync, replace, then sync the directory, so neither a crash nor a
+    # power loss leaves a truncated checkpoint or brings back the previous one
+    # (the run checkpoint holds the only record of a replay's query id, #765).
+    tmp_path = path.with_name(f"{path.name}.{secrets.token_hex(6)}.tmp")
+    write_file_durably(tmp_path, payload)
     os.replace(tmp_path, path)
+    sync_directory(path.parent)
+
+
+def mkdir_durably(directory: Path) -> None:
+    """``mkdir -p``, then sync the parent of each directory it created, so a
+    power loss cannot drop a new ``runs/`` with the checkpoint in it (#765)."""
+    missing: list[Path] = []
+    current = directory.resolve()
+    while not current.exists():
+        missing.append(current)
+        if current.parent == current:
+            break
+        current = current.parent
+    directory.mkdir(parents=True, exist_ok=True)
+    for created in reversed(missing):
+        sync_directory(created.parent)
+
+
+def write_file_durably(path: Path, content: str) -> None:
+    """Write ``content`` to a new file at ``path`` and sync it to disk."""
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write(content)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def sync_directory(directory: Path) -> None:
+    """Sync a directory, so a rename or link in it survives a power loss.
+    Windows cannot open a directory for that, and needs no such sync."""
+    if os.name == "nt":
+        return
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 _JS_INTEGER_PRINT_BOUND = 1e21

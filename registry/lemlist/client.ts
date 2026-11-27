@@ -1,4 +1,4 @@
-import { paginate, type Page, type SourceContext, type TimestampRange } from '@chkit/plugin-ingest'
+import { paginate, type Page, type SourceContext, type TimestampRange } from '@chkit/plugin-sync'
 import { z } from 'zod'
 
 import { lemlistReaderConfigSchema, type LemlistReaderConfig } from './config.js'

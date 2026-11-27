@@ -144,13 +144,15 @@ def test_migrate_through_the_service_records_applied_at_without_a_zone(
     migrations_dir.mkdir(parents=True)
     (migrations_dir / "20260101000000_select.sql").write_text("SELECT 1;\n", encoding="utf-8")
     monkeypatch.chdir(config_path.parent)
+    # The fake service keeps no rows, so the migrate lock could not read its claim back.
+    monkeypatch.setenv("CHKIT_MIGRATE_LOCK", "off")
 
     result = CliRunner().invoke(
         app, ["migrate", "--apply", "--json", "--config", str(config_path)]
     )
 
     assert result.exit_code == 0, result.output
-    inserts = [sql for _, sql in calls if sql.startswith("INSERT INTO _chkit_migrations")]
+    inserts = [sql for _, sql in calls if re.match(r"INSERT INTO `[^`]+`\._chkit_migrations ", sql)]
     assert inserts
     applied_at = re.search(r"VALUES \('[^']*', '([^']*)'", inserts[-1])
     assert applied_at is not None

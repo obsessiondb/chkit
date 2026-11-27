@@ -15,6 +15,7 @@ Hard-fails (never skips) when the cluster is unreachable.
 
 from __future__ import annotations
 
+import functools
 import os
 import threading
 import time
@@ -23,9 +24,9 @@ from collections.abc import Callable
 from typing import Any, TypeVar
 
 from chkit.cli.commands.migrate_async_apply import (
+    ATTEMPT_RECORD_MARKER,
     AsyncApplyInput,
     apply_async_statement,
-    make_deterministic_query_id,
 )
 from chkit.cli.journal_store import MigrationRowState, OperationState
 from chkit.clickhouse.client import ClickHouseClient, QueryResult, QueryStatus
@@ -53,9 +54,7 @@ def test_rerun_through_another_replica_attaches_to_running_attempt() -> None:
     name = f"py_twoshard_async_{int(time.time())}_{uuid.uuid4().hex[:6]}_dst"
     table = f"{_DATABASE}.`{name}`"
     migration_name = f"20990101000000_{name}.sql"
-    query_id = make_deterministic_query_id(
-        _DATABASE, "_chkit_migrations", migration_name, 0
-    )
+    query_id = str(uuid.uuid4())
     operation_key = f"table:{_DATABASE}.{name}"
     attempt_outcome: list[str] = []
 
@@ -82,7 +81,7 @@ def test_rerun_through_another_replica_attaches_to_running_attempt() -> None:
         )
         for url in _NODES:
             with _connect(url, cluster=None) as node:
-                _poll_until(lambda node=node: _count(node, tables_sql), lambda n: n == 1)
+                _poll_until(functools.partial(_count, node, tables_sql), lambda n: n == 1)
         worker.start()
         processes_sql = f"SELECT count() FROM system.processes WHERE query_id = '{query_id}'"
         _poll_until(lambda: _count(submitter, processes_sql), lambda n: n == 1, interval=0.1)
@@ -99,7 +98,11 @@ def test_rerun_through_another_replica_attaches_to_running_attempt() -> None:
                 "status": "started",
                 "startedAt": "2026-10-02 00:00:00.000",
                 "finishedAt": None,
-                "lastError": "",
+                # A record this release wrote before the submit: fenced, under an
+                # id of its own (#767). A record of an earlier release would stop
+                # the run.
+                "lastError": ATTEMPT_RECORD_MARKER,
+                "attemptFenced": True,
             }
         )
         journal = _MemoryJournal(
@@ -124,6 +127,7 @@ def test_rerun_through_another_replica_attaches_to_running_attempt() -> None:
                 migration_name=migration_name,
                 migration_checksum=_MIGRATION_CHECKSUM,
                 statement_index=0,
+                fingerprint="",
                 operation_type="load_table_data",
                 operation_key=operation_key,
                 before_retry=f"TRUNCATE TABLE {table} ON CLUSTER '{_CLUSTER}'",
@@ -168,10 +172,20 @@ class _RecordingClient:
         return self._inner.submit(statement, query_id=query_id)
 
     def query_status(
-        self, query_id: str, *, after_time: str | None = None, every_replica: bool = False
+        self,
+        query_id: str,
+        *,
+        after_time: str | None = None,
+        every_replica: bool = False,
+        running_only: bool = False,
+        include_before_start: bool = False,
     ) -> QueryStatus:
         return self._inner.query_status(
-            query_id, after_time=after_time, every_replica=every_replica
+            query_id,
+            after_time=after_time,
+            every_replica=every_replica,
+            running_only=running_only,
+            include_before_start=include_before_start,
         )
 
 
@@ -182,6 +196,11 @@ class _MemoryJournal:
 
     def read_migration_state(self, _name: str) -> MigrationRowState | None:
         return self.state
+
+    def read_stored_operation(self, _name: str, index: int) -> OperationState | None:
+        if self.state is None:
+            return None
+        return next((op for op in self.state.operations if op.operation_index == index), None)
 
     def write_migration_state(self, state: MigrationRowState) -> None:
         self.writes.append(state)

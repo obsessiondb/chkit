@@ -29,6 +29,7 @@ from chkit.cli.snapshot_document import (
     parse_snapshot_document,
 )
 from chkit.core.model import MigrationPlan, SchemaDefinition, Snapshot
+from chkit.core.sql_lexer import js_regex
 
 _MIGRATION_FORMAT_VERSION: Final[str] = "v1"
 _EMPTY_PLAN: Final[MigrationPlan] = MigrationPlan.model_validate(
@@ -81,7 +82,7 @@ class ChecksumMismatch(BaseModel):
 
 
 # A `-- before-retry:` line holds one line of SQL (TS `/\s*[\r\n]+\s*/g`).
-_BEFORE_RETRY_NEWLINES = re.compile(r"\s*[\r\n]+\s*")
+_BEFORE_RETRY_NEWLINES = re.compile(js_regex(r"\s*[\r\n]+\s*"))
 
 
 def _timestamp_id(now: datetime | None = None) -> str:

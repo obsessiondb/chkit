@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
-import { runIngestion, selectStreams } from '@chkit/plugin-ingest'
-import { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-ingest/testing'
+import { runIngestion, selectStreams } from '@chkit/plugin-sync'
+import { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-sync/testing'
 
 import { googleMeetConfig, type GoogleMeetReaderConfig } from '../config.js'
 import { createGoogleMeetPipeline } from '../pipeline.js'

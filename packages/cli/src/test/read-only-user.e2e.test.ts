@@ -178,4 +178,93 @@ describe('read-only commands (#402)', () => {
       180_000,
     )
   }
+
+  // A user that cannot ALTER a journal an older release created migrates
+  // without fingerprints and says so, once, on stderr only (#599).
+  test.skipIf(onObsessionDB)(
+    'a user without ALTER on an older journal migrates with one warning on stderr and one JSON document',
+    async () => {
+      const executor = createLiveExecutor(env)
+      const user: User = { name: `${createPrefix('noalter')}user`, password: crypto.randomUUID() }
+      const project = await createProject('noalter', [admin, user])
+      const database = quoteIdent(env.clickhouseDatabase)
+      try {
+        await executor.command(`CREATE USER ${quoteIdent(user.name)} IDENTIFIED BY '${user.password}'`)
+        await executor.command(`GRANT SELECT, INSERT, CREATE DATABASE, CREATE TABLE ON ${database}.* TO ${quoteIdent(user.name)}`)
+        await executor.command(
+          `CREATE TABLE ${database}.${quoteIdent(project.journalTable)} (name String, applied_at DateTime64(3, 'UTC'), checksum String, chkit_version String, migration_completed Bool DEFAULT true, operations Array(Tuple(operation_index Int32, operation_key String, operation_type String, query_id String, status LowCardinality(String), started_at DateTime64(3, 'UTC'), finished_at Nullable(DateTime64(3, 'UTC')), last_error String)) DEFAULT []) ENGINE = ReplacingMergeTree(applied_at) ORDER BY name`,
+        )
+        json(project.cli(admin, ['generate', '--name', 'init', '--json']), 'generate')
+
+        const apply = project.cli(user, ['migrate', '--apply', '--json'])
+
+        expect(apply.exitCode, formatTestDiagnostic('migrate --apply (no ALTER)', apply)).toBe(0)
+        expect(JSON.parse(apply.stdout)).toMatchObject({ mode: 'execute' })
+        expect(apply.stdout).not.toContain('operation_fingerprints')
+        const warnings = apply.stderr.split('\n').filter((line) => line.includes('operation_fingerprints'))
+        expect(warnings).toHaveLength(1)
+        expect(warnings[0]).toStartWith(
+          `⚠ Could not add the operation_fingerprints column to ${project.journalTable} (${user.name}: Not enough privileges.`,
+        )
+        expect(warnings[0]).toEndWith(
+          'so this run records no statement fingerprints: a later --retry or resume checks the statements it completes by position and "-- operation:" marker only, not by their SQL. ' +
+            `The next migration applied by a user that can ALTER ${project.journalTable} adds the column.`,
+        )
+        const columns = await executor.query<{ name: string }>(
+          `SELECT name FROM system.columns WHERE database = '${env.clickhouseDatabase}' AND table = '${project.journalTable}' AND name = 'operation_fingerprints'`,
+        )
+        expect(columns).toEqual([])
+      } finally {
+        await rm(project.dir, { recursive: true, force: true })
+        await executor.command(`DROP USER IF EXISTS ${quoteIdent(user.name)}`).catch(() => {})
+        for (const name of [project.table, project.journalTable]) {
+          await executor.command(`DROP TABLE IF EXISTS ${database}.${quoteIdent(name)} SYNC`).catch(() => {})
+        }
+        await executor.close()
+      }
+    },
+    120_000,
+  )
+
+  // #790: a user whose constraints fix async_insert = 1 stops with
+  // insert_settings_fixed before --apply writes anything, the journal schema
+  // upgrade included; plan mode does not check. chkit-py: test_read_only_user_e2e.py.
+  test.skipIf(onObsessionDB)('migrate --apply refuses a user with async_insert fixed at 1 before the journal is upgraded', async () => {
+    const executor = createLiveExecutor(env)
+    const user: User = { name: `${createPrefix('fixed_insert')}user`, password: crypto.randomUUID() }
+    const project = await createProject('fixed_insert', [admin, user])
+    const missingJournal = createJournalTableName('fixed_insert_missing')
+    try {
+      await executor.command(`CREATE USER ${quoteIdent(user.name)} IDENTIFIED BY '${user.password}' SETTINGS async_insert = 1 CONST`)
+      await executor.command(`GRANT ALL ON ${quoteIdent(env.clickhouseDatabase)}.* TO ${quoteIdent(user.name)}`)
+      await executor.command(`GRANT SELECT ON system.* TO ${quoteIdent(user.name)}`)
+      json(project.cli(admin, ['generate', '--name', 'init', '--json']), 'generate')
+      await executor.command(
+        `CREATE TABLE ${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(project.journalTable)} (name String, applied_at DateTime64(3, 'UTC'), checksum String, chkit_version String) ENGINE = ReplacingMergeTree(applied_at) ORDER BY name`,
+      )
+
+      const fixed = {
+        code: 'insert_settings_fixed',
+        message: 'Setting async_insert is fixed at 1 for this ClickHouse user, and chkit migrate needs async_insert = 0 so that a statement it records as applied is stored. Nothing ran.',
+      }
+      expect(json(project.cli(user, ['migrate', '--apply', '--json']), 'migrate --apply', 1).error).toEqual(fixed)
+      // An override at the fixed value is checked as sent, and still refused:
+      // chkit's own journal writes send its default.
+      const override = json(project.cli(user, ['migrate', '--apply', '--json', '--setting', 'async_insert=true']), 'migrate --apply --setting', 1)
+      expect(override.error).toEqual(fixed)
+      const columns = await executor.query<{ name: string }>(
+        `SELECT name FROM system.columns WHERE database = '${env.clickhouseDatabase}' AND table = '${project.journalTable}' ORDER BY position`,
+      )
+      expect(columns.map((column) => column.name)).toEqual(['name', 'applied_at', 'checksum', 'chkit_version'])
+
+      expect(json(project.cli(user, ['migrate', '--json'], missingJournal), 'migrate (plan)')).toMatchObject({ mode: 'plan' })
+    } finally {
+      await executor.command(`DROP USER IF EXISTS ${quoteIdent(user.name)}`)
+      for (const name of [project.table, project.journalTable, missingJournal]) {
+        await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(name)} SYNC`)
+      }
+      await rm(project.dir, { recursive: true, force: true })
+      await executor.close()
+    }
+  }, 120_000)
 })

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
+from typing import Any, Literal
 
 import pytest
 
@@ -11,8 +13,11 @@ from chkit.cli.commands.drift_compare import (
     MapSqlCanonicalizer,
     ObjectDriftDetail,
     SchemaObjectShape,
+    TableDriftDetail,
+    collect_dictionary_sql_queries,
     collect_table_sql_fragments,
     collect_view_sql_queries,
+    compare_dictionary_shape,
     compare_schema_objects,
     compare_table_shape,
     compare_view_shape,
@@ -23,14 +28,23 @@ from chkit.cli.commands.drift_diff import (
     diff_named_shape_maps,
     diff_settings,
 )
-from chkit.clickhouse.introspect import IntrospectedTable, IntrospectedView
+from chkit.cli.commands.drift_payload import build_drift_payload
+from chkit.clickhouse.client import QueryResult
+from chkit.clickhouse.introspect import IntrospectedDictionary, IntrospectedTable, IntrospectedView
 from chkit.core.codec import parse_codec
 from chkit.core.model import (
     ColumnDefinition,
+    ColumnInput,
+    DictionaryDefinition,
     ProjectionDefinition,
+    ProjectionInput,
+    SettingValue,
     SkipIndexBloomFilter,
+    SkipIndexInput,
     SkipIndexMinmax,
+    SnapshotV1,
     TableDefinition,
+    dictionary,
     materialized_view,
     table,
     view,
@@ -68,6 +82,12 @@ def test_diff_settings_detects_value_mismatch_and_missing() -> None:
 def test_diff_settings_orders_keys() -> None:
     diffs = diff_settings({"z": 1, "a": 1, "m": 1}, {})
     assert diffs == ["a", "m", "z"]
+
+
+def test_diff_settings_orders_keys_by_code_point() -> None:
+    # #703: same order as TS, U+FF5E before U+1F600 (a UTF-16 surrogate pair).
+    high, fullwidth = "a\U0001f600", "a\uff5e"
+    assert diff_settings({high: 1, fullwidth: 1}, {high: 2, fullwidth: 2}) == [fullwidth, high]
 
 
 # ---------- diff_named_shape_maps ----------
@@ -129,7 +149,7 @@ def test_compare_objects_identical_returns_empty_buckets() -> None:
 def test_summarize_drift_aggregates_object_and_table_codes() -> None:
     expected = [_so("table", "db", "a")]
     object_result = compare_schema_objects(expected, [])
-    table_drift = []
+    table_drift: list[TableDriftDetail] = []
     summary = summarize_drift_reasons(object_result.object_drift, table_drift)
     assert summary.object == 1
     assert summary.table == 0
@@ -142,13 +162,13 @@ def test_summarize_drift_aggregates_object_and_table_codes() -> None:
 def _t(
     *,
     name: str = "t",
-    columns: list[ColumnDefinition] | None = None,
+    columns: list[ColumnInput] | None = None,
     engine: str = "MergeTree",
     primary_key: list[str] | None = None,
     order_by: list[str] | None = None,
-    settings: dict[str, object] | None = None,
-    indexes: list[object] | None = None,
-    projections: list[ProjectionDefinition] | None = None,
+    settings: dict[str, SettingValue] | None = None,
+    indexes: list[SkipIndexInput] | None = None,
+    projections: list[ProjectionInput] | None = None,
     partition_by: str | None = None,
     ttl: str | None = None,
 ) -> TableDefinition:
@@ -227,6 +247,128 @@ def test_table_shape_detects_engine_mismatch() -> None:
     detail = compare_table_shape(_t(engine="MergeTree"), _it(engine="ReplacingMergeTree"))
     assert detail is not None
     assert "engine_mismatch" in detail.reason_codes
+
+
+# ObsessionDB and ClickHouse Cloud store Replicated* as Shared*, without the path and replica (#669).
+@pytest.mark.parametrize(
+    ("expected_engine", "actual_engine", "mismatch"),
+    [
+        ("ReplicatedMergeTree()", "SharedMergeTree", False),
+        ("ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}')", "SharedMergeTree", False),
+        (
+            "ReplicatedReplacingMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}', v)",
+            "SharedReplacingMergeTree(v)",
+            False,
+        ),
+        ("ReplicatedReplacingMergeTree(v)", "SharedReplacingMergeTree(v)", False),
+        # ObsessionDB keeps an expression path as written.
+        (
+            "ReplicatedReplacingMergeTree(concat('/clickhouse/tables/', currentDatabase()), '{replica}', v)",
+            "SharedReplacingMergeTree(concat('/clickhouse/tables/', currentDatabase()), '{replica}', v)",
+            False,
+        ),
+        ("ReplicatedReplacingMergeTree($$/clickhouse/tables/{uuid}$$, $${replica}$$, v)", "SharedReplacingMergeTree(v)", False),
+        ("ReplicatedVersionedCollapsingMergeTree(id, v)", "SharedVersionedCollapsingMergeTree(id, v)", False),
+        ("ReplicatedReplacingMergeTree(v)", "SharedMergeTree", True),
+        ("ReplicatedReplacingMergeTree('/p', '{replica}', v)", "SharedReplacingMergeTree(id)", True),
+        # A server without Shared engines really has a non-replicated table.
+        ("ReplicatedMergeTree()", "MergeTree", True),
+    ],
+)
+def test_table_shape_replicated_engine_on_shared_server(
+    expected_engine: str, actual_engine: str, mismatch: bool
+) -> None:
+    columns = [ColumnDefinition(name="id", type="UInt64"), ColumnDefinition(name="v", type="UInt64")]
+    detail = compare_table_shape(
+        _t(engine=expected_engine, columns=list(columns)), _it(engine=actual_engine, columns=columns)
+    )
+    assert (detail is not None and detail.engine_mismatch) is mismatch
+
+
+# Column names and string literals in engine arguments are case-sensitive (#673).
+# The server rewrites the case of function names and operator keywords only.
+@pytest.mark.parametrize(
+    ("expected_engine", "actual_engine", "mismatch"),
+    [
+        ("CollapsingMergeTree(Sign)", "CollapsingMergeTree(sign)", True),
+        ("ReplacingMergeTree(Ver)", "ReplacingMergeTree(ver)", True),
+        ("VersionedCollapsingMergeTree(Sign, Version)", "VersionedCollapsingMergeTree(sign, Version)", True),
+        ("SummingMergeTree((Value, Version))", "SummingMergeTree((value, Version))", True),
+        ("GraphiteMergeTree('graphite_rollup')", "GraphiteMergeTree('Graphite_Rollup')", True),
+        ("ReplicatedReplacingMergeTree('/p', '{replica}', Ver)", "SharedReplacingMergeTree(ver)", True),
+        ("Distributed(c, app, t, Sign)", "Distributed('c', 'app', 't', sign)", True),
+        ("ReplacingMergeTree(And)", "ReplacingMergeTree(and)", True),
+        ("SummingMergeTree((From, Value))", "SummingMergeTree((from, Value))", True),
+        ("CollapsingMergeTree(Sign)", "CollapsingMergeTree(Sign)", False),
+        ("ReplacingMergeTree( Ver )", "ReplacingMergeTree(Ver)", False),
+        ("ReplicatedReplacingMergeTree('/p', '{replica}', Ver)", "SharedReplacingMergeTree(Ver)", False),
+        ("Distributed(c, app, t, RAND())", "Distributed('c', 'app', 't', rand())", False),
+        ("Distributed(c, app, t, If(Sign > 1, 1, 0))", "Distributed('c', 'app', 't', if(Sign > 1, 1, 0))", False),
+        (
+            "Distributed(c, app, t, Path is not null and TRUE)",
+            "Distributed('c', 'app', 't', Path IS NOT NULL AND true)",
+            False,
+        ),
+        ("Distributed(c, app, t, id is distinct from 0)", "Distributed('c', 'app', 't', id IS DISTINCT FROM 0)", False),
+        ("Distributed(c, app, t, s not like 'a')", "Distributed('c', 'app', 't', s NOT LIKE 'a')", False),
+    ],
+)
+def test_table_shape_engine_argument_case(expected_engine: str, actual_engine: str, mismatch: bool) -> None:
+    detail = compare_table_shape(_t(engine=expected_engine), _it(engine=actual_engine))
+    assert (detail is not None and detail.engine_mismatch) is mismatch
+
+
+# A quoted name compares as the server writes it back (#679).
+@pytest.mark.parametrize(
+    ("expected_engine", "actual_engine", "mismatch"),
+    [
+        # The server writes the Null engine as `Null`.
+        ("Null", "`Null`", False),
+        ("Null()", "`Null`", False),
+        ("`Null`", "`Null`", False),
+        # It writes a quoted name bare unless the name needs its quotes.
+        ("ReplacingMergeTree(`Ver`)", "ReplacingMergeTree(Ver)", False),
+        ('ReplacingMergeTree("Ver")', "ReplacingMergeTree(Ver)", False),
+        ("`ReplacingMergeTree`(Ver)", "ReplacingMergeTree(Ver)", False),
+        ("ReplacingMergeTree(`from`)", "ReplacingMergeTree(from)", False),
+        ("ReplacingMergeTree(`And`)", "ReplacingMergeTree(And)", False),
+        ("SummingMergeTree((`Value`, `my v`))", "SummingMergeTree((Value, `my v`))", False),
+        ("Distributed(c, app, t, sipHash64(`my id`, `id`))", "Distributed('c', 'app', 't', sipHash64(`my id`, id))", False),
+        ("ReplacingMergeTree(`my ver`)", "ReplacingMergeTree(`my ver`)", False),
+        ('ReplacingMergeTree("my ver")', "ReplacingMergeTree(`my ver`)", False),
+        ("ReplacingMergeTree(`a.b`)", "ReplacingMergeTree(`a.b`)", False),
+        ("ReplacingMergeTree(`1v`)", "ReplacingMergeTree(`1v`)", False),
+        ("ReplacingMergeTree(`a``b`)", "ReplacingMergeTree(`a\\`b`)", False),
+        ("ReplacingMergeTree(`null`)", "ReplacingMergeTree(`null`)", False),
+        ("ReplacingMergeTree(`select`)", "ReplacingMergeTree(`select`)", False),
+        # Newer servers quote `cube` as a keyword, older ones write it bare.
+        ("ReplacingMergeTree(`cube`)", "ReplacingMergeTree(cube)", False),
+        ("ReplacingMergeTree(`cube`)", "ReplacingMergeTree(`cube`)", False),
+        # Quoting that changes the name or what it means still counts: a bare `true` or `nan` is a literal.
+        ("ReplacingMergeTree(`Ver`)", "ReplacingMergeTree(ver)", True),
+        ("ReplacingMergeTree(`from`)", "ReplacingMergeTree(From)", True),
+        ("ReplacingMergeTree(`my ver`)", "ReplacingMergeTree(`my Ver`)", True),
+        ("ReplacingMergeTree(`a.b`)", "ReplacingMergeTree(a.b)", True),
+        ("ReplacingMergeTree(`ab`)", "ReplacingMergeTree(`a\\`b`)", True),
+        ("ReplacingMergeTree(`Null`)", "ReplacingMergeTree(`null`)", True),
+        ("ReplacingMergeTree(`true`)", "ReplacingMergeTree(true)", True),
+        ("ReplacingMergeTree(`nan`)", "ReplacingMergeTree(nan)", True),
+        # In an expression, as the server writes a sharding key back.
+        ("Distributed(c, app, t, cityHash64(`And` + 1))", "Distributed('c', 'app', 't', cityHash64(And + 1))", False),
+        ("Distributed(c, app, t, cityHash64(`And` + 1))", "Distributed('c', 'app', 't', cityHash64(and + 1))", True),
+        ("Distributed(c, app, t, if(`And` > 1, 1, 0))", "Distributed('c', 'app', 't', if(And > 1, 1, 0))", False),
+        ("Distributed(c, app, t, if(And > 1, 1, 0))", "Distributed('c', 'app', 't', if(and > 1, 1, 0))", True),
+        ("Distributed(c, app, t, `And` AND `and`)", "Distributed('c', 'app', 't', And AND and)", False),
+        ("Distributed(c, app, t, `and` AND `And`)", "Distributed('c', 'app', 't', And AND and)", True),
+        ("Distributed(c, app, t, cityHash64(`cube` + 1))", "Distributed('c', 'app', 't', cityHash64(cube + 1))", False),
+        ("Distributed(c, app, t, cityHash64(`select` + 1))", "Distributed('c', 'app', 't', cityHash64(`select` + 1))", False),
+        ("Distributed(c, app, t, cityHash64(`my v` + 1))", "Distributed('c', 'app', 't', cityHash64(`my v` + 1))", False),
+        ("Distributed(c, app, t, cityHash64(`true` + 1))", "Distributed('c', 'app', 't', cityHash64(true + 1))", True),
+    ],
+)
+def test_table_shape_engine_quoting(expected_engine: str, actual_engine: str, mismatch: bool) -> None:
+    detail = compare_table_shape(_t(engine=expected_engine), _it(engine=actual_engine))
+    assert (detail is not None and detail.engine_mismatch) is mismatch
 
 
 def test_table_shape_detects_order_by_mismatch() -> None:
@@ -387,12 +529,19 @@ def test_table_shape_default_value_of_type_name_matches_bare_column_only_when_ep
 # #409 (port of #275): introspection unwraps Nullable(T) into type=T plus
 # nullable=True, so an inline Nullable type matches it.
 def test_table_shape_equates_inline_nullable_types_with_the_introspected_nullable_property() -> None:
-    for type_ in ["String", "DateTime64(3, 'UTC')", "Decimal(12, 3)", "LowCardinality(String)"]:
+    for type_ in ["String", "DateTime64(3, 'UTC')", "Decimal(12, 3)"]:
         inline = ColumnDefinition(name="value", type=f"Nullable({type_})")
         prop = ColumnDefinition(name="value", type=type_, nullable=True)
         assert _changed_columns(inline, prop) is None
         assert _changed_columns(prop, inline) is None
         assert _changed_columns(prop, prop) is None
+
+
+def test_table_shape_equates_nullable_low_cardinality_with_the_stored_type() -> None:
+    stored = ColumnDefinition(name="value", type="LowCardinality(Nullable(String))")
+    prop = ColumnDefinition(name="value", type="LowCardinality(String)", nullable=True)
+    assert _changed_columns(prop, stored) is None
+    assert _changed_columns(stored, prop) is None
 
 
 def test_table_shape_preserves_real_type_nullability_and_wrapper_differences() -> None:
@@ -407,7 +556,6 @@ def test_table_shape_preserves_real_type_nullability_and_wrapper_differences() -
         (col("String"), nullable("String")),
         (col("Nullable(String)"), nullable("UInt64")),
         (nullable("Nullable(String)"), nullable("String")),
-        (col("LowCardinality(Nullable(String))"), nullable("LowCardinality(String)")),
         (col("Array(Nullable(String))"), col("Array(String)")),
     ]
     for expected, actual in differences:
@@ -467,7 +615,7 @@ _ORDERS_MV = materialized_view(
 
 
 def _live_view(query: str, to: tuple[str, str] | None = None) -> IntrospectedView:
-    kind = "view" if to is None else "materialized_view"
+    kind: Literal["view", "materialized_view"] = "view" if to is None else "materialized_view"
     return IntrospectedView(kind=kind, database="app", name="v", query=query, to=to)
 
 
@@ -567,6 +715,200 @@ def test_view_query_strips_the_session_database_clickhouse_adds_to_a_dictionary_
     )
     drift = compare_view_shape(expected, elsewhere, "app", _FormatCanonicalizer())
     assert [d.code for d in drift] == ["query_mismatch"]
+
+
+# ---------- compare_dictionary_shape SOURCE (#492) ----------
+# Without a canonicalizer, compare_dictionary_shape compares only SOURCE.
+
+
+def _with_source(source: str) -> DictionaryDefinition:
+    return dictionary(
+        database="app",
+        name="rates",
+        attributes=[{"name": "id", "type": "UInt64"}],
+        primary_key=["id"],
+        source=source,
+        layout="FLAT()",
+        lifetime="0",
+    )
+
+
+def _live_dictionary(source: str) -> IntrospectedDictionary:
+    return IntrospectedDictionary(
+        database="app",
+        name="rates",
+        create_query=(
+            f"CREATE DICTIONARY app.rates (`id` UInt64) PRIMARY KEY id SOURCE({source}) "
+            "LIFETIME(MIN 0 MAX 0) LAYOUT(FLAT())"
+        ),
+    )
+
+
+def _compare(expected: DictionaryDefinition, live: IntrospectedDictionary) -> list[ObjectDriftDetail]:
+    return compare_dictionary_shape(expected, collect_dictionary_sql_queries(expected, live))
+
+
+_HTTP = _with_source(
+    "http(url 'https://u:url-secret@example.com/a.tsv' format 'TSV' "
+    "credentials(user 'u' password 'pw-secret') "
+    "headers(header(name 'X-Token' value 'tok-secret')))"
+)
+_MONGO = _with_source("mongodb(uri 'mongodb://u:uri-secret@h:27017/db' collection 'c')")
+_HTTP_TAIL = "FORMAT 'TSV' CREDENTIALS (USER 'u' PASSWORD '[HIDDEN]') HEADERS ('[HIDDEN]'))"
+
+
+def test_dictionary_source_values_clickhouse_hides_read_clean_in_any_case_and_spacing() -> None:
+    stored_26 = f"HTTP(URL 'https://u:url-secret@example.com/a.tsv' {_HTTP_TAIL}"
+    stored_later = f"HTTP(URL 'https://[HIDDEN]@example.com/a.tsv' {_HTTP_TAIL}"
+    assert _compare(_HTTP, _live_dictionary(stored_26)) == []
+    assert _compare(_HTTP, _live_dictionary(stored_later)) == []
+    for uri in ("mongodb://u:[HIDDEN]@h:27017/db", "mongodb://[HIDDEN]@h:27017/db"):
+        live = _live_dictionary(f"MONGODB(URI '{uri}' COLLECTION 'c')")
+        assert _compare(_MONGO, live) == []
+
+
+def test_dictionary_source_with_a_changed_url_drifts_and_shows_no_schema_secret() -> None:
+    changed = _live_dictionary(f"HTTP(URL 'https://u:url-secret@example.com/b.tsv' {_HTTP_TAIL}")
+    assert _compare(_HTTP, changed) == [
+        ObjectDriftDetail(
+            code="source_mismatch",
+            object="app.rates",
+            expected=f"HTTP(URL 'https://[HIDDEN]@example.com/a.tsv' {_HTTP_TAIL}",
+            actual=f"HTTP(URL 'https://[HIDDEN]@example.com/b.tsv' {_HTTP_TAIL}",
+        )
+    ]
+
+
+def test_dictionary_source_with_a_value_no_rule_explains_is_not_compared() -> None:
+    expected = _with_source("CLICKHOUSE(TABLE 'users' NAMED_SECRET 'x')")
+    live = _live_dictionary("CLICKHOUSE(TABLE 'users_v2' NAMED_SECRET '[HIDDEN]')")
+    assert _compare(expected, live) == []
+
+
+def test_dictionary_source_hides_every_secret_key_also_those_26_3_stores_in_clear() -> None:
+    odbc = _with_source("odbc(connection_string 'DSN=x;UID=u;PWD=odbc-secret' table 't')")
+    live = _live_dictionary("ODBC(CONNECTION_STRING 'DSN=x;UID=u;PWD=odbc-secret' TABLE 't2')")
+    assert _compare(odbc, live) == [
+        ObjectDriftDetail(
+            code="source_mismatch",
+            object="app.rates",
+            expected="ODBC(CONNECTION_STRING '[HIDDEN]' TABLE 't')",
+            actual="ODBC(CONNECTION_STRING '[HIDDEN]' TABLE 't2')",
+        )
+    ]
+    mysql = _with_source("mysql(user 'u' password 'pw' ssl_key_passphrase 'kp-secret' table 't')")
+    stored = "MYSQL(USER 'u' PASSWORD '[HIDDEN]' SSL_KEY_PASSPHRASE 'kp-secret' TABLE 't')"
+    assert _compare(mysql, _live_dictionary(stored)) == []
+
+
+def test_dictionary_source_with_a_function_call_value_is_not_compared() -> None:
+    current = _with_source(
+        "clickhouse(db currentDatabase() table 'users' user 'default' password 'pw-secret')"
+    )
+    stored = "CLICKHOUSE(DB 'default' TABLE 'users_v2' USER 'default' PASSWORD '[HIDDEN]')"
+    assert _compare(current, _live_dictionary(stored)) == []
+
+
+def test_dictionary_source_keys_in_another_order_read_clean() -> None:
+    prices = _with_source("clickhouse(table 'prices' db 'v492')")
+    assert _compare(prices, _live_dictionary("CLICKHOUSE(DB 'v492' TABLE 'prices')")) == []
+    changed = _live_dictionary("CLICKHOUSE(DB 'v492' TABLE 'prices_v2')")
+    assert [d.code for d in _compare(prices, changed)] == ["source_mismatch"]
+
+
+def test_dictionary_source_hides_the_values_of_secret_url_query_parameters() -> None:
+    query = "?user=u&password=pw-secret&access_token=tok-secret&%73ig=sig-secret&design=a"
+    hidden = "?user=u&password=[HIDDEN]&access_token=[HIDDEN]&%73ig=[HIDDEN]&design=a"
+    url_source = _with_source(f"http(url 'http://h/data{query}' format 'TSV')")
+    master = _live_dictionary(f"HTTP(URL 'http://h/data{hidden}' FORMAT 'TSV')")
+    assert _compare(url_source, master) == []
+    changed = _live_dictionary(f"HTTP(URL 'http://h/data2{query}' FORMAT 'TSV')")
+    assert _compare(url_source, changed) == [
+        ObjectDriftDetail(
+            code="source_mismatch",
+            object="app.rates",
+            expected=f"HTTP(URL 'http://h/data{hidden}' FORMAT 'TSV')",
+            actual=f"HTTP(URL 'http://h/data2{hidden}' FORMAT 'TSV')",
+        )
+    ]
+
+
+def test_dictionary_source_escapes_in_a_string_compare_as_clickhouse_stores_them() -> None:
+    query = _with_source(
+        "clickhouse(query 'SELECT 1 AS id, ''x'' AS v\nFROM\tsystem.one WHERE s LIKE ''a\\%''')"
+    )
+    stored = (
+        "CLICKHOUSE(QUERY 'SELECT 1 AS id, \\'x\\' AS v\\nFROM\\tsystem.one "
+        "WHERE s LIKE \\'a\\\\%\\'')"
+    )
+    assert _compare(query, _live_dictionary(stored)) == []
+    changed = stored.replace("system.one", "system.two")
+    assert _compare(query, _live_dictionary(changed)) == [
+        ObjectDriftDetail(code="source_mismatch", object="app.rates", expected=stored, actual=changed)
+    ]
+
+
+def test_dictionary_source_signed_number_is_a_value() -> None:
+    replica = _with_source("clickhouse(table 'a' priority -1)")
+    assert _compare(replica, _live_dictionary("CLICKHOUSE(TABLE 'a' PRIORITY -1)")) == []
+    changed = _live_dictionary("CLICKHOUSE(TABLE 'b' PRIORITY -1)")
+    assert [d.code for d in _compare(replica, changed)] == ["source_mismatch"]
+
+
+def test_dictionary_source_with_unbalanced_parentheses_is_not_compared() -> None:
+    extra_paren = _with_source("CLICKHOUSE(TABLE 'users'))")
+    assert _compare(extra_paren, _live_dictionary("CLICKHOUSE(TABLE 'users_v2')")) == []
+
+
+def test_a_source_in_a_quoted_name_never_sends_the_credentials_to_the_formatter(
+    tmp_path: Path,
+) -> None:
+    source = "HTTP(URL 'https://user:fake-password@host/data?token=fake-token' FORMAT 'TSV')"
+    create_query = (
+        "CREATE DICTIONARY app.rates (`SOURCE(x)` UInt64) PRIMARY KEY `SOURCE(x)` "
+        f"SOURCE({source}) LIFETIME(MIN 0 MAX 0) LAYOUT(FLAT())"
+    )
+    expected = dictionary(
+        database="app",
+        name="rates",
+        attributes=[{"name": "SOURCE(x)", "type": "UInt64"}],
+        primary_key=["SOURCE(x)"],
+        source=source,
+        layout="FLAT()",
+        lifetime="0",
+    )
+    calls: list[tuple[object, ...]] = []
+
+    class _Client:
+        def query(self, *args: object, **kwargs: object) -> QueryResult:
+            calls.append((*args, kwargs))
+            sql = str(args[0])
+            rows: list[dict[str, Any]] = []
+            if "engine = 'Dictionary'" in sql:
+                rows = [{"database": "app", "name": "rates", "create_table_query": create_query}]
+            elif "formatQuerySingleLineOrNull" in sql:
+                rows = [{"formatted": []}]
+            elif "NOT startsWith(name, '_chkit_')" in sql:
+                rows = [{"database": "app", "name": "rates", "engine": "Dictionary", "comment": ""}]
+            return QueryResult(column_names=[], rows=rows)
+
+        def command(self, *args: object, **kwargs: object) -> None:
+            calls.append((*args, kwargs))
+
+    snapshot = SnapshotV1.model_validate(
+        {"version": 1, "generatedAt": "2026-01-01T00:00:00.000Z", "definitions": [expected]}
+    )
+
+    payload = build_drift_payload(
+        client=_Client(), meta_dir=tmp_path, snapshot=snapshot, database=None
+    )
+
+    assert any("formatQuerySingleLineOrNull" in str(call[0]) for call in calls)
+    sent = repr(calls)
+    printed = repr(payload)
+    for marker in ("fake-password", "fake-token", "user:"):
+        assert marker not in sent
+        assert marker not in printed
 
 
 # #383: a codec added, removed or changed on the server is drift, while the

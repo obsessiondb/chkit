@@ -1,6 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 
-import { planDiff, table, type ColumnDefinition, type MigrationOperation, type MigrationPlan } from '@chkit/core'
+import {
+  planDiff,
+  table,
+  type ColumnDefinition,
+  type MigrationOperation,
+  type MigrationPlan,
+  type SchemaDefinition,
+} from '@chkit/core'
 
 import {
   applyExplicitDictionaryRenames,
@@ -97,7 +104,8 @@ describe('plan-pipeline keeps the planner order of drops and creates (#231)', ()
   test('column rename', () => {
     const plan = applySelectedRenameSuggestions(
       PLAN,
-      buildExplicitColumnRenameSuggestions(PLAN, [{ database: 'app', table: 't', from: 'a', to: 'b', source: 'cli' }])
+      buildExplicitColumnRenameSuggestions(PLAN, [{ database: 'app', table: 't', from: 'a', to: 'b', source: 'cli' }]),
+      { previous: [], next: [] }
     )
     expect(summary(plan)).toEqual([
       'drop_view view:app.z_top',
@@ -126,20 +134,388 @@ describe('plan-pipeline keeps the planner order of drops and creates (#231)', ()
         orderBy: ['id'],
         columns: [{ name: 'id', type: 'UInt64' }, ...columns],
       })
-    const planned = planDiff(
-      [t([{ name: 'a', type: 'String' }, { name: 'code', type: 'String', default: 'abc' }])],
-      [t([{ name: 'b', type: 'String' }, { name: 'code', type: 'Int64' }])]
-    )
+    const previous = [t([{ name: 'a', type: 'String' }, { name: 'code', type: 'String', default: 'abc' }])]
+    const next = [t([{ name: 'b', type: 'String' }, { name: 'code', type: 'Int64' }])]
+    const planned = planDiff(previous, next)
     const plan = applySelectedRenameSuggestions(
       planned,
-      buildExplicitColumnRenameSuggestions(planned, [{ database: 'app', table: 't', from: 'a', to: 'b', source: 'cli' }])
+      buildExplicitColumnRenameSuggestions(planned, [{ database: 'app', table: 't', from: 'a', to: 'b', source: 'cli' }]),
+      { previous, next }
     )
     expect(plan.operations.map((operation) => operation.sql)).toEqual([
-      'ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;',
       'ALTER TABLE app.t MODIFY COLUMN `code` REMOVE DEFAULT;',
       'ALTER TABLE app.t MODIFY COLUMN `code` Int64;',
+      'ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;',
     ])
   })
+
+  test('column rename keeps an ADD COLUMN after the ADD COLUMN its DEFAULT reads (#681)', () => {
+    const t = (columns: ColumnDefinition[]) =>
+      table({
+        database: 'app',
+        name: 't',
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+        columns: [{ name: 'id', type: 'UInt64' }, ...columns],
+      })
+    const previous = [t([{ name: 'a', type: 'String' }])]
+    const next = [
+      t([
+        { name: 'b', type: 'String' },
+        { name: 'price', type: 'UInt64' },
+        { name: 'Total', type: 'UInt64', default: { expression: 'price + 1' } },
+      ]),
+    ]
+    const planned = planDiff(previous, next)
+    const plan = applySelectedRenameSuggestions(
+      planned,
+      buildExplicitColumnRenameSuggestions(planned, [{ database: 'app', table: 't', from: 'a', to: 'b', source: 'cli' }]),
+      { previous, next }
+    )
+    expect(plan.operations.map((operation) => operation.sql)).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `price` UInt64;',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `Total` UInt64 DEFAULT price + 1;',
+      'ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;',
+    ])
+  })
+
+  // ClickHouse rejects a DROP COLUMN while a skip index, constraint or
+  // projection still reads the column; planDiff drops those first (#747).
+  test('column rename keeps index, constraint and projection drops before the DROP COLUMN they read', () => {
+    const previous = [
+      table({
+        database: 'app',
+        name: 't',
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'a', type: 'String' },
+          { name: 'x', type: 'String' },
+        ],
+        indexes: [{ name: 'idx_x', expression: 'x', type: 'bloom_filter', granularity: 1 }],
+        constraints: [{ name: 'c_x', check: "x != ''" }],
+        projections: [{ name: 'p_x', query: 'SELECT x ORDER BY x' }],
+      }),
+    ]
+    const next = [
+      table({
+        database: 'app',
+        name: 't',
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'b', type: 'String' },
+        ],
+      }),
+    ]
+    const planned = planDiff(previous, next)
+    const plan = applySelectedRenameSuggestions(
+      planned,
+      buildExplicitColumnRenameSuggestions(planned, [{ database: 'app', table: 't', from: 'a', to: 'b', source: 'cli' }]),
+      { previous, next }
+    )
+    expect(plan.operations.map((operation) => operation.sql)).toEqual([
+      'ALTER TABLE app.t DROP CONSTRAINT IF EXISTS `c_x`;',
+      'ALTER TABLE app.t DROP INDEX IF EXISTS `idx_x`;',
+      'ALTER TABLE app.t DROP PROJECTION IF EXISTS `p_x`;',
+      'ALTER TABLE app.t DROP COLUMN IF EXISTS `x`;',
+      'ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;',
+    ])
+  })
+})
+
+describe('plan-pipeline orders column statements with the column renames (#746, #758)', () => {
+  const t = (columns: ColumnDefinition[]) =>
+    table({
+      database: 'app',
+      name: 't',
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+      columns: [{ name: 'id', type: 'UInt64' }, ...columns],
+    })
+  const renamed = (previous: SchemaDefinition[], next: SchemaDefinition[], from: string, to: string) => {
+    const planned = planDiff(previous, next)
+    return applySelectedRenameSuggestions(
+      planned,
+      buildExplicitColumnRenameSuggestions(planned, [{ database: 'app', table: 't', from, to, source: 'cli' }]),
+      { previous, next }
+    ).operations.map((operation) => operation.sql)
+  }
+
+  test('renames a column before the ADD COLUMNs that read its new name (#746)', () => {
+    expect(
+      renamed(
+        [t([{ name: 'a', type: 'String' }])],
+        [
+          t([
+            { name: 'b', type: 'String' },
+            { name: 'Copy', type: 'String', defaultKind: 'MATERIALIZED', default: { expression: "concat(`b`, '!')" } },
+            { name: 'a_len', type: 'UInt64', defaultKind: 'ALIAS', default: { expression: 'length(b)' } },
+            { name: 'c_plain', type: 'String' },
+          ]),
+        ],
+        'a',
+        'b'
+      )
+    ).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `c_plain` String;',
+      'ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;',
+      "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `Copy` String MATERIALIZED concat(`b`, '!');",
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a_len` UInt64 ALIAS length(b);',
+    ])
+  })
+
+  test('renames a column before the MODIFY COLUMN that reads its new name (#758)', () => {
+    expect(
+      renamed(
+        [t([{ name: 'a', type: 'String' }, { name: 'code', type: 'String', default: { expression: 'a' } }])],
+        [t([{ name: 'b', type: 'String' }, { name: 'code', type: 'String', default: { expression: 'b' } }])],
+        'a',
+        'b'
+      )
+    ).toEqual([
+      'ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;',
+      'ALTER TABLE app.t MODIFY COLUMN `code` String DEFAULT b;',
+    ])
+  })
+
+  // Reordering only the ADDs and the RENAME left the MODIFY of `d` in its
+  // slot, before the ADD of `c` it reads.
+  test('keeps a MODIFY COLUMN after the ADD COLUMN it reads when a rename moves', () => {
+    expect(
+      renamed(
+        [t([{ name: 'a', type: 'UInt64' }, { name: 'd', type: 'UInt64' }])],
+        [
+          t([
+            { name: 'c', type: 'UInt64', default: { expression: "length('abc')" } },
+            { name: 'd', type: 'UInt64', default: { expression: 'c + 1' } },
+            { name: 'length', type: 'UInt64' },
+          ]),
+        ],
+        'a',
+        'length'
+      )
+    ).toEqual([
+      "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `c` UInt64 DEFAULT length('abc');",
+      'ALTER TABLE app.t MODIFY COLUMN `d` UInt64 DEFAULT c + 1;',
+      'ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `length`;',
+    ])
+  })
+
+  test('keeps a chain of reads in order around a rename', () => {
+    expect(
+      renamed(
+        [t([{ name: 'a', type: 'UInt64' }, { name: 'd', type: 'UInt64' }])],
+        [
+          t([
+            { name: 'b', type: 'UInt64' },
+            { name: 'c', type: 'UInt64', default: { expression: 'b + 1' } },
+            { name: 'd', type: 'UInt64', default: { expression: 'c + 1' } },
+          ]),
+        ],
+        'a',
+        'b'
+      )
+    ).toEqual([
+      'ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `c` UInt64 DEFAULT b + 1;',
+      'ALTER TABLE app.t MODIFY COLUMN `d` UInt64 DEFAULT c + 1;',
+    ])
+  })
+
+  // A function call named like the new column used to read it, which made a
+  // cycle that kept the ADD before the RENAME it reads.
+  test('a function call named like a column does not hold back the rename', () => {
+    expect(
+      renamed(
+        [t([{ name: 'a', type: 'UInt64', default: { expression: "length('abc')" } }])],
+        [
+          t([
+            { name: 'b', type: 'UInt64', default: { expression: "length('abc')" } },
+            { name: 'length', type: 'UInt64', default: { expression: 'b + 1' } },
+          ]),
+        ],
+        'a',
+        'b'
+      )
+    ).toEqual([
+      'ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `length` UInt64 DEFAULT b + 1;',
+    ])
+  })
+
+  test('keeps a DROP COLUMN after the MODIFY that stops reading it', () => {
+    expect(
+      renamed(
+        [
+          t([
+            { name: 'a', type: 'UInt64' },
+            { name: 'b', type: 'UInt64', default: { expression: 'c' } },
+            { name: 'c', type: 'UInt64' },
+          ]),
+        ],
+        [
+          t([
+            { name: 'b', type: 'UInt64', default: { expression: 'z' } },
+            { name: 'y', type: 'UInt64' },
+            { name: 'z', type: 'UInt64' },
+          ]),
+        ],
+        'a',
+        'y'
+      )
+    ).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `z` UInt64;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT z;',
+      'ALTER TABLE app.t DROP COLUMN IF EXISTS `c`;',
+      'ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `y`;',
+    ])
+  })
+
+  test('a table rename keeps the planner order of the column statements', () => {
+    const next = [t([{ name: 'Total', type: 'UInt64', default: { expression: 'price + 1' } }, { name: 'price', type: 'UInt64' }])]
+    const planned = planDiff([t([{ name: 'Total', type: 'UInt64' }])], next)
+    const plan = applyExplicitTableRenames(planned, [
+      { oldDatabase: 'app', oldName: 'old_t', newDatabase: 'app', newName: 't', source: 'cli' },
+    ])
+    expect(plan.operations.map((operation) => operation.sql)).toEqual([
+      'RENAME TABLE IF EXISTS app.old_t TO app.t;',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `price` UInt64;',
+      'ALTER TABLE app.t MODIFY COLUMN `Total` UInt64 DEFAULT price + 1;',
+    ])
+  })
+})
+
+describe('plan-pipeline keeps a table TTL change between the columns it reads and drops (#769)', () => {
+  const withTtl = (columns: ColumnDefinition[], ttl: string) =>
+    table({
+      database: 'app',
+      name: 't',
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+      columns: [{ name: 'id', type: 'UInt64' }, ...columns],
+      ttl,
+    })
+  const previous = [withTtl([{ name: 'a', type: 'UInt64' }, { name: 'x', type: 'DateTime' }], 'x + INTERVAL 1 DAY')]
+  const next = [withTtl([{ name: 'b', type: 'UInt64' }, { name: 'y', type: 'DateTime' }], 'y + INTERVAL 1 DAY')]
+
+  test('with a column rename', () => {
+    const planned = planDiff(previous, next)
+    const plan = applySelectedRenameSuggestions(
+      planned,
+      buildExplicitColumnRenameSuggestions(planned, [{ database: 'app', table: 't', from: 'a', to: 'b', source: 'cli' }]),
+      { previous, next }
+    )
+    expect(plan.operations.map((operation) => operation.sql)).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `y` DateTime;',
+      'ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;',
+      'ALTER TABLE app.t MODIFY TTL y + INTERVAL 1 DAY;',
+      'ALTER TABLE app.t DROP COLUMN IF EXISTS `x`;',
+    ])
+  })
+
+  test('with a table rename', () => {
+    const plan = applyExplicitTableRenames(
+      planDiff(
+        [withTtl([{ name: 'x', type: 'DateTime' }], 'x + INTERVAL 1 DAY')],
+        [withTtl([{ name: 'y', type: 'DateTime' }], 'y + INTERVAL 1 DAY')]
+      ),
+      [{ oldDatabase: 'app', oldName: 'old_t', newDatabase: 'app', newName: 't', source: 'cli' }]
+    )
+    expect(plan.operations.map((operation) => operation.sql)).toEqual([
+      'RENAME TABLE IF EXISTS app.old_t TO app.t;',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `y` DateTime;',
+      'ALTER TABLE app.t MODIFY TTL y + INTERVAL 1 DAY;',
+      'ALTER TABLE app.t DROP COLUMN IF EXISTS `x`;',
+    ])
+  })
+})
+
+// ClickHouse rewrites every expression that reads a renamed column to its new
+// name, so a column rename keeps the column on the cycle repair's graph (#827).
+describe('plan-pipeline runs a cycle breaker first in tables with a column rename (#775, #827)', () => {
+  const t = (name: string, columns: ColumnDefinition[]) =>
+    table({
+      database: 'app',
+      name,
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+      columns: [{ name: 'id', type: 'UInt64' }, ...columns],
+    })
+  const u = (name: string, expression?: string): ColumnDefinition => ({
+    name,
+    type: 'UInt64',
+    ...(expression === undefined ? {} : { default: { expression } }),
+  })
+  const renamed = (previous: SchemaDefinition[], next: SchemaDefinition[], from: string, to: string) => {
+    const planned = planDiff(previous, next)
+    const plan = applySelectedRenameSuggestions(
+      planned,
+      buildExplicitColumnRenameSuggestions(planned, [{ database: 'app', table: 't', from, to, source: 'cli' }]),
+      { previous, next }
+    )
+    return plan.operations.map((operation) => operation.sql)
+  }
+  const before = [u('a'), u('b', 'c'), u('c', 'a')]
+  const after = [u('a', 'b'), u('b', 'id'), u('c', 'id')]
+
+  test('with a column rename in one of two tables', () => {
+    expect(renamed([t('t', [...before, u('x')]), t('v', before)], [t('t', [...after, u('y')]), t('v', after)], 'x', 'y')).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT id;',
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;',
+      'ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;',
+      'ALTER TABLE app.t RENAME COLUMN IF EXISTS `x` TO `y`;',
+      'ALTER TABLE app.v MODIFY COLUMN `b` UInt64 DEFAULT id;',
+      'ALTER TABLE app.v MODIFY COLUMN `a` UInt64 DEFAULT b;',
+      'ALTER TABLE app.v MODIFY COLUMN `c` UInt64 DEFAULT id;',
+    ])
+  })
+
+  test('with the renamed column on the cycle', () => {
+    // `a DEFAULT b` closes a → b → x (renamed y) → a until `b` changes.
+    expect(renamed([t('t', [u('a'), u('b', 'x'), u('x', 'a')])], [t('t', [u('a', 'b'), u('b', 'id'), u('y', 'a')])], 'x', 'y')).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT id;',
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;',
+      'ALTER TABLE app.t RENAME COLUMN IF EXISTS `x` TO `y`;',
+    ])
+  })
+
+  test('a MODIFY that only follows the rename does not break the cycle', () => {
+    // `b DEFAULT x` → `b DEFAULT y` reads the same column, so `c` breaks the cycle.
+    expect(
+      renamed(
+        [t('t', [u('a'), u('b', 'x'), u('x', 'c'), u('c', 'a')])],
+        [t('t', [u('a', 'b'), u('b', 'y'), u('y', 'c'), u('c', 'id')])],
+        'x',
+        'y'
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;',
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;',
+      'ALTER TABLE app.t RENAME COLUMN IF EXISTS `x` TO `y`;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT y;',
+    ])
+  })
+
+  // ClickHouse 26.3 rewrites a read of a column renamed to `true` as the
+  // literal and one renamed to `not` as the operator, so those keep the order.
+  for (const to of ['TRUE', 'Not']) {
+    test(`with a rename to ${to}, the table keeps the sorted order`, () => {
+      expect(renamed([t('t', [u('a'), u('b', 'x'), u('x', 'a')])], [t('t', [u('a', 'b'), u('b', 'id'), u(to, 'a')])], 'x', to)).toEqual([
+        'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;',
+        'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT id;',
+        `ALTER TABLE app.t RENAME COLUMN IF EXISTS \`x\` TO \`${to}\`;`,
+      ])
+    })
+  }
 })
 
 describe('plan-pipeline quotes the database it creates for a cross-database rename (#490)', () => {

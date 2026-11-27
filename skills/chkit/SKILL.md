@@ -280,6 +280,7 @@ export default defineConfig({
 | `@chkit/plugin-pull` | `bun add -d @chkit/plugin-pull` | `chkit pull` | Introspect live ClickHouse into schema files |
 | `@chkit/plugin-backfill` | `bun add -d @chkit/plugin-backfill` | `chkit plugin backfill` | Partition/sort-key replay with checkpoints |
 | `@chkit/plugin-obsessiondb` | `bun add -d @chkit/plugin-obsessiondb` | `chkit query --service <name>` | Route commands through an ObsessionDB service |
+| `@chkit/plugin-tinybird` | `bun add -d @chkit/plugin-tinybird` | `chkit plugin tinybird import` | Import a Tinybird project; the `chkit-tinybird` skill covers the whole move |
 
 ## Common Workflows
 
@@ -320,7 +321,7 @@ When a property changes, chkit determines whether ALTER or DROP+CREATE is needed
 
 Views and materialized views always use drop+recreate.
 
-For populated structural changes, do not apply the generated DROP/CREATE as a data-preservation solution. Use [the staged copy/validate/cutover recipe](https://chkit.obsessiondb.com/guides/data-preserving-migrations/), with explicit writer coordination, recovery and tracked SQL migrations.
+For populated structural changes, do not apply the generated DROP/CREATE as a data-preservation solution. Use tracked SQL migrations with explicit writer coordination and recovery.
 
 The backfill plugin currently chunks by physical partitions and sorting keys; `--from`/`--to` select partitions using metadata, not arbitrary timestamp-column row predicates. `--time-column` and `--chunk-hours` are not current planning flags. A new plan gets a new identity; resume the saved plan rather than replanning to retry. MV replay is for historical aggregate targets; a same-table copy can duplicate ordinary MergeTree rows. Use tracked SQL for an arbitrary source-to-shadow transformation and inspect the generated plugin SQL before execution.
 

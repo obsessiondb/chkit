@@ -116,4 +116,18 @@ def test_a_flag_error_is_reported_before_any_hook(
 def test_valid_flags_reach_the_command(project: Path) -> None:
     result = CliRunner().invoke(app, ["plugin", "probe", "greet", "--name", "ada"])
     assert result.exit_code == 0, result.output
-    assert _calls(project) == ["on_before_plugin_command", "run ada"]
+    # Each hook runs for both plugins (probe, watch); only watch sees probe's
+    # command in on_before_plugin_command. `chkit plugin` gets get_context
+    # first, then the command (#488).
+    assert _calls(project) == [
+        "on_init",
+        "on_init",
+        "get_context",
+        "get_context",
+        "on_before_plugin_command",
+        "get_context",
+        "get_context",
+        "run ada",
+        "on_complete",
+        "on_complete",
+    ]

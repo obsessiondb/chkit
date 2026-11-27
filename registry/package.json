@@ -12,7 +12,7 @@
   "devDependencies": {
     "@chkit/clickhouse": "workspace:*",
     "@chkit/core": "workspace:*",
-    "@chkit/plugin-ingest": "workspace:*",
+    "@chkit/plugin-sync": "workspace:*",
     "@types/bun": "^1.2.0",
     "chkit": "workspace:*",
     "zod": "^4.3.6"

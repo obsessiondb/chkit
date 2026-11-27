@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test'
-import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -12,7 +12,7 @@ const CHUNK_ROWS = 200_000
 // clickhouse.cluster, so a node-local journal cannot exist there.
 const onObsessionDB = process.env.CHKIT_E2E_TARGET === 'obsessiondb'
 
-describe('chkit ingest run through the published Node entry', () => {
+describe('chkit Sync through the published Node entry', () => {
   const env = getLiveEnv()
   const executor = createStatelessLiveExecutor(env)
   const prefix = createPrefix('ingest_node')
@@ -30,7 +30,22 @@ describe('chkit ingest run through the published Node entry', () => {
     await Promise.all(directories.map((directory) => rm(directory, { recursive: true, force: true })))
   })
 
-  test('loads a single chunk larger than Node\'s argument limit', async () => {
+  test('keeps the legacy package entry and testing subpath wired to the same runtime', () => {
+    const result = spawnWithTimeout(['node', '--input-type=module', '-e', `
+import assert from 'node:assert/strict'
+import { ingest, createIngestPlugin } from '@chkit/plugin-ingest'
+import { sync, createSyncPlugin } from '@chkit/plugin-sync'
+import { createMemoryJournal as legacyJournal } from '@chkit/plugin-ingest/testing'
+import { createMemoryJournal } from '@chkit/plugin-sync/testing'
+
+assert.equal(ingest, sync)
+assert.equal(createIngestPlugin, createSyncPlugin)
+assert.equal(legacyJournal, createMemoryJournal)
+`], { cwd: WORKSPACE_ROOT })
+    expect(result.exitCode, formatTestDiagnostic('load both packages', result)).toBe(0)
+  })
+
+  test('loads a large chunk with ingest and reads the checkpoint after switching to Sync', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'chkit-ingest-node-'))
     directories.push(directory)
     await symlink(join(WORKSPACE_ROOT, 'node_modules'), join(directory, 'node_modules'), 'dir')
@@ -40,7 +55,7 @@ describe('chkit ingest run through the published Node entry', () => {
     await waitForTable(executor, env.clickhouseDatabase, tableName)
     const entry = join(directory, 'entry.ts')
     await writeFile(entry, `import { table } from '@chkit/core'
-import { definePipeline, defineStream, ingestionColumns } from '@chkit/plugin-ingest'
+import { cursorState, definePipeline, defineStream, ingestionColumns } from '@chkit/plugin-ingest'
 
 export const rows = table({
   database: ${JSON.stringify(env.clickhouseDatabase)}, name: ${JSON.stringify(tableName)},
@@ -48,7 +63,8 @@ export const rows = table({
 })
 const stream = defineStream({
   id: 'node.large_chunk', destination: rows, budget: { maxChunkRows: ${CHUNK_ROWS} },
-  async *read() { yield { rows: Array.from({ length: ${CHUNK_ROWS} }, (_, id) => ({ id })) } },
+  incremental: cursorState({ id: 'node.cursor', version: 1, parse: Number }),
+  async *read() { yield { rows: Array.from({ length: ${CHUNK_ROWS} }, (_, id) => ({ id })), state: ${CHUNK_ROWS} } },
 })
 export const pipeline = definePipeline({ id: 'node', streams: [stream] })
 `)
@@ -66,14 +82,15 @@ export default defineConfig({
 })
 `)
 
-    const result = ingestRun(directory, configPath)
+    const result = runNodeCli(directory, configPath, 'ingest', 'run')
     expect(result.exitCode, formatTestDiagnostic('ingest run', result)).toBe(0)
+    expect(result.stderr).toContain('Deprecated: chkit ingest is now chkit sync.')
     const payload = JSON.parse(result.stdout) as { ok: boolean; streams: Array<{ outcome: string; rows: number; chunks: number; error?: string }> }
     expect(payload.ok).toBe(true)
     expect(payload.streams[0]).toMatchObject({ outcome: 'succeeded', rows: CHUNK_ROWS, chunks: 1 })
     const counted = await waitForRows<{ n: string; distinct: string; minimum: string; maximum: string }>(
       executor,
-      `SELECT count() AS n, uniqExact(id) AS distinct, min(id) AS minimum, max(id) AS maximum FROM ${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(tableName)}`,
+      `SELECT count() AS n, uniqExact(id) AS distinct, min(id) AS minimum, max(id) AS maximum FROM ${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(tableName)} SETTINGS select_sequential_consistency = 1, enable_parallel_replicas = 0`,
       (rows) => Number(rows[0]?.n) === CHUNK_ROWS
         && Number(rows[0]?.distinct) === CHUNK_ROWS
         && Number(rows[0]?.minimum) === 0
@@ -83,6 +100,24 @@ export default defineConfig({
     expect(Number(counted[0]?.distinct)).toBe(CHUNK_ROWS)
     expect(Number(counted[0]?.minimum)).toBe(0)
     expect(Number(counted[0]?.maximum)).toBe(CHUNK_ROWS - 1)
+
+    const config = await readFile(configPath, 'utf8')
+    await writeFile(configPath, config.replace("import { ingest } from '@chkit/plugin-ingest'", "import { sync } from '@chkit/plugin-sync'")
+      .replace('plugins: [ingest(', 'plugins: [sync('))
+    for (const command of [['sync', 'status'], ['plugin', 'sync', 'status'], ['plugin', 'ingest', 'status']]) {
+      const status = runNodeCli(directory, configPath, ...command)
+      expect(status.exitCode, formatTestDiagnostic(command.join(' '), status)).toBe(0)
+      expect(JSON.parse(status.stdout)).toMatchObject({
+        ok: true,
+        command: 'status',
+        streams: [{ streamId: 'node.large_chunk', checkpointVersion: 1, checkpoint: { state: CHUNK_ROWS } }],
+      })
+      if (command.includes('ingest')) {
+        expect(status.stderr).toContain('Deprecated: chkit plugin ingest is now chkit plugin sync.')
+      } else {
+        expect(status.stderr).not.toContain('Deprecated:')
+      }
+    }
   }, 60_000)
 
   // The local stack defines a one-node cluster named `cluster` (test/infra/clickhouse.xml).
@@ -133,11 +168,11 @@ export default defineConfig({
       return Number(row?.n)
     }
 
-    const local = ingestRun(directory, await config('local.config.ts', ''))
+    const local = runNodeCli(directory, await config('local.config.ts', ''), 'ingest', 'run')
     expect(local.exitCode, formatTestDiagnostic('ingest run without a cluster', local)).toBe(0)
     const journalRows = await countRows(clusterJournal)
 
-    const clustered = ingestRun(directory, await config('cluster.config.ts', " cluster: 'cluster',"))
+    const clustered = runNodeCli(directory, await config('cluster.config.ts', " cluster: 'cluster',"), 'ingest', 'run')
     expect(clustered.exitCode, formatTestDiagnostic('ingest run with clickhouse.cluster', clustered)).toBe(1)
     expect(JSON.parse(clustered.stdout)).toEqual({
       ok: false,
@@ -148,9 +183,9 @@ export default defineConfig({
     expect(await countRows(clusterJournal)).toBe(journalRows)
   }, 60_000)
 
-  function ingestRun(directory: string, configPath: string) {
+  function runNodeCli(directory: string, configPath: string, ...command: string[]) {
     return spawnWithTimeout(
-      ['node', join(WORKSPACE_ROOT, 'packages/cli/dist/bin/chkit.js'), 'ingest', 'run', '--json', '--config', configPath],
+      ['node', join(WORKSPACE_ROOT, 'packages/cli/dist/bin/chkit.js'), ...command, '--json', '--config', configPath],
       {
         cwd: directory,
         env: {

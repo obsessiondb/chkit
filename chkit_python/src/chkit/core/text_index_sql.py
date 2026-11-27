@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+from chkit.core.sql_lexer import is_js_space
+
 _ESCAPES = {"0": 0, "a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, "e": 27}
 _WORD = re.compile(r"(?:\d+(?:\.\d*)?(?:[eE][+-]?\d+)?|[\w$]+|->|<=|>=|!=|<>|\|\||::|==)")
 _CLOSE = {")": "(", "]": "[", "}": "{"}
@@ -82,7 +84,7 @@ def text_sql_tokens(sql: str) -> list[str]:
     i = 0
     while i < len(sql):
         char = sql[i]
-        if char.isspace():
+        if is_js_space(char):
             i += 1
             continue
         if sql.startswith("--", i):
@@ -179,6 +181,9 @@ def format_text_sql(tokens: list[str]) -> str:
             or token in (")", "]", "}", ",", ".")
             or previous in ("(", "[", "{", ".")
             or (token == "(" and _is_call(tokens, i))
+            # `[` after an operand subscripts it, as ClickHouse writes `lower(s)[1]`;
+            # after an operator or keyword it opens an array: `x IN [1]`, `NOT [1]`.
+            or (token == "[" and _ends_operand(previous) and previous.lower() != "not")
         )
         parts.append(("" if tight else " ") + token)
     return "".join(parts)

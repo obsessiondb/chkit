@@ -157,7 +157,7 @@ export async function loadPluginRuntime(input: {
     runOnSchemaLoaded: (context) => runOnSchemaLoaded(loaded, context),
     runOnSnapshotLoaded: (context) => runOnSnapshotLoaded(loaded, context),
     runOnPlanCreated: (context, plan) => runOnPlanCreated(loaded, context, plan),
-    runOnBeforeApply: (context) => runOnBeforeApply(loaded, context),
+    runOnBeforeApply: (context, signal) => runOnBeforeApply(loaded, context, signal),
     runOnAfterApply: (context) => runOnAfterApply(loaded, context),
     runOnCheck: (context) => runOnCheck(loaded, context),
     runOnCheckReport: (results, print) => runOnCheckReport(byName, results, print),

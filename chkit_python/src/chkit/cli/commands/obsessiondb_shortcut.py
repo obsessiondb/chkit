@@ -18,18 +18,20 @@ from chkit.cli.commands.plugin import dispatch_plugin_command
 
 
 def run(
+    ctx: typer.Context,
     command_name: Annotated[
-        str,
+        str | None,
         typer.Argument(help="ObsessionDB command (login, signup, whoami, service, ...)."),
-    ],
+    ] = None,
     args: Annotated[
         list[str] | None,
         typer.Argument(
             help="Arguments and flags forwarded to the ObsessionDB command."
         ),
     ] = None,
+    # A str, not a Path: the command gets the raw value in its flags, as in TS.
     config_path: Annotated[
-        Path | None,
+        str | None,
         typer.Option("--config", "-c", help="Path to clickhouse.config.py."),
     ] = None,
     output_json: Annotated[
@@ -41,7 +43,12 @@ def run(
         plugin_name="obsessiondb",
         command_name=command_name,
         tokens=list(args or []),
-        config_path=config_path,
+        config_path=Path(config_path) if config_path is not None else None,
         output_json=output_json,
         invoking_command="obsessiondb",
+        config_flag=config_path,
+        # A callable: with rich, get_help() prints the help as it builds it.
+        # As in TS, `chkit obsessiondb` without a command shows its help, after
+        # on_init.
+        print_help=lambda: typer.echo(ctx.get_help()),
     )

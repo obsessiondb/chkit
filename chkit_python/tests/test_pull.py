@@ -26,6 +26,7 @@ from chkit.clickhouse.client import ClickHouseClient
 from chkit.clickhouse.introspect import IntrospectedTable, SchemaObjectRef
 from chkit.core.codec import parse_codec
 from chkit.core.model import (
+    ColumnInput,
     MaterializedViewRefresh,
     SkipIndexBloomFilter,
     SkipIndexMinmax,
@@ -121,6 +122,54 @@ def test_parse_refresh_after_with_randomize_and_depends_on() -> None:
     ]
 
 
+# TS packages/plugin-pull/src/index.test.ts "parseRefreshClause reads quoted
+# DEPENDS ON names as ClickHouse means them": create_table_query as ClickHouse
+# 26.3 returns it (#631).
+def test_parse_refresh_depends_on_reads_quoted_names() -> None:
+    ddl = (
+        "CREATE MATERIALIZED VIEW d.mv2 REFRESH EVERY 1 HOUR DEPENDS ON d.r1, "
+        "d.`we\\`ird`, d.`a.b`, d.`x\\``, d.`has AS kw`, d.`q\"d`, `a, b`.`TO` "
+        "TO d.dst (`a` UInt8) DEFINER = default SQL SECURITY DEFINER AS SELECT a FROM d.src"
+    )
+    refresh = parse_refresh_clause(ddl)
+    assert refresh is not None
+    assert refresh.depends_on == [
+        DependsOnEntry(database="d", name="r1"),
+        DependsOnEntry(database="d", name="we`ird"),
+        DependsOnEntry(database="d", name="a.b"),
+        DependsOnEntry(database="d", name="x`"),
+        DependsOnEntry(database="d", name="has AS kw"),
+        DependsOnEntry(database="d", name='q"d'),
+        DependsOnEntry(database="a, b", name="TO"),
+    ]
+
+
+# TS packages/plugin-pull/src/index.test.ts "parseRefreshClause decodes escapes in
+# quoted DEPENDS ON names as ClickHouse does".
+def test_parse_refresh_depends_on_decodes_escapes() -> None:
+    refresh = parse_refresh_clause(
+        "CREATE MATERIALIZED VIEW d.mv REFRESH EVERY 1 HOUR DEPENDS ON d.`x\\ny`, d.`b\\x41` "
+        "TO d.dst AS SELECT 1"
+    )
+    assert refresh is not None
+    assert refresh.depends_on == [
+        DependsOnEntry(database="d", name="x\ny"),
+        DependsOnEntry(database="d", name="bA"),
+    ]
+
+
+# TS packages/plugin-pull/src/index.test.ts "parseRefreshClause ignores DEPENDS
+# ON text inside a string or the SELECT".
+def test_parse_refresh_ignores_depends_on_inside_a_string() -> None:
+    refresh = parse_refresh_clause(
+        "CREATE MATERIALIZED VIEW d.mv REFRESH EVERY 1 HOUR TO d.dst "
+        "AS SELECT 'DEPENDS ON d.x' AS c"
+    )
+    assert refresh is not None
+    assert refresh.every == "1 HOUR"
+    assert refresh.depends_on is None
+
+
 def test_parse_refresh_settings_block() -> None:
     ddl = (
         "CREATE MATERIALIZED VIEW db.mv REFRESH EVERY 1 hour "
@@ -197,15 +246,15 @@ def test_render_pulls_stored_codecs_as_typed_atoms_without_filled_in_sizes() -> 
         "tu": ("Tuple(a UInt8, b UInt64)", "CODEC(Delta, LZ4)"),
         "df": ("UInt64", "CODEC(Delta(8), Default)"),
     }
+    stored_columns: list[ColumnInput] = [
+        {"name": name, "type": type_, "codec": parse_codec(codec)}
+        for name, (type_, codec) in stored.items()
+    ]
     t = table(
         database="db",
         name="t",
         engine="MergeTree",
-        columns=[{"name": "id", "type": "UInt64"}]
-        + [
-            {"name": name, "type": type_, "codec": parse_codec(codec)}
-            for name, (type_, codec) in stored.items()
-        ],
+        columns=[{"name": "id", "type": "UInt64"}, *stored_columns],
         primary_key=["id"],
         order_by=["id"],
     )
@@ -443,9 +492,89 @@ def test_excludes_obsessiondb_metadata_tables_from_pulled_schema_output(
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
+    # The same keys, in the same order, as the TS pull plugin (#487).
+    assert list(payload) == [
+        "ok",
+        "command",
+        "outFile",
+        "definitionCount",
+        "tableCount",
+        "databases",
+        "skippedObjects",
+        "dryrun",
+        "warnings",
+        "content",
+    ]
     assert payload["definitionCount"] == 1
     assert payload["tableCount"] == 1
     assert payload["skippedObjects"] == []
     assert "metadata_folder" not in payload["content"]
     assert "metadata_table_folder" not in payload["content"]
     assert "metadata_table_tag" not in payload["content"]
+
+
+# ---------- code-point order (#703) ----------
+
+# The TS plugin sorted these with a bare sort(), which compares UTF-16 units
+# and puts U+1F600 (a surrogate pair) before U+FF5E. Both ports sort by code
+# point, which puts U+FF5E first.
+EMOJI = "\U0001f600"
+FULLWIDTH_TILDE = "\uff5e"
+
+
+def _pull_payload(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tables: list[IntrospectedTable],
+    args: list[str],
+) -> dict[str, Any]:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "clickhouse.config.py").write_text(CONFIG_WITH_CH, encoding="utf-8")
+
+    def connect(cls: object, config: object) -> nullcontext[None]:
+        return nullcontext()
+
+    def list_objects(client: object) -> list[SchemaObjectRef]:
+        return [SchemaObjectRef(kind="table", database=t.database, name=t.name) for t in tables]
+
+    def pull_definitions(
+        client: object, databases: object
+    ) -> tuple[list[TableDefinition | None], list[str]]:
+        return [_introspected_table_to_definition(t) for t in tables], []
+
+    monkeypatch.setattr(ClickHouseClient, "connect", classmethod(connect))
+    monkeypatch.setattr(pull_module, "list_schema_objects", list_objects)
+    monkeypatch.setattr(pull_module, "_pull_definitions", pull_definitions)
+
+    result = runner.invoke(app, ["pull", "--dryrun", "--json", *args])
+    assert result.exit_code == 0, result.output
+    payload: dict[str, Any] = json.loads(result.stdout)
+    return payload
+
+
+def test_orders_database_flags_by_code_point(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tables = [_introspected("t", database=EMOJI), _introspected("t", database=FULLWIDTH_TILDE)]
+    payload = _pull_payload(
+        runner, tmp_path, monkeypatch, tables, ["--database", EMOJI, "--database", FULLWIDTH_TILDE]
+    )
+    assert payload["databases"] == [FULLWIDTH_TILDE, EMOJI]
+
+
+def test_orders_server_databases_by_code_point(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tables = [_introspected("t", database=EMOJI), _introspected("t", database=FULLWIDTH_TILDE)]
+    payload = _pull_payload(runner, tmp_path, monkeypatch, tables, [])
+    assert payload["databases"] == [FULLWIDTH_TILDE, EMOJI]
+
+
+def test_renders_table_settings_in_code_point_order() -> None:
+    definition = _introspected_table_to_definition(
+        _introspected("t", settings={f"a{EMOJI}": "1", f"a{FULLWIDTH_TILDE}": "2"})
+    )
+    assert definition is not None
+    content = render_schema_file([definition])
+    assert -1 < content.index(f"a{FULLWIDTH_TILDE}") < content.index(f"a{EMOJI}")

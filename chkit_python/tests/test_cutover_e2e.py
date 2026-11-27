@@ -1,6 +1,6 @@
 """Zero-downtime cutover of a sort-key change (#202) under concurrent writers.
 
-Port of ``packages/cli/src/test/cutover.e2e.test.ts``: against the local stack,
+Port of the ``packages/cli/src/test/cutover*.e2e.test.ts`` files: against the local stack,
 or ObsessionDB when ``CLICKHOUSE_URL`` / ``CLICKHOUSE_HOST`` point at it. The
 2-shard cluster runs the same scenarios in
 ``tests_cluster/test_cutover_cluster_e2e.py``. An unreachable server fails the
@@ -20,8 +20,12 @@ from tests.cutover_scenario import (
     GRANULARITY_CHANGE,
     CutoverTarget,
     run_backfill_scenario,
+    run_created_outside_chkit_scenario,
     run_keep_scenario,
+    run_refused_at_start_scenario,
     run_retry_scenario,
+    run_stored_spelling_scenario,
+    run_undeclared_primary_key_scenario,
 )
 from tests.e2e_testkit import resolve_live_env
 
@@ -73,13 +77,226 @@ def test_copies_through_the_backfill_plugin_then_swaps_and_drops_the_old_table(
     run_backfill_scenario(target, "cutover_backfill", tmp_path)
 
 
-def test_resumes_after_a_failure_at_every_step_and_never_replays_the_swap(
+def test_keeps_flattened_nested_rows_while_writers_insert(
+    target: CutoverTarget, tmp_path: Path
+) -> None:
+    run_keep_scenario(target, "cutover_keep_nested", tmp_path, nested=True)
+
+
+def test_copies_flattened_nested_rows_through_backfill_while_the_mirror_is_live(
+    target: CutoverTarget, tmp_path: Path
+) -> None:
+    run_backfill_scenario(target, "cutover_backfill_nested", tmp_path, nested=True)
+
+
+def test_resumes_after_a_failure_at_every_step_whose_retry_differs_and_never_replays_the_swap(
     target: CutoverTarget, tmp_path: Path
 ) -> None:
     run_retry_scenario(target, "cutover_retry", tmp_path)
 
 
-def test_cuts_over_an_index_granularity_change_resuming_after_a_failure_at_every_step(
+def test_cuts_over_an_index_granularity_change_and_its_layout_guards_tell_the_tables_apart(
     target: CutoverTarget, tmp_path: Path
 ) -> None:
-    run_retry_scenario(target, "cutover_granularity", tmp_path, GRANULARITY_CHANGE)
+    run_retry_scenario(target, "cutover_granularity", tmp_path, GRANULARITY_CHANGE, "layout guards")
+
+
+def test_cuts_over_a_table_created_with_only_order_by(
+    target: CutoverTarget, tmp_path: Path
+) -> None:
+    run_undeclared_primary_key_scenario(target, "cutover_pk", tmp_path)
+
+
+# cityHash64 hashes both pairs alike, so the verify step after the copy would miss them.
+MISTYPED = "stores a column with another type than the schema declares"
+
+
+def test_stops_before_it_creates_anything_on_uint32_where_the_schema_says_uint64(
+    target: CutoverTarget, tmp_path: Path
+) -> None:
+    run_refused_at_start_scenario(
+        target,
+        "cutover_uint",
+        tmp_path,
+        columns="id UInt32, user_id UInt64, payload String",
+        engine=lambda _table: target.engine,
+        message=MISTYPED,
+    )
+
+
+def test_stops_before_it_creates_anything_on_low_cardinality_where_the_schema_says_string(
+    target: CutoverTarget, tmp_path: Path
+) -> None:
+    run_refused_at_start_scenario(
+        target,
+        "cutover_lowcard",
+        tmp_path,
+        columns="id UInt64, user_id UInt64, payload LowCardinality(String)",
+        engine=lambda _table: target.engine,
+        message=MISTYPED,
+    )
+
+
+BASE = [
+    {"name": "id", "type": "UInt64"},
+    {"name": "user_id", "type": "UInt64"},
+    {"name": "payload", "type": "String"},
+]
+
+
+# ClickHouse stores Decimal64(2) as Decimal(18, 2): the same type, in another spelling.
+def test_cuts_over_a_table_whose_types_clickhouse_stores_in_another_spelling(
+    target: CutoverTarget, tmp_path: Path
+) -> None:
+    run_stored_spelling_scenario(
+        target,
+        "cutover_spelling",
+        tmp_path,
+        [
+            *BASE,
+            {"name": "price", "type": "Decimal64(2)"},
+            {"name": "maybe_price", "type": "Decimal64(2)", "nullable": True},
+            {"name": "prices", "type": "Array(Decimal64(2))"},
+            {"name": "pair", "type": "Tuple(a Decimal128(4), `b c` INT)"},
+        ],
+    )
+
+
+# defaultValueOfTypeName fails for this type on ClickHouse 26.3 (ClickHouse#102403), and so
+# does the default of an omitted column: the DEFAULT expression lets the scenario insert
+# without it.
+def test_cuts_over_a_table_with_an_aggregate_function_column_over_low_cardinality(
+    target: CutoverTarget, tmp_path: Path
+) -> None:
+    run_stored_spelling_scenario(
+        target,
+        "cutover_aggregate",
+        tmp_path,
+        [
+            *BASE,
+            {
+                "name": "last",
+                "type": "AggregateFunction(argMax, LowCardinality(String), DateTime)",
+                "default": "fn:arrayReduce('argMaxState', [toLowCardinality('')], [toDateTime(0)])",
+            },
+        ],
+    )
+
+
+# AS copies the table's engine: a SummingMergeTree snapshot would merge rows away before the copy.
+def test_stops_before_it_creates_anything_on_summing_merge_tree_where_the_schema_says_merge_tree(
+    target: CutoverTarget, tmp_path: Path
+) -> None:
+    run_refused_at_start_scenario(
+        target,
+        "cutover_summing",
+        tmp_path,
+        columns="id UInt64, user_id UInt64, payload String",
+        engine=lambda _table: "SummingMergeTree",
+        message="does not use the engine the schema declares",
+    )
+
+
+def test_stops_before_it_creates_anything_when_the_table_stores_nested_without_flattening(
+    target: CutoverTarget, tmp_path: Path
+) -> None:
+    run_refused_at_start_scenario(
+        target,
+        "cutover_nested_whole",
+        tmp_path,
+        columns="id UInt64, user_id UInt64, payload String, n Nested(x UInt64, `y z` Decimal64(2))",
+        engine=lambda _table: target.engine,
+        schema_columns=[*BASE, {"name": "n", "type": "Nested(x UInt64, `y z` Decimal64(2))"}],
+        settings={"flatten_nested": 0},
+        message="stores a Nested column as one column (created with flatten_nested = 0)",
+    )
+
+
+# ClickHouse writes the column name TTL unquoted in the key: it is not a TTL.
+def test_cuts_over_a_table_with_a_column_named_ttl_in_its_key(
+    target: CutoverTarget, tmp_path: Path
+) -> None:
+    run_created_outside_chkit_scenario(
+        target,
+        "cutover_ttl_column",
+        tmp_path,
+        columns="id UInt64, user_id UInt64, payload String, TTL DateTime",
+        schema_columns=[*BASE, {"name": "TTL", "type": "DateTime"}],
+        order_by="(id, TTL)",
+    )
+
+
+def test_stops_before_it_creates_anything_when_the_table_lacks_a_nested_column(
+    target: CutoverTarget, tmp_path: Path
+) -> None:
+    run_refused_at_start_scenario(
+        target,
+        "cutover_nested_missing",
+        tmp_path,
+        columns="id UInt64, user_id UInt64, payload String",
+        engine=lambda _table: target.engine,
+        message="lacks a column that the schema declares",
+        schema_columns=[*BASE, {"name": "n", "type": "Nested(x UInt64)"}],
+    )
+
+
+def test_stops_before_it_creates_anything_when_a_nested_field_has_another_type(
+    target: CutoverTarget, tmp_path: Path
+) -> None:
+    run_refused_at_start_scenario(
+        target,
+        "cutover_nested_type",
+        tmp_path,
+        columns="id UInt64, user_id UInt64, payload String, n Nested(x UInt32)",
+        engine=lambda _table: target.engine,
+        message=MISTYPED,
+        schema_columns=[*BASE, {"name": "n", "type": "Nested(x UInt64)"}],
+    )
+
+
+# The mirror, the copy and the verify skip an ALIAS column, so the stored values would be lost.
+def test_stops_before_it_creates_anything_when_the_table_stores_a_column_the_schema_declares_alias(
+    target: CutoverTarget, tmp_path: Path
+) -> None:
+    run_refused_at_start_scenario(
+        target,
+        "cutover_alias",
+        tmp_path,
+        columns="id UInt64, user_id UInt64, payload String, label String",
+        engine=lambda _table: target.engine,
+        message="stores a column that the schema declares ALIAS or EPHEMERAL",
+        schema_columns=[
+            *BASE,
+            {"name": "label", "type": "String", "default_kind": "ALIAS", "default": "fn:payload"},
+        ],
+    )
+
+
+# AS keeps the table's TTLs: a TTL merge on the snapshot could change rows before the copy.
+@pytest.mark.parametrize(
+    ("label", "columns", "clauses"),
+    [
+        (
+            "cutover_table_ttl",
+            "id UInt64, user_id UInt64, payload String",
+            "TTL toDateTime(id) + toIntervalYear(100)",
+        ),
+        (
+            "cutover_column_ttl",
+            "id UInt64, user_id UInt64, payload String TTL toDateTime(id) + toIntervalYear(100)",
+            "",
+        ),
+    ],
+)
+def test_stops_before_it_creates_anything_when_the_table_has_a_ttl(
+    target: CutoverTarget, tmp_path: Path, label: str, columns: str, clauses: str
+) -> None:
+    run_refused_at_start_scenario(
+        target,
+        label,
+        tmp_path,
+        columns=columns,
+        engine=lambda _table: target.engine,
+        message="has a TTL",
+        clauses=clauses,
+    )

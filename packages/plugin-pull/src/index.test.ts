@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
+import type { ClickHouseExecutor } from '@chkit/clickhouse'
 import { type ColumnDefinition, parseCodec, table } from '@chkit/core'
 
 import { __testUtils, createPullPlugin, PullSchema, renderSchemaFile } from './index.js'
@@ -30,6 +31,13 @@ describe('@chkit/plugin-pull options', () => {
 })
 
 describe('@chkit/plugin-pull renderSchemaFile', () => {
+  test('keeps every header line a comment, whatever line terminator it contains', () => {
+    const definition = table({ database: 'db', name: 't', engine: 'MergeTree()', primaryKey: [], orderBy: [], columns: [{ name: 'a', type: 'UInt8' }] })
+    const output = renderSchemaFile([definition], { header: ['first\nprocess.exit(1)', 'second\r\nthird\u2028fourth\u2029fifth', ''] })
+    expect(output).toContain('// first\n// process.exit(1)\n// second\n// third\n// fourth\n// fifth\n//\n')
+    expect(() => new Bun.Transpiler({ loader: 'ts' }).transformSync(output)).not.toThrow()
+  })
+
   test('preserves DoubleDelta sizes retained by the server in verbatim chains', () => {
     const definition = table({
       database: 'db', name: 't', engine: 'MergeTree()', primaryKey: [], orderBy: [],
@@ -602,6 +610,19 @@ describe('@chkit/plugin-pull schema command', () => {
       content: string
     }
 
+    // chkit-py emits the same keys in the same order (#487).
+    expect(Object.keys(payload)).toEqual([
+      'ok',
+      'command',
+      'outFile',
+      'definitionCount',
+      'tableCount',
+      'databases',
+      'skippedObjects',
+      'dryrun',
+      'warnings',
+      'content',
+    ])
     expect(payload.ok).toBe(true)
     expect(payload.command).toBe('schema')
     expect(payload.dryrun).toBe(true)
@@ -738,6 +759,78 @@ describe('@chkit/plugin-pull schema command', () => {
     expect(payload.content).not.toContain('metadata_folder')
     expect(payload.content).not.toContain('metadata_table_folder')
     expect(payload.content).not.toContain('metadata_table_tag')
+  })
+
+  test('without --database, a custom introspector gets the target databases and pull reports skipped objects (#698)', async () => {
+    const received: string[][] = []
+    const plugin = createPullPlugin({
+      introspect: async ({ databases }) => {
+        received.push(databases)
+        return [
+          {
+            database: 'app',
+            name: 'events',
+            engine: 'MergeTree()',
+            primaryKey: '(id)',
+            orderBy: '(id)',
+            columns: [{ name: 'id', type: 'UInt64' }],
+            settings: {},
+            indexes: [],
+            projections: [],
+          },
+        ]
+      },
+    })
+    const executor: Pick<ClickHouseExecutor, 'listSchemaObjects'> = {
+      listSchemaObjects: async () => [
+        { kind: 'table', database: 'logs', name: 'raw' },
+        { kind: 'table', database: 'app', name: 'events' },
+        { kind: 'view', database: 'app', name: 'recent' },
+      ],
+    }
+
+    const command = plugin.commands[0]
+    if (!command) throw new Error('missing command')
+
+    const logs: unknown[] = []
+    const code = await command.run({
+      args: [],
+      flags: { '--dryrun': true },
+      jsonMode: true,
+      options: PullSchema.parse({}),
+      rawOptions: {},
+      configPath: '/tmp/clickhouse.config.ts',
+      config: {
+        schema: ['./schema.ts'],
+        outDir: './chkit',
+        migrationsDir: './chkit/migrations',
+        metaDir: './chkit/meta',
+        plugins: [],
+        check: { failOnPending: true, failOnChecksumMismatch: true, failOnDrift: true },
+        safety: { allowDestructive: false },
+        clickhouse: {
+          url: 'http://localhost:8123',
+          username: 'default',
+          password: '',
+          database: 'default',
+          secure: false,
+        },
+      },
+      pluginContext: { executor: executor as ClickHouseExecutor, hasExecutor: true },
+      print(value) {
+        logs.push(value)
+      },
+    })
+
+    expect(code).toBe(0)
+    expect(received).toEqual([['app', 'logs']])
+    const payload = logs[0] as { databases: string[]; skippedObjects: unknown[]; definitionCount: number }
+    expect(payload.databases).toEqual(['app', 'logs'])
+    expect(payload.definitionCount).toBe(1)
+    expect(payload.skippedObjects).toEqual([
+      { kind: 'table', count: 1 },
+      { kind: 'view', count: 1 },
+    ])
   })
 
   test('supports introspected view and materialized_view objects', async () => {
@@ -1013,6 +1106,107 @@ describe('@chkit/plugin-pull schema command', () => {
       await rm(dir, { recursive: true, force: true })
     }
   })
+
+  test('writes the output path as given, without following symlinks (#702)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-plugin-pull-symlink-'))
+    const project = join(dir, 'project')
+    const elsewhere = join(dir, 'elsewhere')
+    await mkdir(join(elsewhere, 'real'), { recursive: true })
+    await mkdir(project)
+    await writeFile(join(elsewhere, 'target.ts'), '// target\n', 'utf8')
+    await symlink(join(elsewhere, 'target.ts'), join(project, 'link.ts'))
+    await symlink(join(elsewhere, 'real'), join(project, 'linkdir'))
+    await symlink(join(dir, 'nowhere', 'f.ts'), join(project, 'dangling.ts'))
+
+    const plugin = createPullPlugin({
+      databases: ['app'],
+      introspect: async () => [
+        {
+          database: 'app',
+          name: 'users',
+          engine: 'MergeTree()',
+          primaryKey: '(id)',
+          orderBy: '(id)',
+          columns: [{ name: 'id', type: 'UInt64' }],
+          settings: {},
+          indexes: [],
+          projections: [],
+        },
+      ],
+    })
+    const command = plugin.commands[0]
+    if (!command) throw new Error('missing command')
+
+    const run = async (outFile: string, overwrite: boolean): Promise<{ code: number | undefined; output: unknown[] }> => {
+      const output: unknown[] = []
+      const code = await command.run({
+        args: [],
+        flags: overwrite ? { '--force': true } : {},
+        jsonMode: true,
+        options: PullSchema.parse({ databases: ['app'], outFile, overwrite }),
+        rawOptions: { databases: ['app'], outFile },
+        configPath: join(project, 'clickhouse.config.ts'),
+        config: {
+          schema: ['./schema.ts'],
+          outDir: './chkit',
+          migrationsDir: './chkit/migrations',
+          metaDir: './chkit/meta',
+          plugins: [],
+          check: { failOnPending: true, failOnChecksumMismatch: true, failOnDrift: true },
+          safety: { allowDestructive: false },
+          clickhouse: {
+            url: 'http://localhost:8123',
+            username: 'default',
+            password: '',
+            database: 'default',
+            secure: false,
+          },
+        },
+        print(value) {
+          output.push(value)
+        },
+      })
+      return { code, output }
+    }
+    const pull = async (outFile: string): Promise<string> => {
+      const { code, output } = await run(outFile, true)
+      expect(code).toBe(0)
+      return (output[0] as { outFile: string }).outFile
+    }
+
+    try {
+      // A symlinked output file is replaced by the pulled file; its target is untouched.
+      expect(await pull(join(project, 'link.ts'))).toBe(join(project, 'link.ts'))
+      expect((await lstat(join(project, 'link.ts'))).isSymbolicLink()).toBe(false)
+      expect(await readFile(join(project, 'link.ts'), 'utf8')).toContain('const app_users = table({')
+      expect(await readFile(join(elsewhere, 'target.ts'), 'utf8')).toBe('// target\n')
+
+      // A dangling symlink is an existing output file: refused without --force,
+      // replaced with it, and nothing is created where it pointed.
+      const refused = await run(join(project, 'dangling.ts'), false)
+      expect(refused.code).toBe(2)
+      expect(refused.output[0]).toEqual({
+        ok: false,
+        command: 'schema',
+        error: `Output file already exists at ${join(project, 'dangling.ts')}. Re-run with --force or set plugin option overwrite=true.`,
+      })
+      expect((await lstat(join(project, 'dangling.ts'))).isSymbolicLink()).toBe(true)
+      expect(await pull(join(project, 'dangling.ts'))).toBe(join(project, 'dangling.ts'))
+      expect((await lstat(join(project, 'dangling.ts'))).isFile()).toBe(true)
+      expect((await readdir(dir)).sort()).toEqual(['elsewhere', 'project'])
+
+      // A symlinked directory is reported as given and written through by the OS.
+      expect(await pull(join(project, 'linkdir', 's.ts'))).toBe(join(project, 'linkdir', 's.ts'))
+      expect(await readFile(join(elsewhere, 'real', 's.ts'), 'utf8')).toContain('const app_users = table({')
+
+      // `..` after a symlinked directory is taken by text, not from the link target.
+      expect(await pull(`${project}/linkdir/../x.ts`)).toBe(join(project, 'x.ts'))
+      expect(await readFile(join(project, 'x.ts'), 'utf8')).toContain('const app_users = table({')
+      expect((await readdir(elsewhere)).sort()).toEqual(['real', 'target.ts'])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('@chkit/plugin-pull parser helpers', () => {
@@ -1156,10 +1350,45 @@ TO app.t AS SELECT 1`
     ])
   })
 
-  test('parseRefreshClause DEPENDS ON entries trim JavaScript whitespace', () => {
-    // chkit-py's test_name_trim.py asserts the same (#580).
+  test('parseRefreshClause reads quoted DEPENDS ON names as ClickHouse means them', () => {
+    // create_table_query as ClickHouse 26.3 returns it (#631); chkit-py's
+    // test_pull.py asserts the same.
     const refresh = __testUtils.parseRefreshClause(
-      'CREATE MATERIALIZED VIEW app.mv REFRESH EVERY 1 HOUR DEPENDS ON \ufeffapp.src\x85, \ufeffother TO app.t AS SELECT 1'
+      'CREATE MATERIALIZED VIEW d.mv2 REFRESH EVERY 1 HOUR DEPENDS ON d.r1, d.`we\\`ird`, d.`a.b`, d.`x\\``, d.`has AS kw`, d.`q"d`, `a, b`.`TO` TO d.dst (`a` UInt8) DEFINER = default SQL SECURITY DEFINER AS SELECT a FROM d.src'
+    )
+    expect(refresh?.dependsOn).toEqual([
+      { database: 'd', name: 'r1' },
+      { database: 'd', name: 'we`ird' },
+      { database: 'd', name: 'a.b' },
+      { database: 'd', name: 'x`' },
+      { database: 'd', name: 'has AS kw' },
+      { database: 'd', name: 'q"d' },
+      { database: 'a, b', name: 'TO' },
+    ])
+  })
+
+  test('parseRefreshClause decodes escapes in quoted DEPENDS ON names as ClickHouse does (#631, #639)', () => {
+    const refresh = __testUtils.parseRefreshClause(
+      'CREATE MATERIALIZED VIEW d.mv REFRESH EVERY 1 HOUR DEPENDS ON d.`x\\ny`, d.`b\\x41` TO d.dst AS SELECT 1'
+    )
+    expect(refresh?.dependsOn).toEqual([
+      { database: 'd', name: 'x\ny' },
+      { database: 'd', name: 'bA' },
+    ])
+  })
+
+  test('parseRefreshClause ignores DEPENDS ON text inside a string or the SELECT', () => {
+    const refresh = __testUtils.parseRefreshClause(
+      "CREATE MATERIALIZED VIEW d.mv REFRESH EVERY 1 HOUR TO d.dst AS SELECT 'DEPENDS ON d.x' AS c"
+    )
+    expect(refresh).toEqual({ every: '1 HOUR' })
+  })
+
+  test('parseRefreshClause DEPENDS ON entries trim JavaScript whitespace', () => {
+    // chkit-py's test_name_trim.py asserts the same (#580). ClickHouse quotes
+    // these names, so they are quoted here too (#631).
+    const refresh = __testUtils.parseRefreshClause(
+      'CREATE MATERIALIZED VIEW app.mv REFRESH EVERY 1 HOUR DEPENDS ON `\ufeffapp`.`src\x85`, `\ufeffother` TO app.t AS SELECT 1'
     )
     expect(refresh?.dependsOn).toEqual([
       { database: 'app', name: 'src\x85' },

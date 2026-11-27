@@ -19,6 +19,7 @@ from chkit.core.codec import codec_raw
 from chkit.core.model import (
     ChxValidationError,
     MaterializedViewDefinition,
+    SchemaDefinition,
     TableDefinition,
     collect_definitions_from_module,
     materialized_view,
@@ -28,7 +29,7 @@ from chkit.core.model import (
 )
 from chkit.core.planner import plan_diff
 from chkit.core.sql import to_create_sql
-from chkit.core.validate import validate_definitions
+from chkit.core.validate import collect_definition_warnings, validate_definitions
 
 # =========================================================================
 # @chkit/core smoke
@@ -725,7 +726,7 @@ def test_detects_index_change_when_structured_args_differ() -> None:
 
 
 def test_creates_tables_before_views_and_materialized_views() -> None:
-    new = [
+    new: list[SchemaDefinition] = [
         materialized_view(
             database="app",
             name="mv_events",
@@ -953,7 +954,7 @@ def test_plan_drop_codec_plus_other_change_emits_remove_codec_then_modify() -> N
     ]
 
 
-def _codec_events(columns: list[dict[str, Any]]) -> Any:
+def _codec_events(columns: list[dict[str, Any]]) -> TableDefinition:
     return table(
         database="app",
         name="events",
@@ -1459,7 +1460,7 @@ def test_diff_equivalent_refresh_yields_no_ops() -> None:
 
 
 def test_MODIFY_REFRESH_ranks_with_other_alters() -> None:
-    old = [
+    old: list[SchemaDefinition] = [
         table(
             database="analytics",
             name="daily_rollup",
@@ -1470,7 +1471,7 @@ def test_MODIFY_REFRESH_ranks_with_other_alters() -> None:
         ),
         _mv(refresh={"every": "1 HOUR"}),
     ]
-    new = [
+    new: list[SchemaDefinition] = [
         table(
             database="analytics",
             name="daily_rollup",
@@ -1574,44 +1575,44 @@ def test_validates_DEPENDS_ON_is_only_allowed_with_REFRESH_EVERY() -> None:
     assert "refresh_depends_on_requires_every" not in {i.code for i in with_every}
 
 
-def test_validates_non_APPEND_RMV_with_replicated_target() -> None:
-    issues = validate_definitions(
-        [
-            table(
-                database="analytics",
-                name="daily_rollup",
-                columns=[{"name": "day", "type": "Date"}],
-                engine="SharedMergeTree",
-                primaryKey=["day"],
-                orderBy=["day"],
-            ),
-            _mv(refresh={"every": "1 HOUR"}),
-        ]
+def _rollup_target(engine: str) -> SchemaDefinition:
+    return table(
+        database="analytics",
+        name="daily_rollup",
+        columns=[{"name": "day", "type": "Date"}],
+        engine=engine,
+        primaryKey=["day"],
+        orderBy=["day"],
     )
-    assert "refresh_append_required_for_replicated_target" in {i.code for i in issues}
 
 
-def test_no_issue_when_APPEND_RMV_targets_replicated_table() -> None:
-    issues = validate_definitions(
-        [
-            table(
-                database="analytics",
-                name="daily_rollup",
-                columns=[{"name": "day", "type": "Date"}],
-                engine="SharedMergeTree",
-                primaryKey=["day"],
-                orderBy=["day"],
-            ),
-            _mv(refresh={"every": "1 HOUR", "append": True}),
-        ]
-    )
-    assert "refresh_append_required_for_replicated_target" not in {
-        i.code for i in issues
+def _warns_replace_refresh(definitions: list[SchemaDefinition]) -> bool:
+    return "refresh_append_required_for_replicated_target" in {
+        i.code for i in collect_definition_warnings(definitions)
     }
 
 
-def test_no_issue_when_target_table_is_external() -> None:
-    issues = validate_definitions([_mv(refresh={"every": "1 HOUR"})])
-    assert "refresh_append_required_for_replicated_target" not in {
-        i.code for i in issues
-    }
+def test_non_APPEND_RMV_with_replicated_target_warns_and_plans() -> None:
+    definitions = [
+        _rollup_target("ReplicatedMergeTree"),
+        _mv(refresh={"every": "1 HOUR"}),
+    ]
+    assert validate_definitions(definitions) == []
+    assert _warns_replace_refresh(definitions)
+    assert "create_materialized_view" in [op.type for op in plan_diff([], definitions).operations]
+
+
+def test_no_warning_when_non_APPEND_RMV_targets_shared_table() -> None:
+    assert not _warns_replace_refresh(
+        [_rollup_target("SharedMergeTree"), _mv(refresh={"every": "1 HOUR"})]
+    )
+
+
+def test_no_warning_when_APPEND_RMV_targets_replicated_table() -> None:
+    assert not _warns_replace_refresh(
+        [_rollup_target("ReplicatedMergeTree"), _mv(refresh={"every": "1 HOUR", "append": True})]
+    )
+
+
+def test_no_warning_when_target_table_is_external() -> None:
+    assert not _warns_replace_refresh([_mv(refresh={"every": "1 HOUR"})])

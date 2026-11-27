@@ -27,12 +27,14 @@ interface PluginCommand {
   name: string
   description: string
   flags?: ReadonlyArray<{ name: string; type: 'string' | 'boolean'; description: string }>
+  takesArgs?: boolean
   run: (context: PluginCommandContext) => Promise<number>
 }
 
 const LOGIN_COMMAND: PluginCommand = {
   name: 'login',
   description: 'Authenticate with ObsessionDB',
+  takesArgs: false,
   flags: [
     {
       name: '--api-url',
@@ -49,6 +51,7 @@ const LOGIN_COMMAND: PluginCommand = {
 const LOGOUT_COMMAND: PluginCommand = {
   name: 'logout',
   description: 'Remove stored ObsessionDB credentials',
+  takesArgs: false,
   async run(context) {
     return runLogout((msg) => context.print(msg))
   },
@@ -57,6 +60,7 @@ const LOGOUT_COMMAND: PluginCommand = {
 const SIGNUP_COMMAND: PluginCommand = {
   name: 'signup',
   description: 'Sign up or log in with a one-time email code (passwordless)',
+  takesArgs: false,
   flags: [
     { name: '--api-url', type: 'string', description: 'ObsessionDB API base URL' },
     { name: '--email', type: 'string', description: 'Email to sign up/log in with (skips the prompt)' },
@@ -79,6 +83,7 @@ const SIGNUP_COMMAND: PluginCommand = {
 const WHOAMI_COMMAND: PluginCommand = {
   name: 'whoami',
   description: 'Show current ObsessionDB user',
+  takesArgs: false,
   async run(context) {
     return runWhoami((value) => context.print(value), context.jsonMode === true)
   },
