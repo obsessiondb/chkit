@@ -57,6 +57,13 @@ const FROM_LIST_END = new Set([
   'QUALIFY', 'ARRAY', 'LEFT', 'RIGHT', 'INNER', 'OUTER', 'FULL', 'CROSS', 'ANY', 'ALL', 'ASOF', 'SEMI', 'ANTI',
   'GLOBAL', 'PASTE', 'JOIN', 'ON', 'USING', 'FORMAT', 'INTO',
 ])
+// Functions whose arguments take a scalar `FROM`: `extract(DAY FROM d)`, `substring(s FROM 2)`, `trim(BOTH ' ' FROM s)`.
+const SCALAR_FROM_FUNCTIONS = new Set(['EXTRACT', 'SUBSTRING', 'TRIM'])
+
+function isScalarFromFunction(token: SQLToken | undefined): boolean {
+  if (!token || (token.kind !== 'identifier' && token.kind !== 'quoted_identifier')) return false
+  return SCALAR_FROM_FUNCTIONS.has(identifierName(token)?.toUpperCase() ?? '')
+}
 
 /** Resolves the node `nodeName` of a pipe whose nodes are `scope.nodes`. */
 export function resolveNode(nodeName: string, scope: ResolveScope): ResolvedSql {
@@ -143,10 +150,14 @@ export function unresolvedTable(tokens: SQLToken[], replacements: ReadonlyMap<nu
       if (name) ctes.add(name)
     }
   }
+  // One entry per open parenthesis: whether it holds the arguments of a function with a scalar `FROM`.
+  const parens: boolean[] = []
   for (let at = 1; at < significant.length; at++) {
     const entry = significant[at]
     const previous = upper(at - 1)
-    if (!entry || replacements.has(entry.index)) continue
+    if (significant[at - 1]?.token.text === '(') parens.push(isScalarFromFunction(significant[at - 2]?.token))
+    if (significant[at - 1]?.token.text === ')') parens.pop()
+    if (!entry || replacements.has(entry.index) || parens.at(-1)) continue
     if (previous !== 'FROM' && !(previous === 'JOIN' && upper(at - 2) !== 'ARRAY')) continue
     if (entry.token.kind !== 'identifier' && entry.token.kind !== 'quoted_identifier') continue
     const after = significant[at + 1]?.token.text
@@ -215,7 +226,8 @@ export function tableReferences(tokens: SQLToken[], known: ReadonlySet<string> =
       while (text(first) === '(') first++
       const next = word(first)
       const previous = word(at - 1)
-      scopes.push(next === 'SELECT' || next === 'WITH' || previous === 'FROM' || previous === 'JOIN' || previous === 'IN')
+      const query = next === 'SELECT' || next === 'WITH' || previous === 'FROM' || previous === 'JOIN' || previous === 'IN'
+      scopes.push(query && !isScalarFromFunction(significant[at - 1]?.token))
       ctes.push(new Set())
       continue
     }

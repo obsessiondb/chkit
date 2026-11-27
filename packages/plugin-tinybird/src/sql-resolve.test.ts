@@ -121,6 +121,9 @@ describe('resolveNode', () => {
     expect(inline('SELECT ((SELECT max(id) FROM a) - 1) AS m, extract(DAY FROM ts) FROM events')).toBe(
       `SELECT ((SELECT max(id) FROM ${a}) - 1) AS m, extract(DAY FROM ts) FROM analytics.events AS events`
     )
+    // `FROM` in substring/extract/trim arguments is scalar, even after a leading subquery.
+    expect(inline('SELECT substring((SELECT 1) FROM a FOR 1) FROM (SELECT 1 AS a)')).toBe('SELECT substring((SELECT 1) FROM a FOR 1) FROM (SELECT 1 AS a)')
+    expect(inline('SELECT `TRIM`(BOTH (SELECT 1) FROM a) FROM (SELECT 1 AS a)')).toBe('SELECT `TRIM`(BOTH (SELECT 1) FROM a) FROM (SELECT 1 AS a)')
   })
 
   test('unresolvedTable finds a project name left after FROM or JOIN, outside CTEs', () => {
@@ -131,6 +134,8 @@ describe('resolveNode', () => {
     expect(missed('WITH a AS (SELECT 1) SELECT * FROM a')).toBeUndefined()
     expect(missed('SELECT 1 FROM system.a, numbers(1) ARRAY JOIN a')).toBeUndefined()
     expect(missed("SELECT 'FROM a' -- FROM a\nFROM other")).toBeUndefined()
+    expect(missed('SELECT extract(DAY FROM events), substring(s FROM a), trim(BOTH x FROM events) FROM t')).toBeUndefined()
+    expect(missed('SELECT trim(BOTH x FROM (SELECT 1 FROM a))')).toBe('a')
     expect(unresolvedTable(tokenizeSQL('SELECT 1 FROM a'), new Map([[6, '(SELECT 1) AS a']]), known)).toBeUndefined()
   })
 
