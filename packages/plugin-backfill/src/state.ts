@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir, open, readFile, readdir, rename } from 'node:fs/promises'
+import { mkdir, open, readFile, readdir, rename, unlink } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
 import type { ResolvedChxConfig } from '@chkit/core'
@@ -205,6 +205,45 @@ export async function recordBackfillSubmission(input: {
   }
   await writeJson(submissionPath, submission)
   return submissionPath
+}
+
+interface SubmissionIntentLocation {
+  planId: string
+  configPath: string
+  config: Pick<ResolvedChxConfig, 'metaDir'>
+  stateDir?: string
+}
+
+interface SubmissionIntent {
+  planId: string
+  submissionId: string
+  replacesJobId?: string
+  startedAt: string
+}
+
+export function submissionIntentPath(input: SubmissionIntentLocation): string {
+  const stateDir = computeBackfillStateDir(input.config, input.configPath, input.stateDir)
+  return join(stateDir, 'submissions', `${input.planId}.pending.json`)
+}
+
+export async function recordSubmissionIntent(input: SubmissionIntentLocation & {
+  submissionId: string
+  replacesJobId?: string
+}): Promise<void> {
+  const { planId, submissionId, replacesJobId } = input
+  const intent: SubmissionIntent = { planId, submissionId, replacesJobId, startedAt: nowIso() }
+  await writeJson(submissionIntentPath(input), intent)
+}
+
+export async function readSubmissionIntent(input: SubmissionIntentLocation): Promise<SubmissionIntent | null> {
+  return readJsonMaybe<SubmissionIntent>(submissionIntentPath(input))
+}
+
+export async function clearSubmissionIntent(input: SubmissionIntentLocation): Promise<void> {
+  const path = submissionIntentPath(input)
+  if (!existsSync(path)) return
+  await unlink(path)
+  await syncDirectory(dirname(path))
 }
 
 /**

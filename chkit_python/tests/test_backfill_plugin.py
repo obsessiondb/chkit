@@ -800,7 +800,7 @@ def test_resume_fails_at_once_while_another_run_holds_the_plans_lock(tmp_path: P
     code, msgs = resume()
     assert code == 2
     assert any(
-        f"Backfill plan {plan.plan_id} is locked by another run, resume or cancel (pid "
+        f"Backfill plan {plan.plan_id} is locked by another run, resume, cancel or submit (pid "
         f"{os.getppid()} on {socket.gethostname()}, since 2026-11-18T10:00:00.000Z)."
         in str(m)
         for m in msgs
@@ -820,7 +820,7 @@ def test_resume_fails_at_once_while_another_run_holds_the_plans_lock(tmp_path: P
     )
     assert cancel_code == 2
     assert any(
-        f"Backfill plan {plan.plan_id} is locked by another run, resume or cancel" in str(m)
+        f"Backfill plan {plan.plan_id} is locked by another run, resume, cancel or submit" in str(m)
         for m in cancel_msgs
     )
 

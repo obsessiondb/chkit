@@ -48,7 +48,7 @@ def _dead_pid() -> int:
 
 def _busy(lock_path: Path, by: str) -> str:
     return (
-        f"Backfill plan {PLAN_ID} is locked by another run, resume or cancel ({by}). Wait "
+        f"Backfill plan {PLAN_ID} is locked by another run, resume, cancel or submit ({by}). Wait "
         "for it to end. If it has ended without releasing the lock, confirm that its "
         f"process no longer runs, then delete {lock_path} and re-run."
     )

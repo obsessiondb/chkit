@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlsplit
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from chkit_plugin_backfill.chunking.boundary_codec import (
     decode_chunk_plan_from_persistence,
 )
@@ -303,6 +305,80 @@ def record_backfill_submission(
     return submission_path
 
 
+class SubmissionIntent(BaseModel):
+    plan_id: str = Field(alias="planId")
+    submission_id: str = Field(alias="submissionId")
+    replaces_job_id: str | None = Field(default=None, alias="replacesJobId")
+    started_at: str = Field(alias="startedAt")
+
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
+
+
+def submission_intent_path(
+    *,
+    plan_id: str,
+    config_path: str | Path,
+    config: _HasMetaDir,
+    state_dir: str | None = None,
+) -> Path:
+    base = compute_backfill_state_dir(config, config_path, state_dir)
+    return base / "submissions" / f"{plan_id}.pending.json"
+
+
+def record_submission_intent(
+    *,
+    plan_id: str,
+    config_path: str | Path,
+    config: _HasMetaDir,
+    state_dir: str | None = None,
+    submission_id: str,
+    replaces_job_id: str | None = None,
+) -> None:
+    path = submission_intent_path(
+        plan_id=plan_id, config_path=config_path, config=config, state_dir=state_dir
+    )
+    write_json(
+        path,
+        SubmissionIntent(
+            plan_id=plan_id,
+            submission_id=submission_id,
+            replaces_job_id=replaces_job_id,
+            started_at=now_iso(),
+        ),
+    )
+
+
+def read_submission_intent(
+    *,
+    plan_id: str,
+    config_path: str | Path,
+    config: _HasMetaDir,
+    state_dir: str | None = None,
+) -> SubmissionIntent | None:
+    path = submission_intent_path(
+        plan_id=plan_id, config_path=config_path, config=config, state_dir=state_dir
+    )
+    raw = _read_json_maybe(path)
+    return SubmissionIntent.model_validate(raw) if raw is not None else None
+
+
+def clear_submission_intent(
+    *,
+    plan_id: str,
+    config_path: str | Path,
+    config: _HasMetaDir,
+    state_dir: str | None = None,
+) -> None:
+    path = submission_intent_path(
+        plan_id=plan_id, config_path=config_path, config=config, state_dir=state_dir
+    )
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    sync_directory(path.parent)
+
+
 @dataclass(frozen=True)
 class PlanSubmission:
     plan: BackfillPlanState
@@ -442,6 +518,7 @@ __all__ = [
     "RemoteSubmission",
     "backfill_paths",
     "chunk_ids_in_order",
+    "clear_submission_intent",
     "compute_backfill_state_dir",
     "compute_environment_fingerprint",
     "confirm_backfill_submission",
@@ -456,7 +533,10 @@ __all__ = [
     "read_plan_submission",
     "read_run",
     "read_submission",
+    "read_submission_intent",
     "record_backfill_submission",
+    "record_submission_intent",
+    "submission_intent_path",
     "summarize_run_status",
     "write_json",
 ]

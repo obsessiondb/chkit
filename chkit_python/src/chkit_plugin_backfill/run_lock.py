@@ -1,16 +1,16 @@
-"""The lock a backfill ``run``, ``resume`` or ``cancel`` holds on its plan (#765).
+"""The lock a backfill run, resume, cancel or managed submit holds on its plan.
 
 Port of ``packages/plugin-backfill/src/run-lock.ts``: same path
 (``<stateDir>/runs/<planId>.lock``) and format (one JSON line of pid, host,
 startedAt and token), so a TS and a Python run of one plan exclude each other.
-It is held from before the checkpoint is read until the command ends, so two
-of them never write the checkpoint or submit the same chunk under two query
-ids.
+It is held from before the checkpoint or submission state is read until the
+command ends, so two commands cannot write the checkpoint or submit the same
+chunk concurrently.
 
 A lock that exists always blocks: no process takes another's lock over, since
 no pid or host check proves a holder dead across PID namespaces, containers or
-a reused pid. A holder releases it when it ends, also on SIGINT or SIGTERM
-(see ``with_run_lock``); after a crash the operator deletes it.
+a reused pid. See ``with_run_lock`` for local signal handling.
+After a crash the operator deletes the lock.
 """
 
 from __future__ import annotations
@@ -310,7 +310,7 @@ def _lock_busy_error(
         else "its lock file cannot be read"
     )
     return BackfillConfigError(
-        f"Backfill plan {plan_id} is locked by another run, resume or cancel ({by}). "
+        f"Backfill plan {plan_id} is locked by another run, resume, cancel or submit ({by}). "
         "Wait for it to end. If it has ended without releasing the lock, confirm "
         f"that its process no longer runs, then delete {path} and re-run."
     )

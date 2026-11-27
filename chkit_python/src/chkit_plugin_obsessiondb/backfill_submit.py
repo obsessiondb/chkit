@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import re
+import secrets
 import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -27,11 +28,17 @@ from chkit_plugin_backfill.planner import (
 )
 from chkit_plugin_backfill.sdk import (
     BackfillPlanState,
+    acquire_run_lock,
+    backfill_paths,
     build_backfill_plan,
     build_chunk_execution_sql,
+    clear_submission_intent,
+    compute_backfill_state_dir,
     delivery_override_warning,
     generate_idempotency_token,
     record_backfill_submission,
+    record_submission_intent,
+    run_lock_path,
 )
 from chkit_plugin_obsessiondb.api_client import is_session_expired_error
 from chkit_plugin_obsessiondb.backfill_plugin_options import (
@@ -40,6 +47,9 @@ from chkit_plugin_obsessiondb.backfill_plugin_options import (
 from chkit_plugin_obsessiondb.backfill_resubmit import (
     ReplacedJob,
     load_plan_for_resubmit,
+)
+from chkit_plugin_obsessiondb.backfill_submission_intent import (
+    reconcile_submission_intent,
 )
 from chkit_plugin_obsessiondb.console_url import build_job_console_url
 from chkit_plugin_obsessiondb.credentials import Credentials
@@ -224,52 +234,36 @@ def handle_submit(context: SubmitContext) -> int:
             getattr(context.config, "plugins", None)
         )
         prepared = (
-            _prepare_resubmit(context, plugin_options)
+            parse_resubmit_input(context.flags)
             if context.flags.get("--plan-id") is not None
             else _prepare_new_plan(context, plugin_options)
         )
+        if isinstance(prepared, ParsedResubmitInput):
+            plan_id, state_dir = prepared.plan_id, plugin_options.state_dir
+        else:
+            plan_id, state_dir = prepared.plan.plan_id, prepared.state_dir
+        base = compute_backfill_state_dir(context.config, context.config_path, state_dir)
+        lock_path = run_lock_path(backfill_paths(base, plan_id).runs_dir, plan_id)
+        lock = acquire_run_lock(lock_path, plan_id)
+        try:
+            if isinstance(prepared, ParsedResubmitInput):
+                prepared = _prepare_resubmit(context, prepared, state_dir)
+            job_id, task_count = _send_prepared_plan(context, prepared, plugin_options)
+        finally:
+            lock.release()
         plan = prepared.plan
-
-        # Same INSERT settings the local executor applies (backfill({insertSettings})).
-        insert_settings = _checked_insert_settings(context, plan, plugin_options.insert_settings)
-        tasks = build_submit_tasks(plan, insert_settings)
-        job_id = jobs_submit(
-            context.credentials,
-            service_slug=context.service_slug,
-            target=plan.target,
-            tasks=tasks,
-            title=prepared.title,
-            concurrency=prepared.concurrency,
-            metadata={
-                "planId": plan.plan_id,
-                "mode": plan.execution.mode,
-                "source": "chkit",
-            },
-        )
-        # The job runs server-side and never writes a local run, so mark the
-        # plan as submitted; otherwise `chkit check` counts it as pending forever.
-        # A re-submission replaces the marker of the failed or cancelled job.
-        record_backfill_submission(
-            plan_id=plan.plan_id,
-            target=plan.target,
-            job_id=job_id,
-            config_path=context.config_path,
-            config=context.config,
-            state_dir=prepared.state_dir,
-        )
-
+        replaced = prepared.replaced_job
         url = build_job_console_url(
             context.credentials.base_url, context.service_slug, job_id
         )
-        replaced = prepared.replaced_job
-        task_label = f"{len(tasks)} task{'' if len(tasks) == 1 else 's'}"
+        task_label = f"{task_count} task{'' if task_count == 1 else 's'}"
         if context.json_mode:
             payload: dict[str, Any] = {
                 "ok": True,
                 "command": "backfill submit",
                 "jobId": job_id,
                 "target": plan.target,
-                "taskCount": len(tasks),
+                "taskCount": task_count,
                 "url": url,
             }
             if replaced is not None:
@@ -311,6 +305,60 @@ def handle_submit(context: SubmitContext) -> int:
         else:
             context.print(f"Backfill submit failed: {message}")
         return 1
+
+
+def _send_prepared_plan(
+    context: SubmitContext, prepared: _PreparedSubmission, plugin_options: PluginConfig
+) -> tuple[str, int]:
+    plan = prepared.plan
+
+    # Same INSERT settings the local executor applies (backfill({insertSettings})).
+    insert_settings = _checked_insert_settings(context, plan, plugin_options.insert_settings)
+    tasks = build_submit_tasks(plan, insert_settings)
+    replaced = prepared.replaced_job
+    intent = {
+        "plan_id": plan.plan_id,
+        "config_path": context.config_path,
+        "config": context.config,
+        "state_dir": prepared.state_dir,
+    }
+    submission_id = secrets.token_hex(8)
+    record_submission_intent(
+        **intent,
+        submission_id=submission_id,
+        replaces_job_id=replaced.id if replaced is not None else None,
+    )
+    try:
+        job_id = jobs_submit(
+            context.credentials,
+            service_slug=context.service_slug,
+            target=plan.target,
+            tasks=tasks,
+            title=prepared.title,
+            concurrency=prepared.concurrency,
+            metadata={
+                "planId": plan.plan_id,
+                "mode": plan.execution.mode,
+                "source": "chkit",
+                "submissionId": submission_id,
+            },
+        )
+    except Exception as error:
+        if is_session_expired_error(error):
+            raise
+        msg = (
+            f"{error} The job may have been created; "
+            f"`chkit plugin backfill submit --plan-id {plan.plan_id}` finds it "
+            "instead of sending the chunks again."
+        )
+        raise RuntimeError(msg) from error
+    # The job runs server-side and never writes a local run, so mark the
+    # plan as submitted; otherwise `chkit check` counts it as pending forever.
+    # A re-submission replaces the marker of the failed or cancelled job.
+    record_backfill_submission(**intent, target=plan.target, job_id=job_id)
+    clear_submission_intent(**intent)
+
+    return job_id, len(tasks)
 
 
 def _checked_insert_settings(
@@ -395,18 +443,18 @@ def _prepare_new_plan(
 
 
 def _prepare_resubmit(
-    context: SubmitContext, plugin_options: PluginConfig
+    context: SubmitContext, parsed: ParsedResubmitInput, state_dir: str | None
 ) -> _PreparedSubmission:
-    parsed = parse_resubmit_input(context.flags)
-    # The saved plan and its marker live in the backfill plugin's stateDir.
-    state_dir = plugin_options.state_dir
-    loaded = load_plan_for_resubmit(
-        plan_id=parsed.plan_id,
-        config_path=context.config_path,
-        config=context.config,
-        credentials=context.credentials,
-        state_dir=state_dir,
+    location = {
+        "plan_id": parsed.plan_id,
+        "config_path": context.config_path,
+        "config": context.config,
+        "state_dir": state_dir,
+    }
+    reconcile_submission_intent(
+        **location, service_slug=context.service_slug, credentials=context.credentials
     )
+    loaded = load_plan_for_resubmit(**location, credentials=context.credentials)
     return _PreparedSubmission(
         plan=loaded.plan,
         title=parsed.title,

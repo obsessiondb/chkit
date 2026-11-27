@@ -8,11 +8,18 @@ export {
 } from './chunking/boundary-codec.js'
 export { generateChunkPlan } from './chunking/planner.js'
 export { assertPinnedInsertSettingsAccepted, buildBackfillPlan, readPinnedSettingAliases } from './planner.js'
+export { acquireRunLock, runLockPath } from './run-lock.js'
 export {
+  backfillPaths,
+  clearSubmissionIntent,
+  computeBackfillStateDir,
   confirmBackfillSubmission,
   listRemoteSubmissions,
   readPlanSubmission,
+  readSubmissionIntent,
   recordBackfillSubmission,
+  recordSubmissionIntent,
+  submissionIntentPath,
 } from './state.js'
 export { insertSettingsFromOptions, PlanSchema, SubmitSchema, parseByteSize } from './options.js'
 export {
