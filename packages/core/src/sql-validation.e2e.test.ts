@@ -1314,7 +1314,7 @@ ORDER BY (\`id\`, toDate(\`created_at\`))`
         as: 'SELECT id, name FROM default.source',
       })
       const plan = planDiff([oldMV], [newMV])
-      expect(plan.operations.length).toBe(2)
+      expect(plan.operations.map((op) => op.type)).toEqual(['alter_materialized_view_modify_query'])
       for (const op of plan.operations) {
         await assertValidSQL(client, op.sql)
       }

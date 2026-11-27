@@ -236,7 +236,7 @@ def test_view_cut_short_by_mid_query_hash_comment_is_recreated_in_full() -> None
     assert operation_types(plan) == ["drop_view", "create_view"]
 
 
-def test_materialized_view_cut_short_by_comment_is_recreated_in_full() -> None:
+def test_materialized_view_cut_short_by_comment_gets_its_full_query() -> None:
     def mv(as_: str) -> Any:
         return materialized_view(
             database="app", name="mv", to={"database": "app", "name": "agg"}, as_=as_
@@ -244,7 +244,7 @@ def test_materialized_view_cut_short_by_comment_is_recreated_in_full() -> None:
 
     source = "SELECT id -- per id\nFROM app.events GROUP BY id"
     plan = plan_diff([mv(legacy_normalize(source))], [mv(source)])
-    assert operation_types(plan) == ["drop_materialized_view", "create_materialized_view"]
+    assert operation_types(plan) == ["alter_materialized_view_modify_query"]
 
 
 @pytest.mark.parametrize("source", ["SELECT /* note */\n  a\nFROM app.t", "SELECT a FROM app.t\n-- note"])

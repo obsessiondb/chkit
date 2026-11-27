@@ -903,6 +903,53 @@ describe('@chkit/core planner v1', () => {
     })
   })
 
+  test('changes the query of a materialized view in place when its target stays the same', () => {
+    const mv = (as: string, comment?: string) =>
+      materializedView({
+        database: 'app',
+        name: 'mv_users',
+        to: { database: 'app', name: 'users_rollup' },
+        as,
+        ...(comment ? { comment } : {}),
+      })
+    const plan = planDiff([mv('SELECT id FROM app.users')], [mv('SELECT id FROM app.users WHERE id > 0', 'positive ids')])
+    expect(plan.operations.map((op) => op.type)).toEqual([
+      'alter_table_modify_comment',
+      'alter_materialized_view_modify_query',
+    ])
+    expect(plan.riskSummary).toEqual({ safe: 1, caution: 1, danger: 0 })
+  })
+
+  test('recreates a refreshable materialized view whose query changes', () => {
+    const mv = (as: string) =>
+      materializedView({
+        database: 'app',
+        name: 'mv_users',
+        to: { database: 'app', name: 'users_rollup' },
+        refresh: { every: '1 HOUR' },
+        as,
+      })
+    const plan = planDiff([mv('SELECT id FROM app.users')], [mv('SELECT id FROM app.users WHERE id > 0')])
+    expect(plan.operations.map((op) => op.type)).toEqual(['drop_materialized_view', 'create_materialized_view'])
+  })
+
+  test('recreates a materialized view whose new query reads a table the migration creates', () => {
+    const idTable = (name: string) =>
+      table({ database: 'app', name, engine: 'MergeTree', columns: [{ name: 'id', type: 'UInt64' }], orderBy: ['id'] })
+    const mv = (as: string) =>
+      materializedView({ database: 'app', name: 'mv_users', to: { database: 'app', name: 'users_rollup' }, as })
+    const plan = planDiff(
+      [idTable('users'), mv('SELECT id FROM app.users')],
+      [idTable('users'), idTable('banned'), mv('SELECT id FROM app.users WHERE id NOT IN (SELECT id FROM app.banned)')]
+    )
+    expect(plan.operations.map((op) => op.type)).toEqual([
+      'drop_materialized_view',
+      'create_database',
+      'create_table',
+      'create_materialized_view',
+    ])
+  })
+
   test('validates duplicate columns, indexes, and missing key columns', () => {
     const defs = [
       table({

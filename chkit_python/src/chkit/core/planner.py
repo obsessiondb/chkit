@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from chkit.core.canonical import canonicalize_definitions, definition_key
-from chkit.core.column_order import order_column_statements
+from chkit.core.column_order import is_column_statement, order_column_statements
 from chkit.core.column_shape import _column_identity, _columns_equal, _normalized_column
 from chkit.core.constraint import constraint_kind
 from chkit.core.diff_primitives import diff_by_name, diff_clauses, diff_settings
@@ -36,6 +36,7 @@ from chkit.core.model import (
 from chkit.core.object_dependencies import (
     DependencyGraph,
     build_dependency_graph,
+    has_unqualified_reference,
     invert_dependency_graph,
     order_by_dependencies,
 )
@@ -52,6 +53,7 @@ from chkit.core.sql import (
     render_alter_drop_projection,
     render_alter_modify_column,
     render_alter_modify_comment,
+    render_alter_modify_query,
     render_alter_modify_refresh,
     render_alter_modify_setting,
     render_alter_modify_ttl,
@@ -333,22 +335,23 @@ def _refresh_equal(
 
 
 def _diff_materialized_view(
-    old: MaterializedViewDefinition, new: MaterializedViewDefinition
+    old: MaterializedViewDefinition,
+    new: MaterializedViewDefinition,
+    *,
+    recreate: bool,
 ) -> list[MigrationOperation]:
-    old_append = old.refresh is not None and old.refresh.append is True
-    new_append = new.refresh is not None and new.refresh.append is True
-    has_old_refresh = old.refresh is not None
+    """Plan a changed materialized view (TS diffMaterializedView).
+
+    A new query on the same target is a MODIFY QUERY, which swaps the query of
+    a view that keeps feeding its target, so no INSERT into its source is
+    missed. Recreate it for structural or refreshable query changes,
+    unqualified names in either query, or dependencies that cannot safely
+    span the swap (object changes, column statements and table renames).
+    """
     has_new_refresh = new.refresh is not None
+    query_changed = new.as_ != old.as_
 
-    structural = (
-        new.as_ != old.as_
-        or new.to.database != old.to.database
-        or new.to.name != old.to.name
-        or has_old_refresh != has_new_refresh
-        or old_append != new_append
-    )
-
-    if structural:
+    if recreate:
         return [
             MigrationOperation(
                 type="drop_materialized_view",
@@ -364,6 +367,18 @@ def _diff_materialized_view(
             ),
         ]
 
+    query_ops = (
+        [
+            MigrationOperation(
+                type="alter_materialized_view_modify_query",
+                key=f"{definition_key(new)}:query",
+                risk="caution",
+                sql=render_alter_modify_query(new),
+            )
+        ]
+        if query_changed
+        else []
+    )
     refresh_ops = (
         [
             MigrationOperation(
@@ -376,7 +391,80 @@ def _diff_materialized_view(
         if has_new_refresh and not _refresh_equal(old.refresh, new.refresh)
         else []
     )
-    return [*refresh_ops, *_diff_comment(old, new)]
+    return [*query_ops, *refresh_ops, *_diff_comment(old, new)]
+
+
+def _reachable(graph: DependencyGraph, start: str) -> set[str]:
+    """Every key reachable from ``start`` along ``graph``'s edges, ``start`` excluded."""
+    seen: set[str] = set()
+    pending = [start]
+    while pending:
+        for following in graph.get(pending.pop(), ()):
+            if following not in seen:
+                seen.add(following)
+                pending.append(following)
+    seen.discard(start)
+    return seen
+
+
+def _diff_materialized_views(
+    changed_views: Sequence[tuple[MaterializedViewDefinition, MaterializedViewDefinition]],
+    operations: Sequence[MigrationOperation],
+    create_graph: DependencyGraph,
+    drop_graph: DependencyGraph,
+    changed_tables: set[str],
+) -> list[MigrationOperation]:
+    """Plan materialized views after the operations on their dependencies are known."""
+    query_changes = {definition_key(new) for old, new in changed_views if old.as_ != new.as_}
+    unavailable = query_changes | {op.key for op in operations if op.type.startswith("create_")}
+    dropped = {op.key for op in operations if op.type.startswith("drop_")}
+    for old, new in changed_views:
+        key = definition_key(new)
+        old_append = old.refresh is not None and old.refresh.append is True
+        new_append = new.refresh is not None and new.refresh.append is True
+        if (
+            new.to.database != old.to.database
+            or new.to.name != old.to.name
+            or (old.refresh is None) != (new.refresh is None)
+            or old_append != new_append
+            or (new.refresh is not None and key in query_changes)
+        ):
+            unavailable.add(key)
+            dropped.add(key)
+        elif not _refresh_equal(old.refresh, new.refresh):
+            unavailable.add(key)
+    # The objects whose old definitions read a changed table, through unchanged views too.
+    changed_table_readers = {
+        reader for table in changed_tables for reader in _reachable(drop_graph, table)
+    }
+    for old, new in changed_views:
+        key = definition_key(new)
+        if key not in query_changes or key in dropped:
+            continue
+        # Through unchanged views too: ClickHouse analyzes the new query, views included.
+        reads = _reachable(create_graph, key)
+        if (
+            any(dependency in unavailable for dependency in reads)
+            or any(table in reads for table in changed_tables)
+            or key in changed_table_readers
+            or has_unqualified_reference(old.as_)
+            or has_unqualified_reference(new.as_)
+        ):
+            dropped.add(key)
+    # Every old query that switches away from a dropped object must already be
+    # gone when that object is dropped. Recreating a view can expose more such reads.
+    pending = list(dropped)
+    for key in pending:
+        for dependent in _reachable(drop_graph, key):
+            if dependent not in query_changes or dependent in dropped:
+                continue
+            dropped.add(dependent)
+            pending.append(dependent)
+    return [
+        op
+        for old, new in changed_views
+        for op in _diff_materialized_view(old, new, recreate=definition_key(new) in dropped)
+    ]
 
 
 def _recreate_drop_risk(old: TableDefinition) -> RiskLevel:
@@ -881,20 +969,32 @@ def _diff_dictionary(
     ]
 
 
-def plan_diff(
+def plan_diff(  # noqa: PLR0915
     old_definitions: Sequence[SchemaDefinition],
     new_definitions: Sequence[SchemaDefinition],
     *,
     index_granularity: int | None = None,
+    column_renames: Sequence[ColumnRenameSuggestion] = (),
+    previous_table_aliases: Mapping[str, str] | None = None,
 ) -> MigrationPlan:
+    """Plan a diff, accounting for confirmed column renames generate will apply."""
     old_canonical = canonicalize_definitions(old_definitions, index_granularity=index_granularity)
     new_canonical = canonicalize_definitions(new_definitions, index_granularity=index_granularity)
     assert_valid_definitions(new_canonical)
     old_map = _map_by_key(old_canonical)
     new_map = _map_by_key(new_canonical)
+    create_graph = build_dependency_graph(new_canonical)
+    drop_graph = invert_dependency_graph(
+        build_dependency_graph(old_canonical, previous_table_aliases)
+    )
+    changed_tables = {
+        *(previous_table_aliases or {}).values(),
+        *(f"table:{rename.database}.{rename.table}" for rename in column_renames),
+    }
     operations: list[MigrationOperation] = []
     rename_suggestions: list[ColumnRenameSuggestion] = []
     databases_to_create: set[str] = set()
+    changed_views: list[tuple[MaterializedViewDefinition, MaterializedViewDefinition]] = []
 
     for old_def in old_canonical:
         if definition_key(old_def) in new_map:
@@ -909,6 +1009,8 @@ def plan_diff(
 
         if isinstance(new_def, TableDefinition) and isinstance(matched, TableDefinition):
             ops, renames = _diff_tables(matched, new_def)
+            if any(is_column_statement(op) and op.type != "alter_table_modify_ttl" for op in ops):
+                changed_tables.add(key)
             operations.extend(ops)
             rename_suggestions.extend(renames)
             continue
@@ -924,7 +1026,7 @@ def plan_diff(
         if isinstance(new_def, MaterializedViewDefinition) and isinstance(
             matched, MaterializedViewDefinition
         ):
-            operations.extend(_diff_materialized_view(matched, new_def))
+            changed_views.append((matched, new_def))
             continue
 
         if isinstance(new_def, DictionaryDefinition) and isinstance(
@@ -944,6 +1046,13 @@ def plan_diff(
         databases_to_create.add(new_def.database)
         _push_create(operations, new_def, "safe")
 
+    if changed_views:
+        operations.extend(
+            _diff_materialized_views(
+                changed_views, operations, create_graph, drop_graph, changed_tables
+            )
+        )
+
     for database in sorted(databases_to_create):
         _push_create_database(operations, database, "safe")
 
@@ -953,7 +1062,7 @@ def plan_diff(
     operations = _order_operations(
         operations,
         drop=invert_dependency_graph(build_dependency_graph(old_canonical)),
-        create=build_dependency_graph(new_canonical),
+        create=create_graph,
         previous=old_canonical,
         next_=new_canonical,
     )

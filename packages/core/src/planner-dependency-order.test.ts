@@ -43,6 +43,150 @@ function edgesOf(definitions: SchemaDefinition[], key: string): string[] {
   return [...(buildDependencyGraph(canonicalizeDefinitions(definitions)).get(key) ?? [])].sort()
 }
 
+describe('materialized view query dependency order', () => {
+  const mv = (as: string, name = 'mv', target = 'out') =>
+    materializedView({ database: 'app', name, to: { database: 'app', name: target }, as })
+  const types = (old: SchemaDefinition[], next: SchemaDefinition[]) => planDiff(old, next).operations.map((op) => op.type)
+  const id = { name: 'id', type: 'UInt64' }
+
+  const oldQuery = 'SELECT id FROM app.src'
+  const newQuery = 'SELECT id FROM app.src WHERE id > 0'
+
+  test.each([
+    ['adds a source column', 'src', false, 'alter_table_add_column'],
+    ['drops a source column', 'src', true, 'alter_table_drop_column'],
+    ['adds a target column', 'out', false, 'alter_table_add_column'],
+  ] as const)('recreates the view when the migration %s', (_label, name, drop, op) => {
+    const plain = appTable(name)
+    const extra = appTable(name, [id, { name: 'tag', type: 'String' }])
+    const other = appTable(name === 'src' ? 'out' : 'src')
+    expect(types(
+      [drop ? extra : plain, other, mv(oldQuery)],
+      [drop ? plain : extra, other, mv(newQuery)]
+    )).toEqual(['drop_materialized_view', op, 'create_materialized_view'])
+  })
+
+  test('recreates the view when the migration changes the type of a source column', () => {
+    const tagged = (type: string) => appTable('src', [id, { name: 'tag', type }])
+    expect(types(
+      [tagged('String'), appTable('out'), mv(oldQuery)],
+      [tagged('UInt64'), appTable('out'), mv(newQuery)]
+    )).toEqual(['drop_materialized_view', 'alter_table_modify_column', 'create_materialized_view'])
+  })
+
+  test('recreates a changed view that reads a recreated view through an unchanged view', () => {
+    const base = (columns: ColumnDefinition[]) => appTable('base', columns)
+    const shared = [appTable('src'), appTable('out'), appTable('up_out'), appView('up_view', 'SELECT id FROM app.a_up')]
+    const down = (as: string) => mv(as, 'z_down')
+    const joined = 'SELECT s.id AS id FROM app.src AS s INNER JOIN app.up_view AS u ON s.id = u.id'
+    expect(types(
+      [base([id]), ...shared, mv('SELECT id FROM app.base', 'a_up', 'up_out'), down(oldQuery)],
+      [base([id, { name: 'spare', type: 'UInt64' }]), ...shared, mv('SELECT id FROM app.base WHERE id > 0', 'a_up', 'up_out'), down(joined)]
+    )).toEqual([
+      'drop_materialized_view',
+      'drop_materialized_view',
+      'alter_table_add_column',
+      'create_materialized_view',
+      'create_materialized_view',
+    ])
+  })
+
+  test('keeps unrelated column statements in order and changes the query in place', () => {
+    const src = appTable('src')
+    const out = appTable('out')
+    const old = appTable('src:column:x', [id, { name: 'legacy', type: 'String' }])
+    const next = appTable('src:column:x', [id, { name: 'fresh', type: 'UInt64' }])
+    expect(types(
+      [src, out, old, mv(oldQuery)],
+      [src, out, next, mv(newQuery)]
+    )).toEqual(['alter_materialized_view_modify_query', 'alter_table_add_column', 'alter_table_drop_column'])
+  })
+
+  test('recreates the view and preserves column order when a nested column becomes a scalar', () => {
+    const old = appTable('src', [id, { name: 'k.x', type: 'Array(UInt32)' }])
+    const next = appTable('src', [
+      id,
+      { name: 'k', type: 'UInt64', default: { expression: 'n' } },
+      { name: 'n', type: 'UInt64' },
+    ])
+    const out = appTable('out')
+    const plan = planDiff([old, out, mv(oldQuery)], [next, out, mv(newQuery)])
+    expect(plan.operations.map((op) => [op.type, op.key])).toEqual([
+      ['drop_materialized_view', 'materialized_view:app.mv'],
+      ['alter_table_drop_column', 'table:app.src:column:k.x'],
+      ['alter_table_add_column', 'table:app.src:column:n'],
+      ['alter_table_add_column', 'table:app.src:column:k'],
+      ['create_materialized_view', 'materialized_view:app.mv'],
+    ])
+  })
+
+  test('recreates the view when either query reads a renamed table', () => {
+    const src = appTable('src')
+    const out = appTable('out')
+    const lookup = appTable('renamed_lookup')
+    const previousTableAliases = new Map([['app.lookup', 'table:app.renamed_lookup']])
+    for (const [before, after] of [
+      [mv('SELECT id FROM app.src WHERE id IN app.lookup'), mv(newQuery)],
+      [mv(oldQuery), mv('SELECT id FROM app.src WHERE id IN app.renamed_lookup')],
+    ] as const) {
+      const plan = planDiff([src, out, lookup, before], [src, out, lookup, after], { previousTableAliases })
+      expect(plan.operations.map((op) => op.type)).toEqual(['drop_materialized_view', 'create_materialized_view'])
+    }
+  })
+
+  test('recreates a changed view that reads an upstream materialized view whose query changes', () => {
+    const src = appTable('src')
+    const upOut = appTable('up_out', [id, { name: 'extra', type: 'UInt64' }])
+    const out = appTable('out')
+    expect(types(
+      [src, upOut, out, mv('SELECT id FROM app.src', 'z_up', 'up_out'), mv('SELECT id FROM app.z_up', 'a_down')],
+      [src, upOut, out, mv('SELECT id, id AS extra FROM app.src', 'z_up', 'up_out'), mv('SELECT extra AS id FROM app.z_up', 'a_down')]
+    )).toEqual(['drop_materialized_view', 'alter_materialized_view_modify_query', 'create_materialized_view'])
+  })
+
+  test('recreates a view when either query uses an unqualified object name', () => {
+    const src = appTable('src')
+    const out = appTable('out')
+    for (const query of [
+      'SELECT id FROM src WHERE id > 0',
+      'SELECT id FROM app.src WHERE id IN allowed',
+      "SELECT id FROM app.src WHERE dictHas('allowed', id)",
+      'SELECT id FROM app.src WHERE dictHas(allowed, id)',
+    ]) {
+      for (const [before, after] of [[oldQuery, query], [query, oldQuery]] as const) {
+        expect(types([src, out, mv(before)], [src, out, mv(after)]))
+          .toEqual(['drop_materialized_view', 'create_materialized_view'])
+      }
+    }
+    expect(types(
+      [src, out, mv('SELECT id FROM app.src')],
+      [src, out, mv('WITH events AS (SELECT id FROM app.src) SELECT id FROM events')]
+    )).toEqual(['alter_materialized_view_modify_query'])
+  })
+
+  test('drops a changed view before an object its old query reads is dropped', () => {
+    const src = appTable('src')
+    const out = appTable('out')
+    expect(types(
+      [src, out, appTable('allowed'), mv('SELECT id FROM app.src WHERE id IN (SELECT id FROM app.allowed)')],
+      [src, out, mv('SELECT id FROM app.src')]
+    )).toEqual(['drop_materialized_view', 'drop_table', 'create_materialized_view'])
+
+    const oldUp = mv('SELECT id FROM app.src', 'z_up', 'up_out')
+    const newUp = mv('SELECT id FROM src WHERE id > 0', 'z_up', 'up_out')
+    const oldDown = mv('SELECT id FROM app.z_up', 'a_down')
+    const newDown = mv('SELECT id FROM app.src', 'a_down')
+    const upOut = appTable('up_out')
+    const cascade = planDiff([src, out, upOut, oldUp, oldDown], [src, out, upOut, newUp, newDown])
+    expect(cascade.operations.map((op) => [op.type, op.key])).toEqual([
+      ['drop_materialized_view', 'materialized_view:app.a_down'],
+      ['drop_materialized_view', 'materialized_view:app.z_up'],
+      ['create_materialized_view', 'materialized_view:app.a_down'],
+      ['create_materialized_view', 'materialized_view:app.z_up'],
+    ])
+  })
+})
+
 describe('planDiff dependency order (#231)', () => {
   test('issue repro: a changed view is recreated before the changed view that reads it', () => {
     const person = table({

@@ -46,6 +46,7 @@ _WITH_MODIFIER: Final[frozenset[str]] = frozenset({"totals", "rollup", "cube", "
 class _ObjectReference:
     database: str
     name: str
+    unqualified: bool = False
 
 
 @dataclass(slots=True)
@@ -70,16 +71,22 @@ class _QueryScope:
     declares_on_close: str | None = None
 
 
-def build_dependency_graph(definitions: Sequence[SchemaDefinition]) -> dict[str, set[str]]:
+def build_dependency_graph(
+    definitions: Sequence[SchemaDefinition], aliases: Mapping[str, str] | None = None
+) -> dict[str, set[str]]:
     """Edges from every definition to the definitions it reads, restricted to the given set.
 
     Expects canonical definitions (``canonicalize_definitions``).
+    Aliases map original qualified names to remapped definition keys.
     """
     keys_by_name: dict[str, list[str]] = {}
     for definition in definitions:
         keys_by_name.setdefault(f"{definition.database}.{definition.name}", []).append(
             definition_key(definition)
         )
+    if aliases:
+        for name, key in aliases.items():
+            keys_by_name.setdefault(name, []).append(key)
 
     graph: dict[str, set[str]] = {}
     for definition in definitions:
@@ -347,7 +354,7 @@ def _object_name_argument(
     name = identifier_name(argument)
     after = _text_at(tokens, i + 3)
     if name is not None and after in (",", ")"):
-        return _ObjectReference(own_database, name)
+        return _ObjectReference(own_database, name, unqualified=True)
     return None
 
 
@@ -372,7 +379,7 @@ def _unqualified_table_target(
         return None
     if any(target in scope.cte_names for scope in scopes):
         return None
-    return _ObjectReference(own_database, target)
+    return _ObjectReference(own_database, target, unqualified=True)
 
 
 def _parse_object_name(value: str, own_database: str) -> _ObjectReference | None:
@@ -382,8 +389,22 @@ def _parse_object_name(value: str, own_database: str) -> _ObjectReference | None
     if any(len(part) == 0 for part in parts) or len(parts) > 2:  # noqa: PLR2004
         return None
     if len(parts) == 1:
-        return _ObjectReference(own_database, parts[0])
+        return _ObjectReference(own_database, parts[0], unqualified=True)
     return _ObjectReference(parts[0], parts[1])
+
+
+def has_unqualified_reference(sql: str) -> bool:
+    """Whether the query names an object without specifying its database."""
+    if any(ref.unqualified for ref in _sql_references(sql, "")):
+        return True
+    tokens = _significant_tokens(sql)
+    return any(
+        token.kind == "identifier"
+        and token.text.lower() == "in"
+        and identifier_name(tokens[i + 1]) is not None
+        and _text_at(tokens, i + 2) != "."
+        for i, token in enumerate(tokens[:-1])
+    )
 
 
 def _significant_tokens(sql: str) -> list[SQLToken]:

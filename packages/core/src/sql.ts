@@ -226,6 +226,11 @@ export function renderAlterModifyRefresh(def: MaterializedViewDefinition): strin
   return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} MODIFY ${renderRefreshClause(def.refresh)};`
 }
 
+/** Renders ALTER TABLE ... MODIFY QUERY, which replaces a materialized view's query in place. */
+export function renderAlterModifyQuery(def: MaterializedViewDefinition): string {
+  return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} MODIFY QUERY\n${def.as};`
+}
+
 function renderDictionaryAttribute(attr: DictionaryAttribute): string {
   let out = `${quoteIdentifier(attr.name)} ${attr.type}`
   if (attr.expression !== undefined) out += ` EXPRESSION ${attr.expression}`

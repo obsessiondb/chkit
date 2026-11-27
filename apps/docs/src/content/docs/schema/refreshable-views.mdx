@@ -194,8 +194,11 @@ SELECT toDate(ts) AS day, count() AS total FROM analytics.events GROUP BY day;
 | Removing `refresh` | `DROP TABLE ... SYNC` + `CREATE MATERIALIZED VIEW` | `caution` |
 | Toggling `append` | `DROP TABLE ... SYNC` + `CREATE MATERIALIZED VIEW` (Rule 1) | `caution` |
 | Changing `every` / `after` / `offset` / `randomize` / `dependsOn` / `settings` only | `ALTER TABLE ... MODIFY REFRESH ...` | `caution` |
-| Changing `as`, `to`, or `comment` | `DROP TABLE ... SYNC` + `CREATE MATERIALIZED VIEW` | `caution` |
+| Changing `as` or `to` | `DROP TABLE ... SYNC` + `CREATE MATERIALIZED VIEW` | `caution` |
+| Changing `comment` only | `ALTER TABLE ... MODIFY COMMENT` | `safe` |
 | No change | No operation | — |
+
+A recreated view refreshes as soon as it is created unless `empty` is set. See [Structural vs. alterable properties](/schema/dsl-reference/#structural-vs-alterable-properties) for query changes on ordinary materialized views.
 
 ## Monitoring
 

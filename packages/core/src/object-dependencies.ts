@@ -9,6 +9,7 @@ export type DependencyGraph = ReadonlyMap<string, ReadonlySet<string>>
 interface ObjectReference {
   database: string
   name: string
+  unqualified?: boolean
 }
 
 /** One parenthesis level of a SQL text; the whole text is the outermost level. */
@@ -35,12 +36,19 @@ const WITH_MODIFIER = /^(totals|rollup|cube|fill|ties)$/i
 /**
  * Edges from every definition to the definitions it reads, restricted to the
  * given set. Expects canonical definitions (`canonicalizeDefinitions`).
+ * Aliases map original qualified names to remapped definition keys.
  */
-export function buildDependencyGraph(definitions: SchemaDefinition[]): DependencyGraph {
+export function buildDependencyGraph(
+  definitions: SchemaDefinition[],
+  aliases: ReadonlyMap<string, string> = new Map()
+): DependencyGraph {
   const keysByName = new Map<string, string[]>()
   for (const def of definitions) {
     const name = `${def.database}.${def.name}`
     keysByName.set(name, [...(keysByName.get(name) ?? []), definitionKey(def)])
+  }
+  for (const [name, key] of aliases) {
+    keysByName.set(name, [...(keysByName.get(name) ?? []), key])
   }
 
   const graph = new Map<string, Set<string>>()
@@ -285,7 +293,7 @@ function objectNameArgument(tokens: SQLToken[], i: number, ownDatabase: string):
   if (value !== undefined) return parseObjectName(value, ownDatabase)
   const name = identifierName(argument)
   const after = tokens[i + 3]?.text
-  return name !== undefined && (after === ',' || after === ')') ? { database: ownDatabase, name } : undefined
+  return name !== undefined && (after === ',' || after === ')') ? { database: ownDatabase, name, unqualified: true } : undefined
 }
 
 // `FROM name` / `JOIN name` in query context. Skips `ARRAY JOIN expr`,
@@ -308,7 +316,7 @@ function unqualifiedTableTarget(
   const after = tokens[i + 2]?.text
   if (target === undefined || after === '.' || after === '(') return undefined
   if (scopes.some((scope) => scope.cteNames.has(target))) return undefined
-  return { database: ownDatabase, name: target }
+  return { database: ownDatabase, name: target, unqualified: true }
 }
 
 // Mirrors ClickHouse's QualifiedTableName::tryParseFromString: one dot splits
@@ -318,7 +326,17 @@ function parseObjectName(value: string, ownDatabase: string): ObjectReference | 
   if (parts.some((part) => part.length === 0) || parts.length > 2) return undefined
   const [first, second] = parts
   if (first === undefined) return undefined
-  return second === undefined ? { database: ownDatabase, name: first } : { database: first, name: second }
+  return second === undefined ? { database: ownDatabase, name: first, unqualified: true } : { database: first, name: second }
+}
+
+/** Whether the query names an object without specifying its database. */
+export function hasUnqualifiedReference(sql: string): boolean {
+  return sqlReferences(sql, '').some((ref) => ref.unqualified) ||
+    significantTokens(sql).some((token, i, tokens) => {
+      const operand = tokens[i + 1]
+      return token.kind === 'identifier' && token.text.toLowerCase() === 'in' &&
+        operand !== undefined && identifierName(operand) !== undefined && tokens[i + 2]?.text !== '.'
+    })
 }
 
 function significantTokens(sql: string): SQLToken[] {

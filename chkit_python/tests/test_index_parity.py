@@ -496,6 +496,78 @@ def test_recreates_changed_materialized_view_definitions_with_caution_risk() -> 
     assert plan.risk_summary.model_dump() == {"safe": 0, "caution": 2, "danger": 0}
 
 
+def test_changes_mv_query_in_place_when_target_stays_the_same() -> None:
+    def mv(as_: str, comment: str | None = None) -> Any:
+        return materialized_view(
+            database="app",
+            name="mv_users",
+            to={"database": "app", "name": "users_rollup"},
+            as_=as_,
+            comment=comment,
+        )
+
+    plan = plan_diff(
+        [mv("SELECT id FROM app.users")],
+        [mv("SELECT id FROM app.users WHERE id > 0", "positive ids")],
+    )
+    assert [op.type for op in plan.operations] == [
+        "alter_table_modify_comment",
+        "alter_materialized_view_modify_query",
+    ]
+    assert plan.risk_summary.model_dump() == {"safe": 1, "caution": 1, "danger": 0}
+
+
+def test_recreates_refreshable_mv_whose_query_changes() -> None:
+    def mv(as_: str) -> Any:
+        return materialized_view(
+            database="app",
+            name="mv_users",
+            to={"database": "app", "name": "users_rollup"},
+            refresh={"every": "1 HOUR"},
+            as_=as_,
+        )
+
+    plan = plan_diff([mv("SELECT id FROM app.users")], [mv("SELECT id FROM app.users WHERE id > 0")])
+    assert [op.type for op in plan.operations] == [
+        "drop_materialized_view",
+        "create_materialized_view",
+    ]
+
+
+def test_recreates_mv_whose_new_query_reads_a_table_the_migration_creates() -> None:
+    def id_table(name: str) -> Any:
+        return table(
+            database="app",
+            name=name,
+            engine="MergeTree",
+            columns=[{"name": "id", "type": "UInt64"}],
+            orderBy=["id"],
+        )
+
+    def mv(as_: str) -> Any:
+        return materialized_view(
+            database="app",
+            name="mv_users",
+            to={"database": "app", "name": "users_rollup"},
+            as_=as_,
+        )
+
+    plan = plan_diff(
+        [id_table("users"), mv("SELECT id FROM app.users")],
+        [
+            id_table("users"),
+            id_table("banned"),
+            mv("SELECT id FROM app.users WHERE id NOT IN (SELECT id FROM app.banned)"),
+        ],
+    )
+    assert [op.type for op in plan.operations] == [
+        "drop_materialized_view",
+        "create_database",
+        "create_table",
+        "create_materialized_view",
+    ]
+
+
 def test_validates_duplicate_columns_indexes_and_missing_key_columns() -> None:
     defs = [
         table(

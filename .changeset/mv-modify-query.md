@@ -1,0 +1,5 @@
+---
+"chkit": patch
+---
+
+`generate` can change an ordinary materialized view's query in place with `ALTER TABLE ... MODIFY QUERY`, so the view keeps feeding its target during `migrate` (#760). Changes to the target or referenced objects can still require drop and recreate.

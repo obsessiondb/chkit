@@ -19,6 +19,7 @@ from chkit.core.column_reads import _column_default_reads, column_rename_key
 from chkit.core.model import (
     ColumnRenameSuggestion,
     DictionaryDefinition,
+    MaterializedViewDefinition,
     MigrationOperation,
     SchemaDefinition,
     SQLExpression,
@@ -76,6 +77,200 @@ def quote(name: str) -> str:
     """Backtick-quote a name the way TS's renderQualifiedName does (#230)."""
     escaped = name.replace("\\", "\\\\").replace("`", "\\`")
     return f"`{escaped}`"
+
+
+# ---------- materialized view query dependency order ----------
+
+
+def query_mv(as_: str, name: str = "mv", target: str = "out") -> MaterializedViewDefinition:
+    return materialized_view(database="app", name=name, to={"database": "app", "name": target}, as_=as_)
+
+
+def plan_types(old: list[SchemaDefinition], next_: list[SchemaDefinition]) -> list[str]:
+    return [op.type for op in plan_diff(old, next_).operations]
+
+
+_ID = {"name": "id", "type": "UInt64"}
+
+
+_OLD_QUERY = "SELECT id FROM app.src"
+_NEW_QUERY = "SELECT id FROM app.src WHERE id > 0"
+
+
+@pytest.mark.parametrize(
+    ("name", "drop", "op"),
+    [
+        ("src", False, "alter_table_add_column"),
+        ("src", True, "alter_table_drop_column"),
+        ("out", False, "alter_table_add_column"),
+    ],
+    ids=["add-source-column", "drop-source-column", "add-target-column"],
+)
+def test_mv_query_recreates_view_when_migration_changes_a_column(name: str, drop: bool, op: str) -> None:
+    plain = app_table(name)
+    extra = app_table(name, [_ID, {"name": "tag", "type": "String"}])
+    other = app_table("out" if name == "src" else "src")
+    assert plan_types(
+        [extra if drop else plain, other, query_mv(_OLD_QUERY)],
+        [plain if drop else extra, other, query_mv(_NEW_QUERY)],
+    ) == ["drop_materialized_view", op, "create_materialized_view"]
+
+
+def test_mv_query_changes_in_place_and_keeps_unrelated_column_statements_in_order() -> None:
+    src = app_table("src")
+    out = app_table("out")
+    old = app_table("src:column:x", [_ID, {"name": "legacy", "type": "String"}])
+    next_ = app_table("src:column:x", [_ID, {"name": "fresh", "type": "UInt64"}])
+    assert plan_types(
+        [src, out, old, query_mv(_OLD_QUERY)],
+        [src, out, next_, query_mv(_NEW_QUERY)],
+    ) == ["alter_materialized_view_modify_query", "alter_table_add_column", "alter_table_drop_column"]
+
+
+def test_mv_query_recreates_view_when_migration_changes_source_column_type() -> None:
+    def tagged(type_: str) -> TableDefinition:
+        return app_table("src", [_ID, {"name": "tag", "type": type_}])
+
+    plan = plan_diff(
+        [tagged("String"), app_table("out"), query_mv(_OLD_QUERY)],
+        [tagged("UInt64"), app_table("out"), query_mv(_NEW_QUERY)],
+    )
+    assert [op.type for op in plan.operations] == [
+        "drop_materialized_view",
+        "alter_table_modify_column",
+        "create_materialized_view",
+    ]
+
+
+def test_mv_query_recreates_view_reading_recreated_view_through_unchanged_view() -> None:
+    shared: list[SchemaDefinition] = [
+        app_table("src"),
+        app_table("out"),
+        app_table("up_out"),
+        app_view("up_view", "SELECT id FROM app.a_up"),
+    ]
+    joined = "SELECT s.id AS id FROM app.src AS s INNER JOIN app.up_view AS u ON s.id = u.id"
+    plan = plan_diff(
+        [
+            app_table("base"),
+            *shared,
+            query_mv("SELECT id FROM app.base", "a_up", "up_out"),
+            query_mv(_OLD_QUERY, "z_down"),
+        ],
+        [
+            app_table("base", [_ID, {"name": "spare", "type": "UInt64"}]),
+            *shared,
+            query_mv("SELECT id FROM app.base WHERE id > 0", "a_up", "up_out"),
+            query_mv(joined, "z_down"),
+        ],
+    )
+    assert [op.type for op in plan.operations] == [
+        "drop_materialized_view",
+        "drop_materialized_view",
+        "alter_table_add_column",
+        "create_materialized_view",
+        "create_materialized_view",
+    ]
+
+
+def test_mv_query_recreates_view_and_preserves_order_when_nested_column_becomes_scalar() -> None:
+    old = app_table("src", [_ID, {"name": "k.x", "type": "Array(UInt32)"}])
+    next_ = app_table(
+        "src",
+        [
+            _ID,
+            {"name": "k", "type": "UInt64", "default": SQLExpression(expression="n")},
+            {"name": "n", "type": "UInt64"},
+        ],
+    )
+    out = app_table("out")
+    plan = plan_diff([old, out, query_mv(_OLD_QUERY)], [next_, out, query_mv(_NEW_QUERY)])
+    assert [(op.type, op.key) for op in plan.operations] == [
+        ("drop_materialized_view", "materialized_view:app.mv"),
+        ("alter_table_drop_column", "table:app.src:column:k.x"),
+        ("alter_table_add_column", "table:app.src:column:n"),
+        ("alter_table_add_column", "table:app.src:column:k"),
+        ("create_materialized_view", "materialized_view:app.mv"),
+    ]
+
+
+def test_mv_query_recreates_view_when_either_query_reads_renamed_table() -> None:
+    src = app_table("src")
+    out = app_table("out")
+    lookup = app_table("renamed_lookup")
+    previous_table_aliases = {"app.lookup": "table:app.renamed_lookup"}
+    for before, after in (
+        (query_mv("SELECT id FROM app.src WHERE id IN app.lookup"), query_mv(_NEW_QUERY)),
+        (query_mv(_OLD_QUERY), query_mv("SELECT id FROM app.src WHERE id IN app.renamed_lookup")),
+    ):
+        plan = plan_diff(
+            [src, out, lookup, before],
+            [src, out, lookup, after],
+            previous_table_aliases=previous_table_aliases,
+        )
+        assert [op.type for op in plan.operations] == ["drop_materialized_view", "create_materialized_view"]
+
+
+def test_mv_query_recreates_view_reading_upstream_mv_whose_query_changes() -> None:
+    src = app_table("src")
+    up_out = app_table("up_out", [_ID, {"name": "extra", "type": "UInt64"}])
+    out = app_table("out")
+    assert plan_types(
+        [
+            src, up_out, out,
+            query_mv("SELECT id FROM app.src", "z_up", "up_out"),
+            query_mv("SELECT id FROM app.z_up", "a_down"),
+        ],
+        [
+            src, up_out, out,
+            query_mv("SELECT id, id AS extra FROM app.src", "z_up", "up_out"),
+            query_mv("SELECT extra AS id FROM app.z_up", "a_down"),
+        ],
+    ) == ["drop_materialized_view", "alter_materialized_view_modify_query", "create_materialized_view"]
+
+
+def test_mv_query_recreates_view_when_either_query_uses_unqualified_object_name() -> None:
+    src = app_table("src")
+    out = app_table("out")
+    for query in (
+        "SELECT id FROM src WHERE id > 0",
+        "SELECT id FROM app.src WHERE id IN allowed",
+        "SELECT id FROM app.src WHERE dictHas('allowed', id)",
+        "SELECT id FROM app.src WHERE dictHas(allowed, id)",
+    ):
+        for before, after in ((_OLD_QUERY, query), (query, _OLD_QUERY)):
+            assert plan_types(
+                [src, out, query_mv(before)], [src, out, query_mv(after)]
+            ) == ["drop_materialized_view", "create_materialized_view"]
+    assert plan_types(
+        [src, out, query_mv("SELECT id FROM app.src")],
+        [src, out, query_mv("WITH events AS (SELECT id FROM app.src) SELECT id FROM events")],
+    ) == ["alter_materialized_view_modify_query"]
+
+
+def test_mv_query_drops_changed_view_before_object_its_old_query_reads() -> None:
+    src = app_table("src")
+    out = app_table("out")
+    assert plan_types(
+        [
+            src, out, app_table("allowed"),
+            query_mv("SELECT id FROM app.src WHERE id IN (SELECT id FROM app.allowed)"),
+        ],
+        [src, out, query_mv("SELECT id FROM app.src")],
+    ) == ["drop_materialized_view", "drop_table", "create_materialized_view"]
+
+    old_up = query_mv("SELECT id FROM app.src", "z_up", "up_out")
+    new_up = query_mv("SELECT id FROM src WHERE id > 0", "z_up", "up_out")
+    old_down = query_mv("SELECT id FROM app.z_up", "a_down")
+    new_down = query_mv("SELECT id FROM app.src", "a_down")
+    up_out = app_table("up_out")
+    cascade = plan_diff([src, out, up_out, old_up, old_down], [src, out, up_out, new_up, new_down])
+    assert [(op.type, op.key) for op in cascade.operations] == [
+        ("drop_materialized_view", "materialized_view:app.a_down"),
+        ("drop_materialized_view", "materialized_view:app.z_up"),
+        ("create_materialized_view", "materialized_view:app.a_down"),
+        ("create_materialized_view", "materialized_view:app.z_up"),
+    ]
 
 
 # ---------- plan_diff dependency order ----------

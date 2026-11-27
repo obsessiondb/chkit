@@ -1339,7 +1339,18 @@ What `chkit pull` reads back plans nothing against the schema it came from:
 
 The `auto_minmax_index_*` skip indexes ClickHouse creates for the `add_minmax_index_for_*` settings are not part of the schema.
 
-Views and materialized views use drop + recreate for a change to the query (or a materialized view's `TO` target or refresh mode). A comment-only change is an `ALTER TABLE ... MODIFY COMMENT` in place; see [Comments](#comments).
+A view uses drop + recreate for a change to its query. For an ordinary materialized view with the same `TO` target, chkit uses `ALTER TABLE ... MODIFY QUERY` (`risk=caution`) when the query can change in place. The view keeps feeding its target throughout, and rows already in the target keep the values the old query wrote.
+
+A materialized view uses drop + recreate for any of these changes.
+
+- The `TO` target changes.
+- The schema adds or removes `refresh`, or toggles `refresh.append`.
+- The query changes in a [refreshable view](/schema/refreshable-views/).
+- The query changes and either version reads a table with a column change or rename in the same migration, or the `TO` table has a column change.
+- The query changes and either version uses an unqualified object name, including a bare `IN` table operand.
+- The new query reads an object the migration creates or a view whose query or definition changes, or the old query reads an object the migration drops.
+
+A comment-only change uses `ALTER TABLE ... MODIFY COMMENT` in place. See [Comments](#comments).
 
 Dictionaries have no ALTER for their definition: any change to `attributes`, `primaryKey`, `layout`, `lifetime`, or `source` (including a password change) renders as a single `CREATE OR REPLACE DICTIONARY` (`risk=caution`), which carries the new `comment`. A comment-only change is an `ALTER TABLE ... MODIFY COMMENT`. A `source` still carrying the `[HIDDEN]` introspection placeholder is excluded from the diff entirely (see [Credentials in `source`](#credentials-in-source)). Removing a dictionary from schema emits `DROP DICTIONARY` (`risk=danger`, requires `--allow-destructive`).
 
@@ -1359,6 +1370,6 @@ Changing a structural property on an existing table generates a `DROP TABLE` fol
 | Column comment removed, nothing else | `ALTER TABLE <table> MODIFY COLUMN <column> REMOVE COMMENT` | `safe` |
 | Column comment and type or default changed | `MODIFY COLUMN` with the new `COMMENT`; a removed comment runs `REMOVE COMMENT` first | `caution` |
 
-A comment change never recreates a view, materialized view or dictionary: recreating a materialized view would lose the rows its source receives in between. A change that recreates the object anyway, such as a new query, carries the new comment in its `CREATE`.
+A comment change never recreates a view, materialized view or dictionary: recreating a materialized view would lose the rows its source receives in between. A change that recreates the object anyway, such as a view's new query, carries the new comment in its `CREATE`.
 
 On ObsessionDB, `MODIFY COMMENT` currently changes only the replica that runs it, so `chkit drift` may report a `comment_mismatch` for a table, view, materialized view or dictionary until the server fix ships. Column comments are not affected.
