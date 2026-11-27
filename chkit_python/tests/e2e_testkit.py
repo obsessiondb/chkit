@@ -325,15 +325,16 @@ def _wait_for_table_listing(
     cluster: str | None,
 ) -> None:
     fanout = resolve_replica_fanout_or_raise(client, cluster)
-    fanout_cluster = fanout.cluster if fanout else ""
     db = database.replace("\\", "\\\\").replace("'", "\\'")
     name = table.replace("\\", "\\\\").replace("'", "\\'")
-    if fanout_cluster:
-        quoted_cluster = fanout_cluster.replace("\\", "\\\\").replace("'", "\\'")
+    if fanout:
+        # Distinct hosts against the probed count, as the production waits do:
+        # a replica that does not answer cannot count as one that lists it.
+        quoted_cluster = fanout.cluster.replace("\\", "\\\\").replace("'", "\\'")
         sql = (
-            f"SELECT (SELECT count() FROM clusterAllReplicas('{quoted_cluster}', system.one))"
-            f" AS replicas, (SELECT count() FROM clusterAllReplicas('{quoted_cluster}', "
-            f"system.tables) WHERE database = '{db}' AND name = '{name}') AS listed"
+            f"SELECT {fanout.replicas} AS replicas, count(DISTINCT hostName()) AS listed "
+            f"FROM clusterAllReplicas('{quoted_cluster}', system.tables) "
+            f"WHERE database = '{db}' AND name = '{name}'"
         )
     else:
         sql = (
