@@ -240,15 +240,34 @@ def test_does_not_pin_flatten_nested_without_a_nested_column() -> None:
     assert all("flatten_nested" not in op.sql for op in plan().operations)
 
 
-def test_verify_compares_rows_per_key() -> None:
-    verify = plan().operations[8].sql
-    # A tuple, because cityHash64 of a NULL argument is NULL and sumIf skips NULLs.
-    assert "cityHash64(tuple(`id`, `user_id`, `payload`))" in verify
+@pytest.mark.parametrize(
+    ("copy", "cluster"), [("migration", None), ("backfill", None), ("migration", "c2")]
+)
+def test_verify_compares_rows_per_key(copy: str, cluster: str | None) -> None:
+    engine = "ReplicatedMergeTree" if cluster else "MergeTree"
+    cutover = plan(
+        old_def=events(["id"], engine=engine),
+        new_def=events(["user_id", "id"], engine=engine),
+        copy=copy,
+        cluster=cluster,
+    )
+    verify = next(op.sql for op in cutover.operations if op.type == "cutover_verify")
+    # Tuple hashing throws on NULL in ClickHouse 24.9-25.2 and can hash identical
+    # AggregateFunction states differently across tables in 24.9-25.10 (#868).
+    row_hash = "cityHash64(formatRow('RowBinary', `id`, `user_id`, `payload`))"
+    assert f"toUInt8(1) AS src, {row_hash} AS h FROM app.{cutover.names.snapshot} UNION ALL" in verify
+    assert f"toUInt8(0) AS src, {row_hash} AS h FROM app.{cutover.names.shadow})" in verify
+    assert "cityHash64(tuple(" not in verify
     assert (
         "GROUP BY `id` HAVING snapshot_rows > 0 AND "
         "(snapshot_rows != shadow_rows OR snapshot_hash != shadow_hash)"
     ) in verify
-    assert "The table was not swapped." in verify
+    message = (
+        "The table was not swapped."
+        if copy == "migration"
+        else "chkit plugin backfill plan --cutover app.events"
+    )
+    assert message in verify
 
 
 def test_compares_a_numeric_read_only_setting_by_value() -> None:
@@ -486,10 +505,11 @@ def test_recognizes_the_nested_parent_name_only_for_an_unflattened_nested_type()
 
 
 def test_checks_the_table_stores_the_old_column_types() -> None:
-    # The snapshot takes the types the server stores, and cityHash64 hides UInt32 vs
-    # UInt64. ClickHouse stores Decimal64(2) as Decimal(18, 2), so the server renders
-    # the schema's types too, from a one-row format() table: defaultValueOfTypeName
-    # fails for some types before ClickHouse 26.4. TS cutover.test.ts asserts the same.
+    # The copy can convert a value without the verify detecting it, as with
+    # LowCardinality(String) to String. ClickHouse stores Decimal64(2) as Decimal(18, 2),
+    # so the server renders the schema's types too, from a one-row format() table.
+    # defaultValueOfTypeName fails for some types before ClickHouse 26.4.
+    # TS cutover.test.ts asserts the same.
     typed: list[Any] = [
         *COLUMNS,
         {"name": "price", "type": "Decimal64(2)", "nullable": True},
@@ -544,7 +564,7 @@ def test_moves_flattened_nested_leaves(cluster: str | None) -> None:
     ):
         assert "`n.x`, `n.y z`" in sql[key]
         assert "`n`" not in sql[key]
-    assert "cityHash64(tuple(`id`, `user_id`, `payload`, `n.x`, `n.y z`))" in verify
+    assert "cityHash64(formatRow('RowBinary', `id`, `user_id`, `payload`, `n.x`, `n.y z`))" in verify
     assert cutover.columns == ["id", "user_id", "payload", "n.x", "n.y z"]
     assert '"columns":["id","user_id","payload","n.x","n.y z"]' in snapshot
     for name in (cutover.names.shadow, cutover.names.reconcile):

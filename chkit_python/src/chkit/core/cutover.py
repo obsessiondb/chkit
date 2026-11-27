@@ -807,17 +807,19 @@ def _create_cutover_sql(
     )
 
     settings = "" if cluster else " SETTINGS select_sequential_consistency = 1"
-    # Hash a tuple: cityHash64 returns NULL when one of its arguments is NULL,
-    # and sumIf skips NULLs, so a row with a NULL column would not be compared.
+    # RowBinary encodes values exactly when both sides have the same column types.
+    # A flag byte distinguishes NULL from 0. formatRow returns a String, so sumIf
+    # includes every row. Tuple hashing throws on NULL before ClickHouse 25.3 and
+    # can hash identical AggregateFunction states differently per table before 25.11.
     verify_query = " ".join(
         [
             "SELECT count() AS bad FROM (",
             f"SELECT {key_list}, sum(src) AS snapshot_rows, sum(1 - src) AS shadow_rows, "
             "sumIf(h, src = 1) AS snapshot_hash, sumIf(h, src = 0) AS shadow_hash",
-            f"FROM (SELECT {key_list}, toUInt8(1) AS src, cityHash64(tuple({column_list})) AS h "
-            f"FROM {q(names.snapshot)}",
+            f"FROM (SELECT {key_list}, toUInt8(1) AS src, "
+            f"cityHash64(formatRow('RowBinary', {column_list})) AS h FROM {q(names.snapshot)}",
             f"UNION ALL SELECT {key_list}, toUInt8(0) AS src, "
-            f"cityHash64(tuple({column_list})) AS h FROM {q(names.shadow)})",
+            f"cityHash64(formatRow('RowBinary', {column_list})) AS h FROM {q(names.shadow)})",
             f"GROUP BY {key_list} HAVING snapshot_rows > 0 AND "
             "(snapshot_rows != shadow_rows OR snapshot_hash != shadow_hash))",
         ]
@@ -1553,11 +1555,11 @@ def _column_checks(
         f"has({kind_pairs}, (name, toUInt8(default_kind NOT IN ('ALIAS', 'EPHEMERAL'))))) "
         f"{live_columns}) AS column_kinds"
     )
-    # The snapshot takes the column types the server stores, and the copy then
-    # converts each value to the new type. The verify hash does not see every
-    # change: cityHash64 is the same for UInt32 and UInt64. ClickHouse stores
-    # some types in another spelling (`Decimal64(2)` as `Decimal(18, 2)`), so the
-    # server gives the schema's type in its stored form too. It reads the type
+    # The snapshot takes the column types the server stores, and the copy can
+    # convert values to the new type. The verify compares the copied values and
+    # can miss the conversion, as with LowCardinality(String) to String. ClickHouse
+    # stores some types in another spelling (`Decimal64(2)` as `Decimal(18, 2)`),
+    # so the server gives the schema's type in its stored form too. It reads the type
     # from a one-row format() table, without building a value of it:
     # defaultValueOfTypeName fails for some types before ClickHouse 26.4, such
     # as AggregateFunction(argMax, LowCardinality(String), DateTime). The row
