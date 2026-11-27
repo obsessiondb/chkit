@@ -127,12 +127,12 @@ chkit generate --name events_by_user --cutover analytics.events=id
 
 ### When a cutover does not fit
 
-A table without a unique key, a change that transforms rows, or an engine that merges rows needs a reviewed [hand-written migration](/guides/migration-workflow/#hand-written-migrations) instead of `--cutover`. chkit does not mirror, verify or guard such a migration: pause the writers from the copy until the swap, run its DDL on every replica (`ON CLUSTER` with `clickhouse.cluster`), and run `chkit drift` after it is applied.
+A table without a unique key, a change that transforms rows, or an engine that merges rows needs a reviewed [hand-written migration](/guides/migration-workflow/#hand-written-migrations) instead of `--cutover`. chkit does not mirror the writes of such a migration or verify its copy: pause the writers from the copy until the swap, run its DDL on every replica (`ON CLUSTER` with `clickhouse.cluster`), and run `chkit drift` after it is applied.
 
 The cutover's first statement also refuses a `Replicated` table created without `PRIMARY KEY` whose replication path in the schema has no `{uuid}`, while a replica runs ClickHouse older than 26.7: the cutover's snapshot then takes `PRIMARY KEY` from the schema, and the table's parts do not attach to it. The statement creates and copies nothing, so either:
 
-- upgrade every replica to ClickHouse 26.7 or later and run `chkit migrate --apply` again, or
-- remove the cutover migration as [Abandoning a failed migration](/cli/migrate/#abandoning-a-failed-migration) describes (delete the file and restore `chkit/meta/snapshot.json` from git to its state before the cutover was generated), then move the table with a hand-written migration.
+- upgrade every replica to ClickHouse 26.7 or later and run the same `chkit migrate` command again, or
+- replace the cutover as [Abandoning a failed migration](/cli/migrate/#abandoning-a-failed-migration) describes: delete the migration file, restore `chkit/meta/snapshot.json` from git to its state before the cutover was generated, run `chkit generate` without `--cutover`, and replace the generated `DROP TABLE` and `CREATE TABLE` with the hand-written migration before you apply it. Statements of the migration that ran before the cutover's first statement stay applied; that page covers them.
 
 ### Dictionary password warnings
 
