@@ -737,7 +737,7 @@ def test_forces_skip_unavailable_shards_off_on_statement_1_with_a_cluster() -> N
         new_def=events(["user_id", "id"], engine=engine),
         cluster="c2",
     ).operations[0].sql
-    assert start.endswith(")) SETTINGS skip_unavailable_shards = 0;")
+    assert start.endswith(")) SETTINGS skip_unavailable_shards = 0, use_query_cache = 0;")
     assert "skip_unavailable_shards" not in plan().operations[0].sql
 
 
