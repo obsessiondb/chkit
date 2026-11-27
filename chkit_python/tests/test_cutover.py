@@ -236,6 +236,10 @@ def test_mirrors_snapshots_copies_verifies_and_swaps_in_order() -> None:
     ]
 
 
+def test_does_not_pin_flatten_nested_without_a_nested_column() -> None:
+    assert all("flatten_nested" not in op.sql for op in plan().operations)
+
+
 def test_verify_compares_rows_per_key() -> None:
     verify = plan().operations[8].sql
     # A tuple, because cityHash64 of a NULL argument is NULL and sumIf skips NULLs.
@@ -415,7 +419,7 @@ def test_checks_the_table_stores_the_old_columns_no_more_and_no_fewer() -> None:
     nested: list[Any] = [
         *COLUMNS,
         {"name": "meta", "type": "String"},
-        {"name": "n", "type": "Nested(x UInt8)"},
+        {"name": "n", "type": "Nested\u0085(x UInt8)"},
     ]
     start = plan(
         old_def=events(["id"], columns=nested), new_def=events(["user_id", "id"], columns=nested)
@@ -424,16 +428,26 @@ def test_checks_the_table_stores_the_old_columns_no_more_and_no_fewer() -> None:
         "FROM system.columns WHERE database = 'app' AND table = 'events' "
         "AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')"
     )
-    # ClickHouse stores `n Nested(x UInt8)` as `n.x Array(UInt8)`, or as one column `n`
-    # when flatten_nested is off.
     assert (
-        "(SELECT countIf(NOT has(['id', 'user_id', 'payload', 'meta', 'n.x', 'n'], name)) "
+        "(SELECT countIf(has(['n'], name) AND startsWith(type, 'Nested(')) "
+        f"{stored}) AS unflattened_nested"
+    ) in start
+    assert (
+        "throwIf(max(unflattened_nested) > 0, 'app.events stores a Nested column as one "
+        "column (created with flatten_nested = 0)."
+    ) in start
+    assert start.index("throwIf(max(unflattened_nested)") < start.index(
+        "throwIf(max(undeclared_columns)"
+    )
+    assert (
+        "(SELECT countIf(NOT (has(['id', 'user_id', 'payload', 'meta', 'n.x'], name) "
+        "OR (has(['n'], name) AND startsWith(type, 'Nested(')))) "
         f"{stored}) AS undeclared_columns"
     ) in start
     assert (
         "((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR "
         "(SELECT hasAll(groupArray(name), ['id', 'user_id', 'payload', 'meta']) AND "
-        "(hasAll(groupArray(name), ['n.x']) OR has(groupArray(name), 'n')) "
+        "(hasAll(groupArray(name), ['n.x']) OR countIf(name = 'n' AND startsWith(type, 'Nested(')) > 0) "
         f"{stored})) AS declared_columns"
     ) in start
     assert (
@@ -446,13 +460,36 @@ def test_checks_the_table_stores_the_old_columns_no_more_and_no_fewer() -> None:
     assert "declared_key" not in start
 
 
+def test_recognizes_the_nested_parent_name_only_for_an_unflattened_nested_type() -> None:
+    # TS cutover.test.ts asserts the same.
+    nested = [*COLUMNS, {"name": "n", "type": "Nested(x UInt64)"}]
+    start = plan(
+        old_def=events(["id"], columns=nested),
+        new_def=events(["user_id", "id"], columns=nested),
+        old_table="drop",
+    ).operations[0].sql
+    declared = (
+        "(has(['id', 'user_id', 'payload', 'n.x'], name) "
+        "OR (has(['n'], name) AND startsWith(type, 'Nested(')))"
+    )
+    live = "FROM system.columns WHERE database = 'app' AND table = 'events'"
+    assert (
+        f"(SELECT countIf(NOT {declared}) {live} AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')) "
+        "AS undeclared_columns"
+    ) in start
+    assert (
+        f"(SELECT countIf({declared} "
+        "AND NOT has([('id', 1), ('user_id', 1), ('payload', 1), ('n.x', 1), ('n', 1)], "
+        "(name, toUInt8(default_kind NOT IN ('ALIAS', 'EPHEMERAL'))))) "
+        f"{live}) AS column_kinds"
+    ) in start
+
+
 def test_checks_the_table_stores_the_old_column_types() -> None:
     # The snapshot takes the types the server stores, and cityHash64 hides UInt32 vs
     # UInt64. ClickHouse stores Decimal64(2) as Decimal(18, 2), so the server renders
     # the schema's types too, from a one-row format() table: defaultValueOfTypeName
-    # fails for some types before ClickHouse 26.4. With flatten_nested = 0, `n` is
-    # stored as one Nested column. Before it creates anything; TS cutover.test.ts
-    # asserts the same.
+    # fails for some types before ClickHouse 26.4. TS cutover.test.ts asserts the same.
     typed: list[Any] = [
         *COLUMNS,
         {"name": "price", "type": "Decimal64(2)", "nullable": True},
@@ -471,19 +508,200 @@ def test_checks_the_table_stores_the_old_column_types() -> None:
         )
 
     assert (
-        "(SELECT countIf(has(['id', 'user_id', 'payload', 'price', 'n.x', 'n.y z', 'n'], name) "
+        "(SELECT countIf(has(['id', 'user_id', 'payload', 'price', 'n.x', 'n.y z'], name) "
         f"AND NOT has([('id', {server('UInt64')}), ('user_id', {server('UInt64')}), "
         f"('payload', {server('String')}), ('price', {server('Nullable(Decimal64(2))')}), "
-        f"('n.x', {server('Array(UInt8)')}), ('n.y z', {server('Array(Decimal64(2))')}), "
-        f"('n', concat('Nested(', substring({server('Tuple(`x` UInt8, `y z` Decimal64(2))')}, "
-        "7)))], "
+        f"('n.x', {server('Array(UInt8)')}), ('n.y z', {server('Array(Decimal64(2))')})], "
         "(name, type))) FROM system.columns WHERE database = 'app' AND table = 'events' "
         "AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')) AS mistyped_columns"
     ) in start
+    assert "concat('Nested('" not in start
     assert (
         "throwIf(max(mistyped_columns) > 0, 'app.events stores a column with another type "
         "than the schema declares"
     ) in start
+
+
+@pytest.mark.parametrize("cluster", [None, "c2"])
+def test_moves_flattened_nested_leaves(cluster: str | None) -> None:
+    nested = [*COLUMNS, {"name": "n", "type": "Nested(x UInt8, `y z` Decimal64(2))"}]
+    engine = "ReplicatedMergeTree" if cluster else "MergeTree"
+    settings = {"index_granularity": 4096}
+    cutover = plan(
+        old_def=events(["id"], columns=nested, engine=engine, settings=settings),
+        new_def=events(["user_id", "id"], columns=nested, engine=engine, settings=settings),
+        cluster=cluster,
+    )
+    sql = {op.key: op.sql for op in cutover.operations if not op.type.startswith("drop_")}
+    verify = sql["table:app.events:cutover:verify"]
+    snapshot = sql[f"table:app.{cutover.names.snapshot}"]
+    for key in (
+        f"materialized_view:app.{cutover.names.mirror}",
+        "table:app.events:cutover:copy",
+        "table:app.events:cutover:verify",
+        "table:app.events:cutover:reconcile_unmirrored",
+        "table:app.events:cutover:reconcile",
+    ):
+        assert "`n.x`, `n.y z`" in sql[key]
+        assert "`n`" not in sql[key]
+    assert "cityHash64(tuple(`id`, `user_id`, `payload`, `n.x`, `n.y z`))" in verify
+    assert cutover.columns == ["id", "user_id", "payload", "n.x", "n.y z"]
+    assert '"columns":["id","user_id","payload","n.x","n.y z"]' in snapshot
+    for name in (cutover.names.shadow, cutover.names.reconcile):
+        assert sql[f"table:app.{name}"].endswith(
+            "SETTINGS index_granularity = 4096, flatten_nested = 1;"
+        )
+    assert cutover.retained is not None
+    assert cutover.retained.settings == settings
+    if cluster:
+        start = sql["table:app.events:cutover:start"]
+        assert "SETTINGS index_granularity = 4096, flatten_nested = 1\nCOMMENT " in snapshot
+        assert "clusterAllReplicas('c2', view(" in start
+        assert "AS unflattened_nested" in start
+
+
+@pytest.mark.parametrize(
+    "type_", ["`Nested` /* comment */ (1 UInt8)", "Nested(x UInt64) -- comment", "Nested()"]
+)
+def test_refuses_a_nested_column_whose_fields_cannot_be_read(type_: str) -> None:
+    nested = [*COLUMNS, {"name": "n", "type": type_}]
+    assert messages(
+        old_def=events(["id"], columns=nested),
+        new_def=events(["user_id", "id"], columns=nested),
+    ) == [
+        "Cannot cut over app.events: column n is Nested, but chkit cannot read its fields, "
+        "so the mirror could not list its columns."
+    ]
+
+
+@pytest.mark.parametrize(
+    "attributes",
+    [
+        {"defaultKind": "ALIAS", "default": {"expression": "arrayZip([toString(id)])"}},
+        {"defaultKind": "MATERIALIZED", "default": {"expression": "arrayZip([toString(id)])"}},
+        {"defaultKind": "EPHEMERAL"},
+        {"defaultKind": "DEFAULT"},
+        {"default": ""},
+    ],
+)
+def test_refuses_a_nested_column_with_default_attributes(attributes: dict[str, object]) -> None:
+    nested = [*COLUMNS, {"name": "n", "type": "Nested(x String)", **attributes}]
+    old_def = events(["id"], columns=nested)
+    new_def = events(["user_id", "id"], columns=nested)
+    for old, new in ((old_def, NEW), (OLD, new_def), (old_def, new_def)):
+        assert messages(old_def=old, new_def=new) == [
+            "Cannot cut over app.events: column n is Nested with a DEFAULT, MATERIALIZED, "
+            "ALIAS or EPHEMERAL expression; a cutover copies only plain Nested columns."
+        ]
+
+
+def test_checks_the_live_type_when_a_flattened_leaf_shares_a_declared_nested_name() -> None:
+    nested = [
+        *COLUMNS,
+        {"name": "a", "type": "Nested(b UInt64)"},
+        {"name": "a.b", "type": "Nested(c UInt64)"},
+    ]
+    start = plan(
+        old_def=events(["id"], columns=nested), new_def=events(["user_id", "id"], columns=nested)
+    ).operations[0].sql
+    assert "countIf(has(['a', 'a.b'], name) AND startsWith(type, 'Nested('))" in start
+    assert (
+        "hasAll(groupArray(name), ['a.b.c']) OR countIf(name = 'a.b' AND startsWith(type, 'Nested(')) > 0"
+    ) in start
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_refuses_stored_leaf_overlaps_with_different_declarations(reverse: bool) -> None:
+    nested = [*COLUMNS, {"name": "n", "type": "Nested(x UInt64, y UInt64)"}]
+    plain = [
+        *COLUMNS,
+        {"name": "n.x", "type": "Array(UInt64)"},
+        {"name": "n.y", "type": "Array(UInt64)"},
+    ]
+    old, new = (plain, nested) if reverse else (nested, plain)
+    assert messages(
+        old_def=events(["id"], columns=old),
+        new_def=events(["user_id", "id"], columns=new),
+    ) == [
+        f"Cannot cut over app.events: column {name} is stored in both the old and the new table, "
+        "but declared differently, so the cutover would not copy it. Declare it the same way in both."
+        for name in ("n.x", "n.y")
+    ]
+
+
+def test_pins_shadow_and_reconcile_when_only_new_definition_declares_nested() -> None:
+    nested = [*COLUMNS, {"name": "n", "type": "Nested(x UInt64)"}]
+    cutover = plan(new_def=events(["user_id", "id"], columns=nested))
+    creates = {op.key: op.sql for op in cutover.operations if op.type == "create_table"}
+    for name in (cutover.names.shadow, cutover.names.reconcile):
+        assert "flatten_nested = 1;" in creates[f"table:app.{name}"]
+    start = cutover.operations[0].sql
+    assert (
+        "(toUInt32OrZero(splitByChar('.', version())[1]) * 100 + "
+        "toUInt32OrZero(splitByChar('.', version())[2]) >= 2501) AS flatten_nested_version"
+    ) in start
+    assert (
+        "throwIf(min(flatten_nested_version) = 0, 'app.events: the cutover of a table with "
+        "Nested columns creates its tables with flatten_nested = 1, which ClickHouse accepts "
+        "in CREATE TABLE from version 25.1. Nothing was created or copied. Upgrade ClickHouse, "
+        "or cut the table over by hand.')"
+    ) in start
+    assert "unflattened_nested" not in start
+
+
+def test_checks_uncopied_old_nested_and_pins_only_a_snapshot_from_the_definition() -> None:
+    nested = [*COLUMNS, {"name": "n", "type": "Nested(x UInt64)"}]
+    local = plan(old_def=events(["id"], columns=nested))
+    assert "AS unflattened_nested" in local.operations[0].sql
+    assert "flatten_nested_version" not in local.operations[0].sql
+
+    engine = "ReplicatedMergeTree"
+    cutover = plan(
+        old_def=events(["id"], columns=nested, engine=engine),
+        new_def=events(["user_id", "id"], engine=engine),
+        cluster="c2",
+    )
+    creates = {op.key: op.sql for op in cutover.operations if op.type == "create_table"}
+    start = cutover.operations[0].sql
+    assert "countIf(has(['n'], name) AND startsWith(type, 'Nested('))" in start
+    assert "AS flatten_nested_version" in start
+    assert "FROM clusterAllReplicas('c2', view(" in start
+    assert "flatten_nested = 1\nCOMMENT " in creates[f"table:app.{cutover.names.snapshot}"]
+    for name in (cutover.names.shadow, cutover.names.reconcile):
+        assert "flatten_nested" not in creates[f"table:app.{name}"]
+
+
+@pytest.mark.parametrize("value", [0, 1])
+# A quoted key names the same setting, and the server applies the last one.
+@pytest.mark.parametrize("key", ["flatten_nested", "`flatten_nested`", '"flatten_nested"'])
+def test_refuses_explicit_flatten_nested_on_either_definition(key: str, value: int) -> None:
+    nested = [*COLUMNS, {"name": "n", "type": "Nested(x UInt64)"}]
+    settings = {key: value}
+    for old, new in (
+        (events(["id"], columns=nested, settings=settings), NEW),
+        (OLD, events(["user_id", "id"], columns=nested, settings=settings)),
+    ):
+        assert messages(old_def=old, new_def=new) == [
+            "Cannot cut over app.events: settings.flatten_nested is set on a table with Nested "
+            "columns: the cutover creates its tables with flatten_nested = 1."
+        ]
+
+
+@pytest.mark.parametrize(
+    "type_",
+    ["Nested /* comment */ (x UInt64)", "`Nested`(x UInt64)", "“Nested”(x UInt64) /* comment */\u0085"],
+)
+def test_recognizes_nested_spellings_and_refuses_them_as_keys(type_: str) -> None:
+    nested = [*COLUMNS, {"name": "n", "type": type_}]
+    old = events(["id"], columns=nested)
+    new = events(["user_id", "id"], columns=nested)
+    cutover = plan(old_def=old, new_def=new)
+    assert cutover.columns == ["id", "user_id", "payload", "n.x"]
+    assert "AS flatten_nested_version" in cutover.operations[0].sql
+    assert messages(old_def=old, new_def=new, key=["n"]) == [
+        "Cannot cut over app.events: key column n is Nested; "
+        "a key must be a column whose values identify a row."
+    ]
 
 
 def test_checks_every_replica_stores_uuid_in_the_path_when_the_snapshot_is_created_as_it() -> (

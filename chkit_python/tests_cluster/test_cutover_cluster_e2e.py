@@ -94,6 +94,12 @@ def test_keeps_every_row_on_both_shards_while_writers_insert(
     run_keep_scenario(target, "cutover_keep_2s", tmp_path)
 
 
+def test_keeps_flattened_nested_rows_on_both_shards_while_writers_insert(
+    target: CutoverTarget, tmp_path: Path
+) -> None:
+    run_keep_scenario(target, "cutover_keep_nested_2s", tmp_path, nested=True)
+
+
 def test_resumes_after_a_failure_at_every_step_whose_retry_differs_on_both_shards(
     target: CutoverTarget, tmp_path: Path
 ) -> None:
