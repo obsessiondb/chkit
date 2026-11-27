@@ -93,7 +93,70 @@ def plan_types(old: list[SchemaDefinition], next_: list[SchemaDefinition]) -> li
 _ID = {"name": "id", "type": "UInt64"}
 
 
-def test_mv_query_orders_unrelated_column_changes_by_their_own_dependencies() -> None:
+def db_table(name: str, columns: list[dict[str, Any]] | None = None) -> TableDefinition:
+    return app_table(name, columns).model_copy(update={"database": "db"})
+
+
+def test_mv_guard_adds_columns_before_a_new_columns_query_expands() -> None:
+    out = app_table("out", [_ID, {"name": "fresh", "type": "UInt64"}])
+    next_ = db_table("src", [_ID, {"name": "fresh", "type": "UInt64"}])
+    assert plan_types(
+        [db_table("src"), out, query_mv("SELECT id FROM db.src")],
+        [next_, out, query_mv("SELECT COLUMNS('^fresh$') FROM db.src")],
+    ) == ["alter_table_add_column", "alter_materialized_view_modify_query"]
+
+
+def test_mv_guard_recreates_view_around_a_dependent_drop_and_type_change() -> None:
+    old = db_table(
+        "src",
+        [
+            _ID,
+            {"name": "a", "type": "String"},
+            {"name": "b", "type": "UInt64", "default": SQLExpression(expression="length(a)")},
+        ],
+    )
+    next_ = db_table("src", [_ID, {"name": "a", "type": "UInt64"}])
+    out = app_table("out")
+    assert plan_types(
+        [old, out, query_mv("SELECT b AS id FROM db.src")],
+        [next_, out, query_mv("SELECT a + 1 AS id FROM db.src")],
+    ) == [
+        "drop_materialized_view",
+        "alter_table_drop_column",
+        "alter_table_modify_column",
+        "create_materialized_view",
+    ]
+
+
+def test_mv_guard_recreates_view_with_a_new_unqualified_in_table_operand() -> None:
+    src = db_table("src")
+    out = app_table("out")
+    assert plan_types(
+        [src, out, query_mv("SELECT id FROM db.src")],
+        [src, out, db_table("allowed"), query_mv("SELECT id FROM db.src WHERE id IN allowed")],
+    ) == ["drop_materialized_view", "create_database", "create_table", "create_materialized_view"]
+
+
+def test_mv_guard_recreates_view_when_a_qualified_in_table_loses_a_column() -> None:
+    src = db_table("src")
+    out = app_table("out")
+    allowed = db_table("allowed", [_ID, {"name": "legacy", "type": "UInt64"}])
+    assert plan_types(
+        [src, out, allowed, query_mv("SELECT id FROM db.src")],
+        [src, out, db_table("allowed"), query_mv("SELECT id FROM db.src WHERE id IN db.allowed")],
+    ) == ["drop_materialized_view", "alter_table_drop_column", "create_materialized_view"]
+
+
+def test_mv_guard_recreates_view_whose_old_in_subquery_uses_an_unqualified_name() -> None:
+    src = db_table("src")
+    out = app_table("out")
+    assert plan_types(
+        [src, out, db_table("allowed"), query_mv("SELECT id FROM db.src WHERE id IN (SELECT id FROM allowed)")],
+        [src, out, query_mv("SELECT id FROM db.src")],
+    ) == ["drop_materialized_view", "drop_table", "create_materialized_view"]
+
+
+def test_mv_query_recreates_view_for_source_modify_and_matches_other_tables_exactly() -> None:
     old = app_table(
         "src",
         [
@@ -108,9 +171,10 @@ def test_mv_query_orders_unrelated_column_changes_by_their_own_dependencies() ->
         [old, out, query_mv("SELECT id FROM app.src")],
         [next_, out, query_mv("SELECT id FROM app.src WHERE id > 0")],
     ) == [
-        "alter_materialized_view_modify_query",
+        "drop_materialized_view",
         "alter_table_drop_column",
         "alter_table_modify_column",
+        "create_materialized_view",
     ]
 
     src = app_table("src", [_ID, {"name": "tag", "type": "String"}])

@@ -188,20 +188,32 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
 
   debug('generate', `previous snapshot: ${previousDefinitions.length} definitions, current: ${definitions.length} definitions`)
 
+  const previousTableAliases = new Map(activeTableMappings.map((mapping) => [
+    `${mapping.oldDatabase}.${mapping.oldName}`,
+    `table:${mapping.newDatabase}.${mapping.newName}`,
+  ]))
+  const planOptions = { indexGranularity, previousTableAliases }
   let plan: ReturnType<typeof planDiff>
   try {
-    plan = planDiff(remappedPreviousDefinitions, definitions, { indexGranularity })
+    plan = planDiff(remappedPreviousDefinitions, definitions, planOptions)
+    plan = applyExplicitTableRenames(plan, activeTableMappings)
+    plan = applyExplicitDictionaryRenames(plan, activeDictionaryMappings)
+    assertCliColumnMappingsResolvable(cliColumnMappings, plan, definitions)
+    const columnRenames = buildExplicitColumnRenameSuggestions(plan, columnMappings)
+    if (columnRenames.length && plan.operations.some((op) => op.type === 'alter_materialized_view_modify_query')) {
+      // Replan before rewriting the ADD and DROP pairs so dependent views
+      // get the planner's dependency-ordered DROP and CREATE.
+      plan = planDiff(remappedPreviousDefinitions, definitions, { ...planOptions, columnRenames })
+      plan = applyExplicitTableRenames(plan, activeTableMappings)
+      plan = applyExplicitDictionaryRenames(plan, activeDictionaryMappings)
+    }
+    plan = applySelectedRenameSuggestions(plan, columnRenames, {
+      previous: remappedPreviousDefinitions,
+      next: definitions,
+    })
   } catch (error) {
     return reportValidationError(error, jsonMode)
   }
-
-  plan = applyExplicitTableRenames(plan, activeTableMappings)
-  plan = applyExplicitDictionaryRenames(plan, activeDictionaryMappings)
-  assertCliColumnMappingsResolvable(cliColumnMappings, plan, definitions)
-  plan = applySelectedRenameSuggestions(plan, buildExplicitColumnRenameSuggestions(plan, columnMappings), {
-    previous: remappedPreviousDefinitions,
-    next: definitions,
-  })
 
   plan = await pluginRuntime.runOnPlanCreated(
     {

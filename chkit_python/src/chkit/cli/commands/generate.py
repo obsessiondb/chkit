@@ -522,18 +522,44 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             typer.echo(f"{warning} No changes planned.")
         return
 
+    previous_table_aliases = {
+        f"{mapping.old_database}.{mapping.old_name}": (
+            f"table:{mapping.new_database}.{mapping.new_name}"
+        )
+        for mapping in active_table_mappings
+    }
     # Mirror TS ``generate.command``: surface validation failures as a
     # structured JSON envelope (or an issue list in human mode) rather than
     # letting them escape as a stack trace. ``plan_diff`` itself may raise a
     # ChxValidationError for invariant violations or unsupported changes.
     try:
-        plan = plan_diff(remapped_old_defs, canonical, index_granularity=index_granularity)
+        plan = plan_diff(
+            remapped_old_defs,
+            canonical,
+            index_granularity=index_granularity,
+            previous_table_aliases=previous_table_aliases,
+        )
         plan = apply_explicit_table_renames(plan, active_table_mappings)
         plan = apply_explicit_dictionary_renames(plan, active_dictionary_mappings)
         assert_cli_column_mappings_resolvable(cli_column_mappings, plan, canonical)
+        column_renames = build_explicit_column_rename_suggestions(plan, column_mappings)
+        if column_renames and any(
+            op.type == "alter_materialized_view_modify_query" for op in plan.operations
+        ):
+            # Replan before rewriting the ADD and DROP pairs so dependent views
+            # get the planner's dependency-ordered DROP and CREATE.
+            plan = plan_diff(
+                remapped_old_defs,
+                canonical,
+                index_granularity=index_granularity,
+                column_renames=column_renames,
+                previous_table_aliases=previous_table_aliases,
+            )
+            plan = apply_explicit_table_renames(plan, active_table_mappings)
+            plan = apply_explicit_dictionary_renames(plan, active_dictionary_mappings)
         plan = apply_selected_rename_suggestions(
             plan,
-            build_explicit_column_rename_suggestions(plan, column_mappings),
+            column_renames,
             previous_definitions=remapped_old_defs,
             next_definitions=canonical,
         )

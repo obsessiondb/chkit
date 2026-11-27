@@ -12,7 +12,7 @@ import {
 import { definitionKey } from './canonical.js'
 import { quoteIdentifier, renderQualifiedName } from './identifier.js'
 import type { MigrationOperation, SchemaDefinition, TableDefinition } from './model.js'
-import { buildDependencyGraph, type DependencyGraph, orderByDependencies, queryColumnMentions } from './object-dependencies.js'
+import { buildDependencyGraph, type DependencyGraph, orderByDependencies } from './object-dependencies.js'
 import { compareCodePoints } from './order.js'
 import { columnTypeFingerprint } from './sql.js'
 
@@ -50,10 +50,12 @@ export function isColumnStatement(op: MigrationOperation): boolean {
  * - when the order still closes a cycle in a table whose reads are certain
  *   (`repairedOrder`), the first breaker in key order runs before the
  *   MODIFY that closes it (`breakClosedCycles`, #775);
- * - a MODIFY QUERY runs after an ADD or MODIFY of X or a RENAME to X if
- *   its new query mentions X, and before a DROP of X if its old query
- *   mentions X, on tables that the respective query reads or writes. A
- *   star mentions every column;
+ * - a MODIFY QUERY runs after every ADD COLUMN on a table its new query reads
+ *   or writes, and before every DROP COLUMN on a table its old query reads or
+ *   writes. The planner recreates a view if either query depends on a table
+ *   with a MODIFY or RENAME COLUMN. The remaining edges go from ADD to query
+ *   to DROP, and no DROP precedes an ADD by dependency on those tables, so
+ *   the query edges cannot close a cycle;
  * - statements of the same column keep their order.
  * Members of a cycle keep their key order. The statements fill the positions
  * the column statements had, so every other operation keeps its place, and a
@@ -81,7 +83,7 @@ export function orderColumnStatements(
   const ids = statementObjectIds(statements, definitions, renames)
   const queryReads = queries.length ? materializedViewQueryReads(definitions.next) : undefined
   const oldQueryReads = queries.length ? materializedViewQueryReads(definitions.previous) : undefined
-  const columns = queries.length ? ids.map((id) => statementColumn(renamedTo.get(id) ?? id)) : []
+  const columnTables = queries.length ? ids.map((id) => statementColumn(id)?.table) : []
   // The statements of one object (`ids`) are next to each other in key order.
   const lastOf = new Map<string, number>()
   const previousOf = ids.map((id, index) => {
@@ -122,19 +124,16 @@ export function orderColumnStatements(
     }
     if (op.type === 'alter_table_drop_column') {
       for (const other of releasers.get(id) ?? []) found.add(other)
+      const table = columnTables[index]
       for (const query of queries) {
-        if (oldQueryReads?.get(statements[query]?.key ?? '')?.(columns[index])) found.add(query)
+        if (table !== undefined && oldQueryReads?.get(statements[query]?.key ?? '')?.has(table)) found.add(query)
       }
     }
     if (op.type === 'alter_materialized_view_modify_query') {
-      const readsColumn = queryReads?.get(op.key)
+      const tables = queryReads?.get(op.key)
       statements.forEach((other, otherIndex) => {
-        if (
-          (other.type === 'alter_table_add_column' ||
-            other.type === 'alter_table_modify_column' ||
-            other.type === 'alter_table_rename_column') &&
-          readsColumn?.(columns[otherIndex])
-        ) found.add(otherIndex)
+        const table = columnTables[otherIndex]
+        if (other.type === 'alter_table_add_column' && table !== undefined && tables?.has(table)) found.add(otherIndex)
       })
     }
     // A column's last statement is the MODIFY COLUMN that sets its new expression.
@@ -179,17 +178,24 @@ export function droppedStatementColumns(
   return statementObjectIds(drops, { previous, next: [] }, []).flatMap((id) => statementColumn(id) ?? [])
 }
 
-/** MODIFY QUERY operation key → whether the view's query mentions a column it reads or writes. */
-function materializedViewQueryReads(definitions: SchemaDefinition[]): Map<string, (column: StatementColumn | undefined) => boolean> {
+export function modifiedStatementTables(
+  operations: readonly MigrationOperation[],
+  definitions: ColumnStatementDefinitions
+): string[] {
+  const modifies = operations.filter((op) => op.type === 'alter_table_modify_column')
+  if (modifies.length === 0) return []
+  return statementObjectIds(modifies, definitions, []).flatMap((id) => statementColumn(id)?.table ?? [])
+}
+
+/** MODIFY QUERY operation key → keys of the objects the query reads or writes. */
+function materializedViewQueryReads(definitions: SchemaDefinition[]): DependencyGraph {
   const graph = buildDependencyGraph(definitions)
   return new Map(
     definitions
       .filter((def) => def.kind === 'materialized_view')
       .map((def) => {
         const key = definitionKey(def)
-        const tables = graph.get(key)
-        const mentions = queryColumnMentions(def.as)
-        return [`${key}:query`, (column) => column !== undefined && tables?.has(column.table) === true && mentions(column.name)]
+        return [`${key}:query`, graph.get(key) ?? new Set<string>()]
       })
   )
 }

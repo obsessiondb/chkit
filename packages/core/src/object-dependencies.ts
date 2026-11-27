@@ -36,12 +36,19 @@ const WITH_MODIFIER = /^(totals|rollup|cube|fill|ties)$/i
 /**
  * Edges from every definition to the definitions it reads, restricted to the
  * given set. Expects canonical definitions (`canonicalizeDefinitions`).
+ * Aliases map original qualified names to remapped definition keys.
  */
-export function buildDependencyGraph(definitions: SchemaDefinition[]): DependencyGraph {
+export function buildDependencyGraph(
+  definitions: SchemaDefinition[],
+  aliases: ReadonlyMap<string, string> = new Map()
+): DependencyGraph {
   const keysByName = new Map<string, string[]>()
   for (const def of definitions) {
     const name = `${def.database}.${def.name}`
     keysByName.set(name, [...(keysByName.get(name) ?? []), definitionKey(def)])
+  }
+  for (const [name, key] of aliases) {
+    keysByName.set(name, [...(keysByName.get(name) ?? []), key])
   }
 
   const graph = new Map<string, Set<string>>()
@@ -324,15 +331,26 @@ function parseObjectName(value: string, ownDatabase: string): ObjectReference | 
 
 /** Whether the query names an object without specifying its database. */
 export function hasUnqualifiedReference(sql: string): boolean {
-  return sqlReferences(sql, '').some((ref) => ref.unqualified)
+  return sqlReferences(sql, '').some((ref) => ref.unqualified) ||
+    significantTokens(sql).some((token, i, tokens) => {
+      const operand = tokens[i + 1]
+      return token.kind === 'identifier' && token.text.toLowerCase() === 'in' &&
+        operand !== undefined && identifierName(operand) !== undefined && tokens[i + 2]?.text !== '.'
+    })
 }
 
-/** Match case-sensitive identifier names in the query. A star matches every column. */
-export function queryColumnMentions(sql: string): (column: string) => boolean {
+/** Conservatively check whether the query may still read a column being dropped. */
+export function queryMayReadDroppedColumn(sql: string): (column: string) => boolean {
   const tokens = significantTokens(sql)
-  const star = tokens.some((token) => token.text === '*')
   const names = new Set(tokens.map(identifierName))
-  return (column) => star || names.has(column)
+  const allColumns = tokens.some((token, i) => {
+    const next = tokens[i + 1]
+    const keyword = token.kind === 'identifier' ? token.text.toLowerCase() : ''
+    return token.text === '*' ||
+      (keyword === 'columns' && next?.text === '(') ||
+      (keyword === 'in' && next !== undefined && next.text !== '(')
+  })
+  return (column) => allColumns || names.has(column) || names.has(column.split('.', 1)[0])
 }
 
 function significantTokens(sql: string): SQLToken[] {

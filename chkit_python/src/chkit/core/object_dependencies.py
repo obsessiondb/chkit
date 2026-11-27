@@ -71,16 +71,22 @@ class _QueryScope:
     declares_on_close: str | None = None
 
 
-def build_dependency_graph(definitions: Sequence[SchemaDefinition]) -> dict[str, set[str]]:
+def build_dependency_graph(
+    definitions: Sequence[SchemaDefinition], aliases: Mapping[str, str] | None = None
+) -> dict[str, set[str]]:
     """Edges from every definition to the definitions it reads, restricted to the given set.
 
     Expects canonical definitions (``canonicalize_definitions``).
+    Aliases map original qualified names to remapped definition keys.
     """
     keys_by_name: dict[str, list[str]] = {}
     for definition in definitions:
         keys_by_name.setdefault(f"{definition.database}.{definition.name}", []).append(
             definition_key(definition)
         )
+    if aliases:
+        for name, key in aliases.items():
+            keys_by_name.setdefault(name, []).append(key)
 
     graph: dict[str, set[str]] = {}
     for definition in definitions:
@@ -389,15 +395,34 @@ def _parse_object_name(value: str, own_database: str) -> _ObjectReference | None
 
 def has_unqualified_reference(sql: str) -> bool:
     """Whether the query names an object without specifying its database."""
-    return any(ref.unqualified for ref in _sql_references(sql, ""))
-
-
-def query_column_mentions(sql: str) -> Callable[[str], bool]:
-    """Match case-sensitive identifier names in the query. A star matches every column."""
+    if any(ref.unqualified for ref in _sql_references(sql, "")):
+        return True
     tokens = _significant_tokens(sql)
-    star = any(token.text == "*" for token in tokens)
+    return any(
+        token.kind == "identifier"
+        and token.text.lower() == "in"
+        and identifier_name(tokens[i + 1]) is not None
+        and _text_at(tokens, i + 2) != "."
+        for i, token in enumerate(tokens[:-1])
+    )
+
+
+def query_may_read_dropped_column(sql: str) -> Callable[[str], bool]:
+    """Conservatively check whether the query may still read a column being dropped."""
+    tokens = _significant_tokens(sql)
     names = {identifier_name(token) for token in tokens}
-    return lambda column: star or column in names
+    all_columns = any(
+        token.text == "*"
+        or (
+            token.kind == "identifier"
+            and (
+                (token.text.lower() == "columns" and _text_at(tokens, i + 1) == "(")
+                or (token.text.lower() == "in" and _text_at(tokens, i + 1) not in ("", "("))
+            )
+        )
+        for i, token in enumerate(tokens)
+    )
+    return lambda column: all_columns or column in names or column.partition(".")[0] in names
 
 
 def _significant_tokens(sql: str) -> list[SQLToken]:

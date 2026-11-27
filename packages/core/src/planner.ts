@@ -41,7 +41,8 @@ import {
   toCreateSQL,
 } from './sql.js'
 import type { ColumnStatementDefinitions } from './column-cycle-repair.js'
-import { droppedStatementColumns, orderColumnStatements } from './column-order.js'
+import { droppedStatementColumns, modifiedStatementTables, orderColumnStatements } from './column-order.js'
+import type { ColumnRename } from './column-reads.js'
 import { normalizeColumn, shapeKey } from './column-shape.js'
 import { constraintKind } from './constraint.js'
 import { readonlySettingsFingerprint } from './table-settings.js'
@@ -57,7 +58,7 @@ import {
   hasUnqualifiedReference,
   invertDependencyGraph,
   orderByDependencies,
-  queryColumnMentions,
+  queryMayReadDroppedColumn,
   type DependencyGraph,
 } from './object-dependencies.js'
 
@@ -302,8 +303,9 @@ function refreshEqual(
  * A new query on the same target is a MODIFY QUERY, which swaps the query of a
  * view that keeps feeding its target, so no INSERT into its source is missed.
  * Recreate it for structural or refreshable query changes, unqualified
- * names in the new query, or dependencies that cannot safely span the swap
- * (objects created, changed or dropped and columns the new query still mentions).
+ * names in either query, or dependencies that cannot safely span the swap
+ * (object changes, column modifications or renames, and column drops the
+ * new query may still read).
  */
 function diffMaterializedView(
   oldDef: MaterializedViewDefinition,
@@ -360,7 +362,9 @@ function diffMaterializedViews(
   operations: readonly MigrationOperation[],
   createGraph: DependencyGraph,
   dropGraph: DependencyGraph,
-  droppedColumns: ReturnType<typeof droppedStatementColumns>
+  oldColumnDependents: DependencyGraph,
+  droppedColumns: ReturnType<typeof droppedStatementColumns>,
+  modifiedTables: readonly string[]
 ): MigrationOperation[] {
   const queryChanges = new Set(changedViews.filter(([oldDef, newDef]) => oldDef.as !== newDef.as).map(([, def]) => definitionKey(def)))
   const unavailable = new Set([...queryChanges, ...operations.filter((op) => op.type.startsWith('create_')).map((op) => op.key)])
@@ -378,15 +382,17 @@ function diffMaterializedViews(
       dropped.add(key)
     }
   }
-  for (const [, newDef] of changedViews) {
+  for (const [oldDef, newDef] of changedViews) {
     const key = definitionKey(newDef)
     if (!queryChanges.has(key) || dropped.has(key)) continue
     const reads = createGraph.get(key)
-    const mentions = queryColumnMentions(newDef.as)
+    const dropsOnReadTables = droppedColumns.filter((column) => reads?.has(column.table)).map((column) => column.name)
     if (
       [...(reads ?? [])].some((dependency) => unavailable.has(dependency)) ||
+      modifiedTables.some((table) => reads?.has(table) || oldColumnDependents.get(table)?.has(key)) ||
+      hasUnqualifiedReference(oldDef.as) ||
       hasUnqualifiedReference(newDef.as) ||
-      droppedColumns.some((column) => reads?.has(column.table) && mentions(column.name))
+      (dropsOnReadTables.length > 0 && dropsOnReadTables.some(queryMayReadDroppedColumn(newDef.as)))
     ) dropped.add(key)
   }
   // Every old query that switches away from a dropped object must already be
@@ -716,10 +722,17 @@ function constraintWarning(def: TableDefinition, constraint: TableConstraintDefi
     : `${subject} is an ASSUME constraint: ClickHouse never validates it, and queries optimized with optimize_using_constraints trust it, so an assumption that does not hold returns wrong results.`
 }
 
+type PlanDiffOptions = CanonicalizeOptions & {
+  /** Confirmed column renames the generate pipeline will apply to this diff. */
+  columnRenames?: readonly ColumnRename[]
+  /** Original qualified table names mapped to their remapped definition keys. */
+  previousTableAliases?: ReadonlyMap<string, string>
+}
+
 export function planDiff(
   oldDefinitions: SchemaDefinition[],
   newDefinitions: SchemaDefinition[],
-  options: CanonicalizeOptions = {}
+  options: PlanDiffOptions = {}
 ): MigrationPlan {
   const oldCanonical = canonicalizeDefinitions(oldDefinitions, options)
   const newCanonical = canonicalizeDefinitions(newDefinitions, options)
@@ -789,7 +802,24 @@ export function planDiff(
   }
 
   if (changedViews.length) {
-    operations.push(...diffMaterializedViews(changedViews, operations, createGraph, dropGraph, droppedStatementColumns(operations, oldCanonical)))
+    const modifiedTables = [
+      ...modifiedStatementTables(operations, { previous: oldCanonical, next: newCanonical }),
+      ...(options.columnRenames ?? []).map((rename) => `table:${rename.database}.${rename.table}`),
+    ]
+    // Generate diffs remapped tables, but an old query can still name the
+    // table by its original name. Use those names for the column-change guard.
+    const oldColumnDependents = modifiedTables.length && options.previousTableAliases?.size
+      ? invertDependencyGraph(buildDependencyGraph(oldCanonical, options.previousTableAliases))
+      : dropGraph
+    operations.push(...diffMaterializedViews(
+      changedViews,
+      operations,
+      createGraph,
+      dropGraph,
+      oldColumnDependents,
+      droppedStatementColumns(operations, oldCanonical),
+      modifiedTables
+    ))
   }
 
   for (const database of [...databasesToCreate].sort((a, b) => compareCodePoints(a, b))) {
@@ -855,7 +885,8 @@ function alterRank(op: MigrationOperation): number {
  * dependencies (#231): drops run dependents first, creates run dependencies
  * first. Alters and create_database keep their place, except that the column
  * statements of a table are ordered by the columns they read and remove, and a
- * materialized view's MODIFY QUERY by the columns its queries mention.
+ * materialized view's MODIFY QUERY runs between column adds and drops on
+ * the tables its new and old queries depend on, respectively.
  */
 function orderOperations(
   sorted: MigrationOperation[],
