@@ -212,6 +212,12 @@ export function planCutover(input: {
   const copied = oldDef.columns.filter((column) => declaredColumns.includes(column.name))
   const columns = copied.flatMap((column) => columnLeaves(column).map((leaf) => leaf.name))
   const snapshotFromSchema = snapshotFromDefinition(oldDef)
+  let flattenNestedVersionReason: string | undefined
+  if (hasNestedColumns(newDef) || (snapshotFromSchema && hasNestedColumns(oldDef))) {
+    flattenNestedVersionReason = 'the cutover of a table with Nested columns creates its tables with flatten_nested = 1'
+  } else if (setsFlattenNested(newDef) || (snapshotFromSchema && setsFlattenNested(oldDef))) {
+    flattenNestedVersionReason = 'the schema sets flatten_nested, and the cutover creates its tables with that setting'
+  }
   const sql = createCutoverSql({
     database: request.database,
     table: request.table,
@@ -221,7 +227,7 @@ export function planCutover(input: {
     oldColumns: oldDef.columns,
     oldEngine: engineName(oldDef.engine),
     snapshotFromDefinition: snapshotFromSchema,
-    pinFlattenNested: hasNestedColumns(newDef) || (snapshotFromSchema && hasNestedColumns(oldDef)),
+    flattenNestedVersionReason,
     key: request.key,
     cluster: options.cluster,
     readonlySettings: declaredReadonlySettings(oldDef.settings, newDef.settings),
@@ -502,7 +508,7 @@ function createCutoverSql(input: {
   oldEngine: string
   /** The snapshot is rendered from the old definition, not created AS the table. */
   snapshotFromDefinition: boolean
-  pinFlattenNested: boolean
+  flattenNestedVersionReason?: string
   key: string[]
   cluster?: string
   /** Read-only settings the layout compares, besides engine and keys. */
@@ -511,7 +517,7 @@ function createCutoverSql(input: {
   oldSettings: TableDefinition['settings']
   indexGranularity: number
 }): CutoverSql {
-  const { database, table, names, columns, copiedColumns, oldColumns, oldEngine, snapshotFromDefinition, pinFlattenNested, key, cluster, readonlySettings, oldSettings, indexGranularity } = input
+  const { database, table, names, columns, copiedColumns, oldColumns, oldEngine, snapshotFromDefinition, flattenNestedVersionReason, key, cluster, readonlySettings, oldSettings, indexGranularity } = input
   const q = (name: string) => renderQualifiedName(database, name)
   const target = `${database}.${table}`
   const columnList = columns.map(quoteColumn).join(', ')
@@ -618,7 +624,7 @@ function createCutoverSql(input: {
   const declaredKey = snapshotFromDefinition
     ? `(${tableCount(table)} = 0 OR (SELECT any(position(engine_full, ' PRIMARY KEY ') > 0) FROM system.tables WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(table)}) OR ${serverVersion} >= 2607) AS declared_key`
     : undefined
-  const flattenNestedVersion = pinFlattenNested ? `(${serverVersion} >= 2501) AS flatten_nested_version` : undefined
+  const flattenNestedVersion = flattenNestedVersionReason ? `(${serverVersion} >= 2501) AS flatten_nested_version` : undefined
   // Per replica: 1 when the condition holds. A guard throws unless every replica reports 1.
   const guard = (condition: string, message: string) =>
     `SELECT throwIf(countIf(ok = 0) > 0 OR count() = 0, ${stringLiteral(message)}) FROM ${everyReplica(`SELECT toUInt8(${condition}) AS ok`)}`
@@ -698,7 +704,7 @@ function createCutoverSql(input: {
         ? [`  throwIf(max(unflattened_nested) > 0, ${stringLiteral(`${target} stores a Nested column as one column (created with flatten_nested = 0). The cutover creates the new table with flatten_nested = 1, which stores each field as its own Array column, so writers that insert the Nested column would fail after the swap. Nothing was created or copied. A cutover supports only Nested columns stored flattened.`)}),`]
         : []),
       ...(flattenNestedVersion
-        ? [`  throwIf(min(flatten_nested_version) = 0, ${stringLiteral(`${target}: the cutover of a table with Nested columns creates its tables with flatten_nested = 1, which ClickHouse accepts in CREATE TABLE from version 25.1. Nothing was created or copied. Upgrade ClickHouse, or cut the table over by hand.`)}),`]
+        ? [`  throwIf(min(flatten_nested_version) = 0, ${stringLiteral(`${target}: ${flattenNestedVersionReason}, which ClickHouse accepts in CREATE TABLE from version 25.1. Nothing was created or copied. Upgrade ClickHouse, or cut the table over by hand.`)}),`]
         : []),
       `  throwIf(max(undeclared_columns) > 0, ${stringLiteral(`${target} stores a column that the schema does not declare, so its values would not reach the new table. Nothing was created or copied. Run chkit drift, change the schema to match the table, and generate the cutover again.`)}),`,
       `  throwIf(min(declared_columns) = 0, ${stringLiteral(`${target} lacks a column that the schema declares, so the mirror cannot read it. Nothing was created or copied. Run chkit drift, change the schema to match the table, and generate the cutover again.`)}),`,
@@ -1047,9 +1053,18 @@ function isNestedType(type: string): boolean {
 }
 
 // A quoted settings key (`flatten_nested`) names the same setting, and the
-// server applies the last one, so it would override the cutover's own.
+// server applies the last one, so it would override the cutover's own. The key
+// is trimmed of the whitespace ClickHouse skips around it.
 function setsFlattenNested(def: TableDefinition): boolean {
-  return Object.keys(def.settings ?? {}).some((key) => key.trim().replace(/^([`"])(.*)\1$/s, '$2') === 'flatten_nested')
+  return Object.keys(def.settings ?? {}).some((key) => trimClickHouseSpace(key).replace(/^([`"])(.*)\1$/s, '$2') === 'flatten_nested')
+}
+
+function trimClickHouseSpace(text: string): string {
+  let start = 0
+  let end = text.length
+  while (start < end && CLICKHOUSE_SPACE.test(text.charAt(start))) start += 1
+  while (end > start && CLICKHOUSE_SPACE.test(text.charAt(end - 1))) end -= 1
+  return text.slice(start, end)
 }
 
 function hasNestedColumns(def: TableDefinition): boolean {

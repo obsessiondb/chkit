@@ -325,6 +325,41 @@ describe('planCutover', () => {
     expect(sqlOf(names.reconcile)).not.toContain('flatten_nested')
   })
 
+  const explicitFlattenNestedGuard = "throwIf(min(flatten_nested_version) = 0, 'app.events: the schema sets flatten_nested, and the cutover creates its tables with that setting, which ClickHouse accepts in CREATE TABLE from version 25.1. Nothing was created or copied. Upgrade ClickHouse, or cut the table over by hand.')"
+
+  // The key is trimmed of the whitespace ClickHouse skips, the same in both ports.
+  test.each(['flatten_nested', '`flatten_nested`', '"flatten_nested"', '\ufeffflatten_nested', '\u0085flatten_nested\u200b'].flatMap((key) => [0, 1].map((value) => [key, value] as const)))(
+    'checks ClickHouse 25.1 when the new definition sets %s = %d',
+    (key, value) => {
+      const start = plan({ newDef: { ...NEW, settings: { [key]: value } } }).operations[0]?.sql
+      expect(start).toContain("(toUInt32OrZero(splitByChar('.', version())[1]) * 100 + toUInt32OrZero(splitByChar('.', version())[2]) >= 2501) AS flatten_nested_version")
+      expect(start).toContain(explicitFlattenNestedGuard)
+    }
+  )
+
+  test('checks explicit flatten_nested on the old definition only for a snapshot from the schema', () => {
+    const settings = { flatten_nested: 0 }
+    const local = plan({ oldDef: { ...OLD, settings } })
+    expect(local.operations[0]?.sql).not.toContain('flatten_nested_version')
+
+    const engine = "ReplicatedMergeTree('/clickhouse/tables/{shard}/{database}/{table}', '{replica}')"
+    const { operations } = plan({ oldDef: { ...OLD, engine, settings }, newDef: { ...NEW, engine }, options: { cluster: 'c2' } })
+    expect(operations[0]?.sql).toContain('AS flatten_nested_version')
+    expect(operations[0]?.sql).toContain(explicitFlattenNestedGuard)
+  })
+
+  test('uses the Nested message when the snapshot has Nested and the new definition sets flatten_nested', () => {
+    const engine = 'ReplicatedMergeTree'
+    const nested = [...columns, { name: 'n', type: 'Nested(x UInt64)' }]
+    const { operations } = plan({
+      oldDef: { ...OLD, engine, columns: nested },
+      newDef: { ...NEW, engine, settings: { flatten_nested: 1 } },
+      options: { cluster: 'c2' },
+    })
+    expect(operations[0]?.sql).toContain("throwIf(min(flatten_nested_version) = 0, 'app.events: the cutover of a table with Nested columns")
+    expect(operations[0]?.sql).not.toContain(explicitFlattenNestedGuard)
+  })
+
   test('refuses explicit flatten_nested on either definition with Nested', () => {
     const nested = [...columns, { name: 'n', type: 'Nested(x UInt64)' }]
     // A quoted key names the same setting, and the server applies the last one.

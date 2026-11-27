@@ -266,6 +266,19 @@ def plan_cutover(
     copied = [column for column in old_canonical.columns if column.name in declared_columns]
     columns = [name for column in copied for name, _ in _column_leaves(column)]
     snapshot_from_schema = _snapshot_from_definition(old_canonical)
+    flatten_nested_version_reason = None
+    if _has_nested_columns(new_canonical) or (
+        snapshot_from_schema and _has_nested_columns(old_canonical)
+    ):
+        flatten_nested_version_reason = (
+            "the cutover of a table with Nested columns creates its tables with flatten_nested = 1"
+        )
+    elif _sets_flatten_nested(new_canonical) or (
+        snapshot_from_schema and _sets_flatten_nested(old_canonical)
+    ):
+        flatten_nested_version_reason = (
+            "the schema sets flatten_nested, and the cutover creates its tables with that setting"
+        )
     sql = _create_cutover_sql(
         database=request.database,
         table=request.table,
@@ -275,8 +288,7 @@ def plan_cutover(
         old_columns=old_canonical.columns,
         old_engine=engine_name(old_canonical.engine),
         snapshot_from_definition=snapshot_from_schema,
-        pin_flatten_nested=_has_nested_columns(new_canonical)
-        or (snapshot_from_schema and _has_nested_columns(old_canonical)),
+        flatten_nested_version_reason=flatten_nested_version_reason,
         key=request.key,
         cluster=options.cluster,
         readonly_settings=declared_readonly_settings(
@@ -641,7 +653,7 @@ def _create_cutover_sql(
     old_columns: list[ColumnDefinition],
     old_engine: str,
     snapshot_from_definition: bool,
-    pin_flatten_nested: bool,
+    flatten_nested_version_reason: str | None,
     key: list[str],
     cluster: str | None,
     readonly_settings: list[str],
@@ -774,7 +786,9 @@ def _create_cutover_sql(
         else None
     )
     flatten_nested_version = (
-        f"({server_version} >= 2501) AS flatten_nested_version" if pin_flatten_nested else None
+        f"({server_version} >= 2501) AS flatten_nested_version"
+        if flatten_nested_version_reason
+        else None
     )
 
     # Per replica: 1 when the condition holds. A guard throws unless every replica reports 1.
@@ -981,10 +995,9 @@ def _create_cutover_sql(
                 [
                     "  throwIf(min(flatten_nested_version) = 0, "
                     + _string_literal(
-                        f"{target}: the cutover of a table with Nested columns creates its tables "
-                        "with flatten_nested = 1, which ClickHouse accepts in CREATE TABLE from "
-                        "version 25.1. Nothing was created or copied. Upgrade ClickHouse, or cut "
-                        "the table over by hand."
+                        f"{target}: {flatten_nested_version_reason}, which ClickHouse accepts in "
+                        "CREATE TABLE from version 25.1. Nothing was created or copied. "
+                        "Upgrade ClickHouse, or cut the table over by hand."
                     )
                     + "),"
                 ]
@@ -1418,6 +1431,15 @@ def _is_clickhouse_space(char: str) -> bool:
     return is_js_space(char) or char in _CLICKHOUSE_EXTRA_SPACE
 
 
+def _trim_clickhouse_space(value: str) -> str:
+    start, end = 0, len(value)
+    while start < end and _is_clickhouse_space(value[start]):
+        start += 1
+    while end > start and _is_clickhouse_space(value[end - 1]):
+        end -= 1
+    return value[start:end]
+
+
 def _is_nullable_type(type_: str) -> bool:
     """Whether a column type is ``Nullable(T)`` or ``LowCardinality(Nullable(T))``.
 
@@ -1616,9 +1638,11 @@ def _is_nested_type(type_: str) -> bool:
 
 def _sets_flatten_nested(definition: TableDefinition) -> bool:
     """A quoted settings key (`flatten_nested`) names the same setting, and the
-    server applies the last one, so it would override the cutover's own."""
+    server applies the last one, so it would override the cutover's own. The key
+    is trimmed of the whitespace ClickHouse skips around it."""
     return any(
-        re.sub(r'^([`"])(.*)\1$', r"\2", key.strip(), flags=re.S) == "flatten_nested"
+        re.sub(r'^([`"])(.*)\1$', r"\2", _trim_clickhouse_space(key), flags=re.S)
+        == "flatten_nested"
         for key in (definition.settings or {})
     )
 
