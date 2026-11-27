@@ -1431,6 +1431,15 @@ def _is_clickhouse_space(char: str) -> bool:
     return is_js_space(char) or char in _CLICKHOUSE_EXTRA_SPACE
 
 
+def _trim_clickhouse_space(value: str) -> str:
+    start, end = 0, len(value)
+    while start < end and _is_clickhouse_space(value[start]):
+        start += 1
+    while end > start and _is_clickhouse_space(value[end - 1]):
+        end -= 1
+    return value[start:end]
+
+
 def _is_nullable_type(type_: str) -> bool:
     """Whether a column type is ``Nullable(T)`` or ``LowCardinality(Nullable(T))``.
 
@@ -1629,9 +1638,11 @@ def _is_nested_type(type_: str) -> bool:
 
 def _sets_flatten_nested(definition: TableDefinition) -> bool:
     """A quoted settings key (`flatten_nested`) names the same setting, and the
-    server applies the last one, so it would override the cutover's own."""
+    server applies the last one, so it would override the cutover's own. The key
+    is trimmed of the whitespace ClickHouse skips around it."""
     return any(
-        re.sub(r'^([`"])(.*)\1$', r"\2", js_trim(key), flags=re.S) == "flatten_nested"
+        re.sub(r'^([`"])(.*)\1$', r"\2", _trim_clickhouse_space(key), flags=re.S)
+        == "flatten_nested"
         for key in (definition.settings or {})
     )
 

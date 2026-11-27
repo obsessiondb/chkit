@@ -1053,9 +1053,18 @@ function isNestedType(type: string): boolean {
 }
 
 // A quoted settings key (`flatten_nested`) names the same setting, and the
-// server applies the last one, so it would override the cutover's own.
+// server applies the last one, so it would override the cutover's own. The key
+// is trimmed of the whitespace ClickHouse skips around it.
 function setsFlattenNested(def: TableDefinition): boolean {
-  return Object.keys(def.settings ?? {}).some((key) => key.trim().replace(/^([`"])(.*)\1$/s, '$2') === 'flatten_nested')
+  return Object.keys(def.settings ?? {}).some((key) => trimClickHouseSpace(key).replace(/^([`"])(.*)\1$/s, '$2') === 'flatten_nested')
+}
+
+function trimClickHouseSpace(text: string): string {
+  let start = 0
+  let end = text.length
+  while (start < end && CLICKHOUSE_SPACE.test(text.charAt(start))) start += 1
+  while (end > start && CLICKHOUSE_SPACE.test(text.charAt(end - 1))) end -= 1
+  return text.slice(start, end)
 }
 
 function hasNestedColumns(def: TableDefinition): boolean {
