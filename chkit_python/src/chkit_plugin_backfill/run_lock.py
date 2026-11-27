@@ -113,8 +113,8 @@ def acquire_run_lock(lock_path: str | Path, plan_id: str) -> RunLock:
             removal = "was removed"
         except Exception as remove_error:
             removal = (
-                f"could not be removed ({remove_error}): delete it once no run, resume "
-                "or cancel of this plan runs"
+                f"could not be removed ({remove_error}): delete it once no run, resume, "
+                "cancel or submit of this plan runs"
             )
         msg = (
             f"Backfill plan {plan_id}: could not take its lock ({error}); the lock "
@@ -215,7 +215,7 @@ def with_run_lock(  # noqa: PLR0915 — mirrors the TS withRunLock
                 except Exception as error:
                     released = (
                         f"could not be removed ({error}): delete {lock.path} once no run, "
-                        "resume or cancel of this plan runs"
+                        "resume, cancel or submit of this plan runs"
                     )
             state["released"] = released
         if released != "released" and not stop.is_set():

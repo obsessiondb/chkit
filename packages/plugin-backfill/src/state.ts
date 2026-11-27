@@ -191,6 +191,7 @@ export async function readSubmission(submissionPath: string): Promise<BackfillSu
 export async function recordBackfillSubmission(input: {
   plan: Pick<BackfillPlanState, 'planId' | 'target'>
   jobId: string
+  submissionId?: string
   configPath: string
   config: Pick<ResolvedChxConfig, 'metaDir'>
   stateDir?: string
@@ -202,6 +203,7 @@ export async function recordBackfillSubmission(input: {
     target: input.plan.target,
     jobId: input.jobId,
     submittedAt: nowIso(),
+    submissionId: input.submissionId,
   }
   await writeJson(submissionPath, submission)
   return submissionPath
@@ -219,6 +221,7 @@ interface SubmissionIntent {
   submissionId: string
   replacesJobId?: string
   startedAt: string
+  serviceSlug?: string
 }
 
 export function submissionIntentPath(input: SubmissionIntentLocation): string {
@@ -229,14 +232,40 @@ export function submissionIntentPath(input: SubmissionIntentLocation): string {
 export async function recordSubmissionIntent(input: SubmissionIntentLocation & {
   submissionId: string
   replacesJobId?: string
+  serviceSlug?: string
 }): Promise<void> {
-  const { planId, submissionId, replacesJobId } = input
-  const intent: SubmissionIntent = { planId, submissionId, replacesJobId, startedAt: nowIso() }
+  const { planId, submissionId, replacesJobId, serviceSlug } = input
+  const intent: SubmissionIntent = { planId, submissionId, replacesJobId, startedAt: nowIso(), serviceSlug }
   await writeJson(submissionIntentPath(input), intent)
 }
 
 export async function readSubmissionIntent(input: SubmissionIntentLocation): Promise<SubmissionIntent | null> {
-  return readJsonMaybe<SubmissionIntent>(submissionIntentPath(input))
+  let raw: string
+  try {
+    raw = await readFile(submissionIntentPath(input), 'utf8')
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return null
+    throw error
+  }
+  const value: unknown = JSON.parse(raw)
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Invalid submission record')
+  }
+  const planId = 'planId' in value ? value.planId : undefined
+  const submissionId = 'submissionId' in value ? value.submissionId : undefined
+  const startedAt = 'startedAt' in value ? value.startedAt : undefined
+  const replacesJobId = 'replacesJobId' in value ? value.replacesJobId : undefined
+  const serviceSlug = 'serviceSlug' in value ? value.serviceSlug : undefined
+  if (
+    typeof planId !== 'string' ||
+    typeof submissionId !== 'string' ||
+    typeof startedAt !== 'string' ||
+    (replacesJobId !== undefined && typeof replacesJobId !== 'string') ||
+    (serviceSlug !== undefined && typeof serviceSlug !== 'string')
+  ) {
+    throw new Error('Invalid submission record')
+  }
+  return { planId, submissionId, replacesJobId, startedAt, serviceSlug }
 }
 
 export async function clearSubmissionIntent(input: SubmissionIntentLocation): Promise<void> {

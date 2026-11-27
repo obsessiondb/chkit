@@ -174,6 +174,7 @@ export interface SubmitContext {
 export async function handleSubmit(
 	context: SubmitContext,
 ): Promise<{ handled: true; exitCode: number }> {
+	let lockWarning = ''
 	try {
 		const jobs = createJobsClient(context.credentials)
 		const prepared = context.flags['--plan-id'] !== undefined
@@ -181,14 +182,20 @@ export async function handleSubmit(
 			: await prepareNewPlan(context)
 		const planId = 'plan' in prepared ? prepared.plan.planId : prepared.planId
 		const stateDir = computeBackfillStateDir(context.config, context.configPath, prepared.stateDir)
-		const lock = await acquireRunLock(runLockPath(backfillPaths(stateDir, planId).runsDir, planId), planId)
+		const lockPath = runLockPath(backfillPaths(stateDir, planId).runsDir, planId)
+		const lock = await acquireRunLock(lockPath, planId)
 		let submission: PreparedSubmission
 		let sent: { jobId: string; taskCount: number }
 		try {
 			submission = 'plan' in prepared ? prepared : await prepareResubmit(context, jobs, prepared)
 			sent = await sendPreparedPlan(context, jobs, submission)
 		} finally {
-			await lock.release()
+			try {
+				await lock.release()
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error)
+				lockWarning = `The lock ${lockPath} could not be removed (${message}): delete it once no run, resume, cancel or submit of this plan runs.`
+			}
 		}
 		const { plan, replacedJob, skippedChunks } = submission
 		const { jobId, taskCount } = sent
@@ -219,13 +226,15 @@ export async function handleSubmit(
 					`Track progress: ${url}`,
 			)
 		}
+		if (lockWarning) process.stderr.write(`${lockWarning}\n`)
 		return { handled: true, exitCode: 0 }
 	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error)
+		const message = lockWarning ? `${detail} ${lockWarning}` : detail
 		if (isSessionExpiredError(error)) {
-			context.print(error instanceof Error ? error.message : String(error))
+			context.print(message)
 			return { handled: true, exitCode: 1 }
 		}
-		const message = error instanceof Error ? error.message : String(error)
 		if (context.jsonMode) {
 			context.print({ ok: false, command: 'backfill submit', error: message })
 		} else {
@@ -245,7 +254,7 @@ async function sendPreparedPlan(
 	const tasks = buildSubmitTasks(plan, insertSettings)
 	const intent = { planId: plan.planId, configPath: context.configPath, config: context.config, stateDir }
 	const submissionId = randomBytes(8).toString('hex')
-	await recordSubmissionIntent({ ...intent, submissionId, replacesJobId: replacedJob?.id })
+	await recordSubmissionIntent({ ...intent, submissionId, replacesJobId: replacedJob?.id, serviceSlug: context.serviceSlug })
 	const { jobId } = await jobs.submit({
 		serviceSlug: context.serviceSlug,
 		type: 'backfill',
@@ -268,6 +277,7 @@ async function sendPreparedPlan(
 	await recordBackfillSubmission({
 		plan,
 		jobId,
+		submissionId,
 		configPath: context.configPath,
 		config: context.config,
 		stateDir,

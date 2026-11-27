@@ -290,6 +290,7 @@ def record_backfill_submission(
     config_path: str | Path,
     config: _HasMetaDir,
     state_dir: str | None = None,
+    submission_id: str | None = None,
 ) -> str:
     """Record that a plan was handed to a managed job backend, so ``check``
     does not wait for a local run that will never be written.
@@ -299,7 +300,11 @@ def record_backfill_submission(
     write_json(
         submission_path,
         BackfillSubmissionState(
-            plan_id=plan_id, target=target, job_id=job_id, submitted_at=now_iso()
+            plan_id=plan_id,
+            target=target,
+            job_id=job_id,
+            submitted_at=now_iso(),
+            submission_id=submission_id,
         ),
     )
     return submission_path
@@ -310,8 +315,9 @@ class SubmissionIntent(BaseModel):
     submission_id: str = Field(alias="submissionId")
     replaces_job_id: str | None = Field(default=None, alias="replacesJobId")
     started_at: str = Field(alias="startedAt")
+    service_slug: str | None = Field(default=None, alias="serviceSlug")
 
-    model_config = ConfigDict(frozen=True, populate_by_name=True)
+    model_config = ConfigDict(frozen=True)
 
 
 def submission_intent_path(
@@ -333,6 +339,7 @@ def record_submission_intent(
     state_dir: str | None = None,
     submission_id: str,
     replaces_job_id: str | None = None,
+    service_slug: str | None = None,
 ) -> None:
     path = submission_intent_path(
         plan_id=plan_id, config_path=config_path, config=config, state_dir=state_dir
@@ -340,10 +347,11 @@ def record_submission_intent(
     write_json(
         path,
         SubmissionIntent(
-            plan_id=plan_id,
-            submission_id=submission_id,
-            replaces_job_id=replaces_job_id,
-            started_at=now_iso(),
+            planId=plan_id,
+            submissionId=submission_id,
+            replacesJobId=replaces_job_id,
+            startedAt=now_iso(),
+            serviceSlug=service_slug,
         ),
     )
 
@@ -358,8 +366,17 @@ def read_submission_intent(
     path = submission_intent_path(
         plan_id=plan_id, config_path=config_path, config=config, state_dir=state_dir
     )
-    raw = _read_json_maybe(path)
-    return SubmissionIntent.model_validate(raw) if raw is not None else None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    if not isinstance(raw, dict) or any(
+        key in raw and not isinstance(raw[key], str)
+        for key in ("replacesJobId", "serviceSlug")
+    ):
+        msg = "Invalid submission record"
+        raise ValueError(msg)
+    return SubmissionIntent.model_validate(raw)
 
 
 def clear_submission_intent(

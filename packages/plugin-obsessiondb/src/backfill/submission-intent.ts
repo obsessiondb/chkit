@@ -20,38 +20,36 @@ export async function reconcileSubmissionIntent(
 	},
 	{ jobs }: { jobs: JobsClient },
 ): Promise<void> {
-	const intent = await readSubmissionIntent(input)
+	const { planId } = input
+	const intent = await readSubmissionIntent(input).catch((error: unknown) => {
+		const path = submissionIntentPath(input)
+		throw new Error(
+			`The submission record ${path} of plan ${planId} cannot be read. Nothing was submitted. ` +
+				`If the console lists no job for plan ${planId} created by the interrupted submit, delete ${path} and re-run.`,
+			{ cause: error },
+		)
+	})
 	if (!intent) return
 	const saved = await readPlanSubmission(input)
-	if (!saved) return
-
-	const { planId, serviceSlug } = input
-	const { jobs: listed, total } = await jobs.list({ serviceSlug })
-	const match = listed.find(
-		(job) => job.metadata?.planId === planId && job.metadata.submissionId === intent.submissionId,
-	)
-	if (match) {
-		await recordBackfillSubmission({ ...input, plan: saved.plan, jobId: match.id })
-	} else {
-		const markerJobId = saved.submission?.jobId
-		let reason: string | undefined
-		if (listed.length !== total) {
-			reason = `it lists ${listed.length} of ${total} jobs`
-		} else if (markerJobId !== undefined) {
-			if (!listed.some((job) => job.id === markerJobId && job.metadata?.planId === planId)) {
-				reason = `it does not list job ${markerJobId} of this plan`
-			}
-		} else if (!listed.some((job) => typeof job.metadata?.planId === 'string')) {
-			reason = 'it returns no plan metadata'
-		}
-		if (reason) {
-			const { startedAt } = intent
-			throw new Error(
-				`An earlier submit of plan ${planId} (started ${startedAt}) may have created a job, ` +
-					`and the job list of service ${serviceSlug} cannot show whether it did (${reason}). Nothing was submitted. ` +
-					`If the console lists no job for plan ${planId} created since ${startedAt}, delete ${submissionIntentPath(input)} and re-run.`,
-			)
-		}
+	const { submissionId, startedAt } = intent
+	if (saved?.submission?.submissionId === submissionId) {
+		await clearSubmissionIntent(input)
+		return
 	}
+
+	const serviceSlug = intent.serviceSlug ?? input.serviceSlug
+	const { jobs: listed } = await jobs.list({ serviceSlug })
+	const match = listed.find(
+		(job) => job.metadata?.planId === planId && job.metadata.submissionId === submissionId,
+	)
+	if (!match) {
+		throw new Error(
+			`An earlier submit of plan ${planId} (started ${startedAt}) may have created a job on service ${serviceSlug}, ` +
+				'and its job list shows none from that submit. Nothing was submitted. A request that timed out can still create its job: ' +
+				`once the console shows no job for plan ${planId} created since ${startedAt}, delete ${submissionIntentPath(input)} and re-run.`,
+		)
+	}
+	if (!saved) return
+	await recordBackfillSubmission({ ...input, plan: saved.plan, jobId: match.id, submissionId })
 	await clearSubmissionIntent(input)
 }

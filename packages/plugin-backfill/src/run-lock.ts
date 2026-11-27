@@ -71,7 +71,7 @@ export async function acquireRunLock(lockPath: string, planId: string): Promise<
   } catch (error) {
     const removal = await release().then(
       () => 'was removed',
-      (removeError: unknown) => `could not be removed (${errorMessage(removeError)}): delete it once no run, resume or cancel of this plan runs`,
+      (removeError: unknown) => `could not be removed (${errorMessage(removeError)}): delete it once no run, resume, cancel or submit of this plan runs`,
     )
     throw new Error(`Backfill plan ${planId}: could not take its lock (${errorMessage(error)}); the lock file ${lockPath} ${removal}.`, { cause: error })
   }
@@ -114,7 +114,7 @@ export async function withRunLock<T>(
     const release = async () => {
       released = await lock.release().then(
         () => 'released',
-        (error: unknown) => `could not be removed (${errorMessage(error)}): delete ${lockPath} once no run, resume or cancel of this plan runs`,
+        (error: unknown) => `could not be removed (${errorMessage(error)}): delete ${lockPath} once no run, resume, cancel or submit of this plan runs`,
       )
     }
     let result: T

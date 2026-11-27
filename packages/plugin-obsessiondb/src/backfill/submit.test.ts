@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -740,12 +740,15 @@ describe('handleSubmit --plan-id', () => {
 			submissionId: backend.submitted[0]?.metadata.submissionId,
 			replacesJobId: 'job-1',
 			startedAt: expect.stringMatching(/^\d{4}-.*Z$/),
+			serviceSlug: 'svc',
 		})
 
 		const running = await submit()
 		expect(running.result.exitCode).toBe(1)
 		expect(running.printed[0]).toMatchObject({ error: expect.stringContaining(`Job job-2 for plan ${planId} is running`) })
-		expect(JSON.parse(await readFile(submissionPath, 'utf8')).jobId).toBe('job-2')
+		expect(JSON.parse(await readFile(submissionPath, 'utf8'))).toMatchObject({
+			jobId: 'job-2', submissionId: backend.submitted[0]?.metadata.submissionId,
+		})
 		expect(backend.submitted).toHaveLength(1)
 		expect(existsSync(path)).toBe(false)
 	})
@@ -755,16 +758,20 @@ describe('handleSubmit --plan-id', () => {
 		const backend = fakeJobsBackend(planId)
 		backend.beforeSend = async () => { throw new Error('send failed') }
 		const submit = () => resubmit(configPath, { '--plan-id': planId })
+		const path = submissionPath.replace(/\.json$/, '.pending.json')
 
 		expect((await submit()).result.exitCode).toBe(1)
 		expect(backend.submitted).toEqual([])
 		backend.beforeSend = undefined
+		expect((await submit()).result.exitCode).toBe(1)
+		expect(backend.submitted).toEqual([])
+		await unlink(path)
 		const retry = await submit()
 		expect(retry.result.exitCode).toBe(0)
 		expect(retry.printed[0]).toMatchObject({ replacedJobId: 'job-1' })
 		expect(backend.calls).toEqual(['jobs/get', 'jobs/submit', 'jobs/list', 'jobs/get', 'jobs/submit'])
 		expect(backend.submitted).toHaveLength(1)
-		expect(existsSync(submissionPath.replace(/\.json$/, '.pending.json'))).toBe(false)
+		expect(existsSync(path)).toBe(false)
 	})
 
 	test('adopts the job from a first submit whose marker write failed', async () => {
@@ -784,35 +791,143 @@ describe('handleSubmit --plan-id', () => {
 		expect(backend.submitted).toHaveLength(1)
 	})
 
-	test.each([
-		['it lists 1 of 2 jobs', true, 2],
-		['it does not list job job-1 of this plan', true, 0],
-		['it returns no plan metadata', false, 0],
-	])('refuses an inconclusive job list (%s) and preserves state', async (reason, hasMarker, total) => {
-		const { configPath, planId, submissionPath } = await setupPlan({ jobId: hasMarker ? 'job-1' : undefined })
-		const backend = fakeJobsBackend(planId, hasMarker)
-		backend.total = total
-		backend.hideJobs = total === 0
-		const marker = hasMarker ? await readFile(submissionPath, 'utf8') : undefined
+	test('refuses an unmatched intent even when the complete list shows the marker job', async () => {
+		const { configPath, planId, submissionPath } = await setupPlan({ jobId: 'job-1' })
+		const backend = fakeJobsBackend(planId)
+		const timedOut = mock(async (_job: FakeJob) => { throw new Error('send timed out') })
+		backend.beforeSend = timedOut
+		const marker = await readFile(submissionPath, 'utf8')
 		const path = submissionPath.replace(/\.json$/, '.pending.json')
-		const startedAt = '2026-06-30T00:00:00.000Z'
-		const intent = JSON.stringify({ planId, submissionId: 'aaaabbbbccccdddd', startedAt, ...(hasMarker ? { replacesJobId: 'job-1' } : {}) })
-		await mkdir(dirname(path), { recursive: true })
+		const submit = () => resubmit(configPath, { '--plan-id': planId })
+
+		expect((await submit()).result.exitCode).toBe(1)
+		expect(backend.submitted).toEqual([])
+		const intent = await readFile(path, 'utf8')
+		const { startedAt } = JSON.parse(intent)
+		backend.beforeSend = undefined
+		const refused = await submit()
+		expect(refused.result.exitCode).toBe(1)
+		expect(refused.printed[0]).toEqual({
+			ok: false,
+			command: 'backfill submit',
+			error: `An earlier submit of plan ${planId} (started ${startedAt}) may have created a job on service svc, ` +
+				'and its job list shows none from that submit. Nothing was submitted. A request that timed out can still create its job: ' +
+				`once the console shows no job for plan ${planId} created since ${startedAt}, delete ${path} and re-run.`,
+		})
+		expect(backend.calls).toEqual(['jobs/get', 'jobs/submit', 'jobs/list'])
+		expect(await readFile(path, 'utf8')).toBe(intent)
+		expect(await readFile(submissionPath, 'utf8')).toBe(marker)
+		const delayed = timedOut.mock.calls[0]?.[0]
+		if (!delayed) throw new Error('Missing timed-out job')
+		expect(backend.commit(delayed)).toBe('job-2')
+		expect((await submit()).printed[0]).toMatchObject({ error: expect.stringContaining('job-2') })
+		expect(backend.submitted).toEqual([delayed])
+	})
+
+	test('does not match a listed job whose metadata lacks submissionId', async () => {
+		const { configPath, planId, submissionPath } = await setupPlan({ jobId: 'job-1' })
+		const backend = fakeJobsBackend(planId)
+		backend.jobs['job-2'] = { taskIds: ['c1', 'c2'], metadata: { planId }, status: 'running', doneTaskIds: [] }
+		const path = submissionPath.replace(/\.json$/, '.pending.json')
+		const intent = JSON.stringify({ planId, submissionId: 'aaaabbbbccccdddd', startedAt: '2026-06-30T00:00:00.000Z' })
 		await writeFile(path, intent)
+
+		const refused = await resubmit(configPath, { '--plan-id': planId })
+		expect(refused.result.exitCode).toBe(1)
+		expect(refused.printed[0]).toMatchObject({ error: expect.stringContaining('its job list shows none from that submit') })
+		expect(backend.calls).toEqual(['jobs/list'])
+		expect(await readFile(path, 'utf8')).toBe(intent)
+		expect(JSON.parse(await readFile(submissionPath, 'utf8')).jobId).toBe('job-1')
+	})
+
+	test('refuses an unreadable intent without listing jobs', async () => {
+		const { configPath, planId, submissionPath } = await setupPlan({ jobId: 'job-1' })
+		const backend = fakeJobsBackend(planId)
+		const path = submissionPath.replace(/\.json$/, '.pending.json')
+		await writeFile(path, '{}')
 
 		const refused = await resubmit(configPath, { '--plan-id': planId })
 		expect(refused.result.exitCode).toBe(1)
 		expect(refused.printed[0]).toEqual({
 			ok: false,
 			command: 'backfill submit',
-			error: `An earlier submit of plan ${planId} (started ${startedAt}) may have created a job, ` +
-				`and the job list of service svc cannot show whether it did (${reason}). Nothing was submitted. ` +
-				`If the console lists no job for plan ${planId} created since ${startedAt}, delete ${path} and re-run.`,
+			error: `The submission record ${path} of plan ${planId} cannot be read. Nothing was submitted. ` +
+				`If the console lists no job for plan ${planId} created by the interrupted submit, delete ${path} and re-run.`,
 		})
-		expect(backend.calls).toEqual(['jobs/list'])
-		expect(await readFile(path, 'utf8')).toBe(intent)
-		expect(existsSync(submissionPath)).toBe(hasMarker)
-		if (hasMarker) expect(await readFile(submissionPath, 'utf8')).toBe(marker)
+		expect(backend.calls).toEqual([])
+		expect(await readFile(path, 'utf8')).toBe('{}')
+		expect(JSON.parse(await readFile(submissionPath, 'utf8')).jobId).toBe('job-1')
+	})
+
+	test('lists jobs on the service the intent was sent to', async () => {
+		const { configPath, planId, submissionPath } = await setupPlan({ jobId: 'job-1' })
+		const backend = fakeJobsBackend(planId)
+		const submissionId = 'aaaabbbbccccdddd'
+		backend.jobs['job-2'] = { taskIds: ['c1', 'c2'], metadata: { planId, submissionId }, status: 'running', doneTaskIds: [] }
+		const path = submissionPath.replace(/\.json$/, '.pending.json')
+		await writeFile(path, JSON.stringify({ planId, submissionId, startedAt: '2026-06-30T00:00:00.000Z', serviceSlug: 'other' }))
+
+		const running = await resubmit(configPath, { '--plan-id': planId })
+		expect(running.result.exitCode).toBe(1)
+		expect(running.printed[0]).toMatchObject({ error: expect.stringContaining(`Job job-2 for plan ${planId} is running`) })
+		expect(backend.listedServices).toEqual(['other'])
+		expect(backend.calls).toEqual(['jobs/list', 'jobs/get'])
+		expect(JSON.parse(await readFile(submissionPath, 'utf8'))).toMatchObject({ jobId: 'job-2', submissionId })
+		expect(existsSync(path)).toBe(false)
+	})
+
+	test('settles locally after the marker write when intent cleanup fails', async () => {
+		const { configPath, planId, submissionPath } = await setupPlan({ jobId: 'job-1' })
+		const backend = fakeJobsBackend(planId)
+		spyOn(backfillSdk, 'clearSubmissionIntent').mockRejectedValueOnce(new Error('intent cleanup failed'))
+		const path = submissionPath.replace(/\.json$/, '.pending.json')
+		const submit = () => resubmit(configPath, { '--plan-id': planId })
+
+		const crashed = await submit()
+		expect(crashed.result.exitCode).toBe(1)
+		expect(crashed.printed[0]).toMatchObject({ error: 'intent cleanup failed' })
+		const { submissionId } = JSON.parse(await readFile(path, 'utf8'))
+		expect(JSON.parse(await readFile(submissionPath, 'utf8'))).toMatchObject({ jobId: 'job-2', submissionId })
+
+		const running = await submit()
+		expect(running.result.exitCode).toBe(1)
+		expect(running.printed[0]).toMatchObject({ error: expect.stringContaining(`Job job-2 for plan ${planId} is running`) })
+		expect(backend.calls).toEqual(['jobs/get', 'jobs/submit', 'jobs/get'])
+		expect(backend.submitted).toHaveLength(1)
+		expect(existsSync(path)).toBe(false)
+	})
+
+	test.each(['fails', 'succeeds'])('preserves the outcome when submit %s and lock release fails', async (outcome) => {
+		const { configPath, planId, submissionPath } = await setupPlan({ jobId: 'job-1' })
+		const backend = fakeJobsBackend(planId)
+		if (outcome === 'fails') backend.beforeSend = async () => { throw new Error('send failed') }
+		const lockPath = join(dirname(dirname(submissionPath)), 'runs', `${planId}.lock`)
+		const acquire = backfillSdk.acquireRunLock
+		spyOn(backfillSdk, 'acquireRunLock').mockImplementationOnce(async (path, id) => {
+			await acquire(path, id)
+			return { release: async () => { throw new Error('release failed') } }
+		})
+		const stderr = spyOn(process.stderr, 'write').mockReturnValue(true)
+		const warning = `The lock ${lockPath} could not be removed (release failed): delete it once no run, resume, cancel or submit of this plan runs.`
+
+		const { result, printed } = await resubmit(configPath, { '--plan-id': planId })
+		expect(existsSync(lockPath)).toBe(true)
+		if (outcome === 'fails') {
+			expect(result.exitCode).toBe(1)
+			expect(printed).toEqual([{
+				ok: false,
+				command: 'backfill submit',
+				error: `send failed The job may have been created; \`chkit plugin backfill submit --plan-id ${planId}\` finds it instead of sending the chunks again. ${warning}`,
+			}])
+			expect(stderr).not.toHaveBeenCalled()
+		} else {
+			expect(result.exitCode).toBe(0)
+			expect(printed).toEqual([{
+				ok: true, command: 'backfill submit', jobId: 'job-2', target: 'app.events', taskCount: 2,
+				url: 'https://api.example.com/svc/jobs/job-2', planId, replacedJobId: 'job-1', skippedChunks: 0,
+			}])
+			expect(stderr).toHaveBeenCalledWith(`${warning}\n`)
+		}
 	})
 
 	test('clears the intent on success and sends a 16-hex submission id', async () => {
@@ -842,11 +957,16 @@ function fakeJobsBackend(planId: string, hasMarker = true) {
 	const backend = {
 		jobs,
 		calls: [] as string[],
+		listedServices: [] as string[],
 		submitted: [] as FakeJob[],
-		beforeSend: undefined as (() => Promise<void>) | undefined,
+		beforeSend: undefined as ((job: FakeJob) => Promise<void>) | undefined,
 		afterSend: undefined as (() => void) | undefined,
-		total: undefined as number | undefined,
-		hideJobs: false,
+		commit(job: FakeJob) {
+			const jobId = `job-${Object.keys(jobs).length + 1}`
+			jobs[jobId] = job
+			backend.submitted.push(job)
+			return jobId
+		},
 	}
 	function detail(id: string, job: FakeJob) {
 		return {
@@ -870,21 +990,19 @@ function fakeJobsBackend(planId: string, hasMarker = true) {
 				return orpcResponse(detail(json.jobId, job))
 			}
 			case 'jobs/list': {
-				expect(json).toEqual({ serviceSlug: 'svc' })
-				const listed = backend.hideJobs ? [] : Object.entries(jobs).map(([id, job]) => detail(id, job))
-				return orpcResponse({ jobs: listed, total: backend.total ?? listed.length })
+				backend.listedServices.push(json.serviceSlug)
+				const listed = Object.entries(jobs).map(([id, job]) => detail(id, job))
+				return orpcResponse({ jobs: listed, total: listed.length })
 			}
 			case 'jobs/submit': {
-				await backend.beforeSend?.()
 				const job: FakeJob = {
 					taskIds: json.tasks.map((task: { id: string }) => task.id),
 					metadata: json.metadata,
 					status: 'running',
 					doneTaskIds: [],
 				}
-				const jobId = `job-${Object.keys(jobs).length + 1}`
-				jobs[jobId] = job
-				backend.submitted.push(job)
+				await backend.beforeSend?.(job)
+				const jobId = backend.commit(job)
 				backend.afterSend?.()
 				return orpcResponse({ jobId })
 			}

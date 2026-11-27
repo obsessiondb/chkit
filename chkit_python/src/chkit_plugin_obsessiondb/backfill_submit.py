@@ -229,6 +229,7 @@ class SubmitContext:
 
 def handle_submit(context: SubmitContext) -> int:
     """Run the managed submit flow; returns the exit code (always handled)."""
+    lock_warning = ""
     try:
         plugin_options = resolve_backfill_plugin_options(
             getattr(context.config, "plugins", None)
@@ -245,59 +246,33 @@ def handle_submit(context: SubmitContext) -> int:
         base = compute_backfill_state_dir(context.config, context.config_path, state_dir)
         lock_path = run_lock_path(backfill_paths(base, plan_id).runs_dir, plan_id)
         lock = acquire_run_lock(lock_path, plan_id)
+        release_lock = True
         try:
             if isinstance(prepared, ParsedResubmitInput):
                 prepared = _prepare_resubmit(context, prepared, state_dir)
             job_id, task_count = _send_prepared_plan(context, prepared, plugin_options)
+        except BaseException as error:
+            # Like TS on process exit, keep the lock if a send may still be in flight.
+            release_lock = isinstance(error, Exception)
+            raise
         finally:
-            lock.release()
-        plan = prepared.plan
-        replaced = prepared.replaced_job
-        url = build_job_console_url(
-            context.credentials.base_url, context.service_slug, job_id
-        )
-        task_label = f"{task_count} task{'' if task_count == 1 else 's'}"
-        if context.json_mode:
-            payload: dict[str, Any] = {
-                "ok": True,
-                "command": "backfill submit",
-                "jobId": job_id,
-                "target": plan.target,
-                "taskCount": task_count,
-                "url": url,
-            }
-            if replaced is not None:
-                payload["planId"] = plan.plan_id
-                payload["replacedJobId"] = replaced.id
-                payload["skippedChunks"] = prepared.skipped_chunks
-            context.print(payload)
-        elif replaced is not None:
-            skipped = prepared.skipped_chunks
-            skipped_line = (
-                f"Skipped {skipped} chunk{'' if skipped == 1 else 's'} that already"
-                " finished.\n"
-                if skipped
-                else ""
-            )
-            context.print(
-                f"Re-submitted backfill plan {plan.plan_id} as job {job_id} for "
-                f"{plan.target} ({task_label}), replacing {replaced.status} job "
-                f"{replaced.id}.\n"
-                f"{skipped_line}"
-                f"Track progress: {url}"
-            )
-        else:
-            context.print(
-                f"Submitted backfill job {job_id} for {plan.target} "
-                f"({task_label}).\n"
-                f"Track progress: {url}"
-            )
+            if release_lock:
+                try:
+                    lock.release()
+                except Exception as error:
+                    lock_warning = (
+                        f"The lock {lock_path} could not be removed ({error}): delete it "
+                        "once no run, resume, cancel or submit of this plan runs."
+                    )
+        _print_submit_success(context, prepared, job_id, task_count)
+        if lock_warning:
+            print(lock_warning, file=sys.stderr)
         return 0
     except Exception as error:
+        message = f"{error} {lock_warning}" if lock_warning else str(error)
         if is_session_expired_error(error):
-            context.print(str(error))
+            context.print(message)
             return 1
-        message = str(error)
         if context.json_mode:
             context.print(
                 {"ok": False, "command": "backfill submit", "error": message}
@@ -305,6 +280,52 @@ def handle_submit(context: SubmitContext) -> int:
         else:
             context.print(f"Backfill submit failed: {message}")
         return 1
+
+
+def _print_submit_success(
+    context: SubmitContext, prepared: _PreparedSubmission, job_id: str, task_count: int
+) -> None:
+    plan = prepared.plan
+    replaced = prepared.replaced_job
+    url = build_job_console_url(
+        context.credentials.base_url, context.service_slug, job_id
+    )
+    task_label = f"{task_count} task{'' if task_count == 1 else 's'}"
+    if context.json_mode:
+        payload: dict[str, Any] = {
+            "ok": True,
+            "command": "backfill submit",
+            "jobId": job_id,
+            "target": plan.target,
+            "taskCount": task_count,
+            "url": url,
+        }
+        if replaced is not None:
+            payload["planId"] = plan.plan_id
+            payload["replacedJobId"] = replaced.id
+            payload["skippedChunks"] = prepared.skipped_chunks
+        context.print(payload)
+    elif replaced is not None:
+        skipped = prepared.skipped_chunks
+        skipped_line = (
+            f"Skipped {skipped} chunk{'' if skipped == 1 else 's'} that already"
+            " finished.\n"
+            if skipped
+            else ""
+        )
+        context.print(
+            f"Re-submitted backfill plan {plan.plan_id} as job {job_id} for "
+            f"{plan.target} ({task_label}), replacing {replaced.status} job "
+            f"{replaced.id}.\n"
+            f"{skipped_line}"
+            f"Track progress: {url}"
+        )
+    else:
+        context.print(
+            f"Submitted backfill job {job_id} for {plan.target} "
+            f"({task_label}).\n"
+            f"Track progress: {url}"
+        )
 
 
 def _send_prepared_plan(
@@ -327,6 +348,7 @@ def _send_prepared_plan(
         **intent,
         submission_id=submission_id,
         replaces_job_id=replaced.id if replaced is not None else None,
+        service_slug=context.service_slug,
     )
     try:
         job_id = jobs_submit(
@@ -355,7 +377,9 @@ def _send_prepared_plan(
     # The job runs server-side and never writes a local run, so mark the
     # plan as submitted; otherwise `chkit check` counts it as pending forever.
     # A re-submission replaces the marker of the failed or cancelled job.
-    record_backfill_submission(**intent, target=plan.target, job_id=job_id)
+    record_backfill_submission(
+        **intent, target=plan.target, job_id=job_id, submission_id=submission_id
+    )
     clear_submission_intent(**intent)
 
     return job_id, len(tasks)

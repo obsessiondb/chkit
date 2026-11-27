@@ -165,7 +165,7 @@ The plan ID is in the `obsessiondb_backfill_job_failed` finding. Only a job that
 
 A managed submit holds the plan's lock and blocks another submit, run, resume or cancel of that plan until it exits. After a crash, confirm the process has exited and delete the lock file named in the error.
 
-After a crash or failed send, `submit --plan-id` uses the intent recorded before sending to follow the job it finds in the service's job list, or refuses if the list is inconclusive and names the intent file to delete once the console confirms no job was created.
+After a crash or failed send, `submit --plan-id` follows the job the interrupted submit created. If the service's job list shows no job from that submit, the command refuses and names the intent file to delete once the console confirms no job was created. A timed-out request can still create its job.
 
 ## Related
 

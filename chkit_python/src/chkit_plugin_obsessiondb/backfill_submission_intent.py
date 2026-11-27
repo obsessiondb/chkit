@@ -31,48 +31,49 @@ def reconcile_submission_intent(
         "config": config,
         "state_dir": state_dir,
     }
-    intent = read_submission_intent(**location)
+    try:
+        intent = read_submission_intent(**location)
+    except (OSError, ValueError) as error:
+        path = submission_intent_path(**location)
+        msg = (
+            f"The submission record {path} of plan {plan_id} cannot be read. "
+            f"Nothing was submitted. If the console lists no job for plan {plan_id} "
+            f"created by the interrupted submit, delete {path} and re-run."
+        )
+        raise ValueError(msg) from error
     if intent is None:
         return
     saved = read_plan_submission(**location)
-    if saved is None:
+    if saved and saved.submission and saved.submission.submission_id == intent.submission_id:
+        clear_submission_intent(**location)
         return
 
+    if intent.service_slug is not None:
+        service_slug = intent.service_slug
     response = jobs_list(credentials, service_slug=service_slug)
-    listed = response.jobs
     match = next(
         (
-            job for job in listed
+            job for job in response.jobs
             if job.metadata is not None
             and job.metadata.get("planId") == plan_id
             and job.metadata.get("submissionId") == intent.submission_id
         ),
         None,
     )
-    if match is not None:
-        record_backfill_submission(**location, target=saved.plan.target, job_id=match.id)
-    else:
-        reason = None
-        if len(listed) != response.total:
-            reason = f"it lists {len(listed)} of {response.total} jobs"
-        elif saved.submission is not None:
-            marker_job_id = saved.submission.job_id
-            if not any(
-                job.id == marker_job_id and (job.metadata or {}).get("planId") == plan_id
-                for job in listed
-            ):
-                reason = f"it does not list job {marker_job_id} of this plan"
-        elif not any(isinstance((job.metadata or {}).get("planId"), str) for job in listed):
-            reason = "it returns no plan metadata"
-        if reason is not None:
-            started_at = intent.started_at
-            path = submission_intent_path(**location)
-            msg = (
-                f"An earlier submit of plan {plan_id} (started {started_at}) "
-                f"may have created a job, and the job list of service {service_slug} "
-                f"cannot show whether it did ({reason}). "
-                f"Nothing was submitted. If the console lists no job for plan {plan_id} "
-                f"created since {started_at}, delete {path} and re-run."
-            )
-            raise ValueError(msg)
+    if match is None:
+        started_at = intent.started_at
+        path = submission_intent_path(**location)
+        msg = (
+            f"An earlier submit of plan {plan_id} (started {started_at}) "
+            f"may have created a job on service {service_slug}, and its job list shows none "
+            "from that submit. Nothing was submitted. A request that timed out can still "
+            f"create its job: once the console shows no job for plan {plan_id} created since "
+            f"{started_at}, delete {path} and re-run."
+        )
+        raise ValueError(msg)
+    if saved is None:
+        return
+    record_backfill_submission(
+        **location, target=saved.plan.target, job_id=match.id, submission_id=intent.submission_id
+    )
     clear_submission_intent(**location)
