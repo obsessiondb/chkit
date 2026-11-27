@@ -148,17 +148,47 @@ def _ensure_active_organization(
     return name
 
 
-def run_signup(  # noqa: PLR0912
+@dataclass(frozen=True, slots=True)
+class SignupOtpSent:
+    """Only sent the code: the caller re-runs with ``--code`` to verify."""
+
+
+@dataclass(frozen=True, slots=True)
+class SignupVerified:
+    """Verified the code; ``credentials`` are the ones this run saved."""
+
+    credentials: Credentials
+
+
+@dataclass(frozen=True, slots=True)
+class SignupFailed:
+    """Did not complete; the reason has been printed."""
+
+
+# What a signup run did — mirrors TS ``SignupOutcome``.
+SignupOutcome = SignupOtpSent | SignupVerified | SignupFailed
+
+
+def run_signup(
     base_url: str,
     print_fn: Callable[[object], None],
     options: SignupOptions | None = None,
 ) -> int:
+    return 1 if isinstance(signup(base_url, print_fn, options), SignupFailed) else 0
+
+
+def signup(  # noqa: PLR0912
+    base_url: str,
+    print_fn: Callable[[object], None],
+    options: SignupOptions | None = None,
+) -> SignupOutcome:
+    """``run_signup`` returning its outcome, so onboarding claims only with verified credentials."""
     if options is None:
         options = SignupOptions()
     json_mode = options.json_mode
     email = options.email or _prompt_email(print_fn, json_mode=json_mode)
     if email is None:
-        return 1
+        return SignupFailed()
 
     # A supplied code means this is the verify step of a prior request — re-sending
     # would invalidate the code the caller is about to submit.
@@ -170,7 +200,7 @@ def run_signup(  # noqa: PLR0912
                 print_fn(error_envelope("obsessiondb signup", "otp_rate_limited", str(error)))
             else:
                 print_fn(str(error))
-            return 1
+            return SignupFailed()
 
         if not json_mode:
             print_fn(f"We sent a 6-digit code to {email}.")
@@ -181,14 +211,15 @@ def run_signup(  # noqa: PLR0912
             else:
                 for line in verify_step_hint(email):
                     print_fn(line)
-            return 0
+            return SignupOtpSent()
 
     code = options.code or _prompt_code(print_fn, json_mode=json_mode)
     if code is None:
-        return 1
+        return SignupFailed()
 
     result = verify_otp(base_url, email, code)
-    save_credentials(Credentials(access_token=result.token, base_url=base_url))
+    credentials = Credentials(access_token=result.token, base_url=base_url)
+    save_credentials(credentials)
 
     created = _ensure_active_organization(
         base_url, result.token, email=email, org_name=options.org_name
@@ -201,4 +232,4 @@ def run_signup(  # noqa: PLR0912
     else:
         print_fn(f"Welcome back, {result.user.email}.")
 
-    return 0
+    return SignupVerified(credentials)
