@@ -46,9 +46,10 @@ function parseOperationLine(
   beforeRetry: string | null,
 ): MigrationOperationSummary | null {
   // A key holds object names, which may contain spaces (they are backtick-quoted
-  // in the SQL), so it runs up to the trailing risk= (and mode=) fields.
+  // in the SQL), so it runs up to the trailing risk= (and mode=) fields. It
+  // may hold any character, as in chkit-py, also a line separator (#888).
   const match = summary.match(
-    /^([a-z_]+)\s+key=(.+?)\s+risk=([a-z_]+)(?:\s+mode=([a-z_]+))?$/,
+    /^([a-z_]+)\s+key=([\s\S]+?)\s+risk=([a-z_]+)(?:\s+mode=([a-z_]+))?$/,
   )
   if (!match) return null
   const rawMode = match[4]
@@ -342,6 +343,8 @@ export interface ScannedDestructiveStatement {
   statement: string
 }
 
+const PLANNER_RISKS = new Set(['safe', 'caution', 'danger'])
+
 // Only the last leading operation line can mark the statement for the gate.
 function ownMarker({
   sql,
@@ -352,7 +355,9 @@ function ownMarker({
     if (line.startsWith('-- operation:')) {
       const first = tokenizeSQL(sql).find((token) => token.kind !== 'whitespace')
       if (first?.kind === 'line_comment' || first?.kind === 'block_comment') return null
-      return parseOperationLine(line.replace(/^-- operation:\s*/, ''), null)
+      const marker = parseOperationLine(line.replace(/^-- operation:\s*/, ''), null)
+      // A risk the planner never writes is not trusted: the SQL is scanned.
+      return marker !== null && PLANNER_RISKS.has(marker.risk) ? marker : null
     }
     // Codegen emits only these metadata lines between a marker and its SQL.
     if (!line.startsWith(BEFORE_RETRY_PREFIX) && !line.startsWith('-- Warning:')) return null

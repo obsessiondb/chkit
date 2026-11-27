@@ -196,6 +196,30 @@
           "warningCode": "drop_table_data_loss"
         }
       ]
+    },
+    {
+      "name": "a risk the planner never writes does not hide a DROP",
+      "sql": "-- operation: drop_table key=table:default.a risk=dangerous\nDROP TABLE default.a;",
+      "operations": [
+        {
+          "type": "drop_table",
+          "key": "default.a",
+          "summary": "unmarked destructive SQL: DROP TABLE default.a;",
+          "warningCode": "drop_table_data_loss"
+        }
+      ]
+    },
+    {
+      "name": "a key with a line separator parses the same in both ports",
+      "sql": "-- operation: drop_table key=table:default.a\u2028b risk=danger\nDROP TABLE default.`a\u2028b`;",
+      "operations": [
+        {
+          "type": "drop_table",
+          "key": "table:default.a\u2028b",
+          "summary": "drop_table key=table:default.a\u2028b risk=danger",
+          "warningCode": "drop_table_data_loss"
+        }
+      ]
     }
   ]
 }

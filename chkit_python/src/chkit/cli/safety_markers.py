@@ -66,7 +66,7 @@ _BEFORE_RETRY_PREFIX = "-- before-retry:"
 
 # JavaScript's ``\s`` and trim, so both ports read the same markers (#831).
 _OPERATION_LINE = re.compile(
-    js_regex(r"^([a-z_]+)\s+key=(.+?)\s+risk=([a-z_]+)(?:\s+mode=([a-z_]+))?$")
+    js_regex(r"^([a-z_]+)\s+key=([\s\S]+?)\s+risk=([a-z_]+)(?:\s+mode=([a-z_]+))?$")
 )
 _OPERATION_PREFIX = re.compile(js_regex(r"^-- operation:\s*"))
 _TRAILING_SEMICOLON = re.compile(js_regex(r";\s*$"))
@@ -460,6 +460,9 @@ def _extract_object_key(statement: str) -> str:
     return match.group(1) if match is not None else "unknown"
 
 
+_PLANNER_RISKS = frozenset({"safe", "caution", "danger"})
+
+
 def _own_marker(statement: ExecutableStatementWithComments) -> MigrationOperationSummary | None:
     """Only the last leading operation line can mark the statement for the gate."""
     lines = [line for block in statement.leading_blocks for line in block]
@@ -471,7 +474,9 @@ def _own_marker(statement: ExecutableStatementWithComments) -> MigrationOperatio
             )
             if first is not None and first.kind in {"line_comment", "block_comment"}:
                 return None
-            return _parse_operation_line(_OPERATION_PREFIX.sub("", line), None)
+            marker = _parse_operation_line(_OPERATION_PREFIX.sub("", line), None)
+            # A risk the planner never writes is not trusted: the SQL is scanned.
+            return marker if marker is not None and marker.risk in _PLANNER_RISKS else None
         # Codegen emits only these metadata lines between a marker and its SQL.
         if not line.startswith((_BEFORE_RETRY_PREFIX, "-- Warning:")):
             return None
