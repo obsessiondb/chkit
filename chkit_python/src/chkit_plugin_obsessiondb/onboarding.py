@@ -27,7 +27,9 @@ from typing import Final, Literal
 
 from chkit_plugin_obsessiondb.auth_login import run_login
 from chkit_plugin_obsessiondb.auth_signup import (
+    SignupFailed,
     SignupOptions,
+    SignupOtpSent,
     signup,
 )
 from chkit_plugin_obsessiondb.credentials import resolve_base_url
@@ -286,7 +288,7 @@ def run_onboarding(
         _print_obj,
         SignupOptions(email=email, code=code, org_name=org_name),
     )
-    if outcome.status == "failed":
+    if isinstance(outcome, SignupFailed):
         msg = (
             "Signup did not complete. Run `chkit plugin obsessiondb signup` "
             "to finish, then `chkit plugin obsessiondb service claim`."
@@ -294,7 +296,7 @@ def run_onboarding(
         raise RuntimeError(msg)
     # Two-step pause (code sent, user needs to re-run with --code). Not a failure,
     # just exit cleanly; never fall back to a login on disk, which may be another account.
-    if outcome.credentials is None:
+    if isinstance(outcome, SignupOtpSent):
         return
     claim_code = run_claim(outcome.credentials, config_path, _print_obj)
     if claim_code != 0:

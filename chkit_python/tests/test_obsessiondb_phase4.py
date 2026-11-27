@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from pytest_httpx import HTTPXMock
 
@@ -935,13 +936,21 @@ def test_run_onboarding_claim_verified_uses_the_token_from_this_signup(
         headers={"set-auth-token": "token-b"},
         json={"user": {"id": "b", "email": "b@example.com", "name": "B"}},
     )
-    httpx_mock.add_response(
-        url=f"{BASE}/api/auth/get-session",
-        json={
-            "user": {"id": "b", "email": "b@example.com", "name": "B"},
-            "session": {"activeOrganizationId": "org-b"},
-        },
-    )
+
+    def get_session(_request: httpx.Request) -> httpx.Response:
+        # Runs after signup saved B's login: put A's back on disk, as another login
+        # could, so a claim that rereads the disk instead of using what signup
+        # verified sends token-a.
+        save_credentials(Credentials(access_token="token-a", base_url=BASE))
+        return httpx.Response(
+            200,
+            json={
+                "user": {"id": "b", "email": "b@example.com", "name": "B"},
+                "session": {"activeOrganizationId": "org-b"},
+            },
+        )
+
+    httpx_mock.add_callback(get_session, url=f"{BASE}/api/auth/get-session")
     httpx_mock.add_response(
         url=f"{BASE}/rpc/services/instanceClaimStatus", json={"eligible": True}
     )
@@ -976,11 +985,11 @@ def test_run_onboarding_claim_verified_uses_the_token_from_this_signup(
         code="123456",
     )
 
-    claim_requests = [
-        r for r in httpx_mock.get_requests() if r.url.path.startswith("/rpc/services/")
-    ]
-    assert claim_requests
-    assert all(r.headers["authorization"] == "Bearer token-b" for r in claim_requests)
+    requests = httpx_mock.get_requests()
+    paths = [r.url.path for r in requests]
+    assert "/rpc/services/claimInstance" in paths
+    after_sign_in = requests[paths.index("/api/auth/sign-in/email-otp") + 1 :]
+    assert all(r.headers["authorization"] == "Bearer token-b" for r in after_sign_in)
     selected = load_selected_service(cfg)
     assert selected is not None
     assert selected.service_slug == "dev-b"

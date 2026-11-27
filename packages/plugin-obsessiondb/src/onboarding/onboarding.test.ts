@@ -106,10 +106,15 @@ describe('runOnboarding claim with an earlier login of another account on disk',
     const requests: { path: string; auth: string | null }[] = []
     const json = (body: unknown, headers: Record<string, string> = {}) =>
       new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json', ...headers } })
-    const routes: Record<string, () => Response> = {
+    const routes: Record<string, () => Response | Promise<Response>> = {
       '/api/auth/email-otp/send-verification-otp': () => new Response(null, { status: 200 }),
       '/api/auth/sign-in/email-otp': () => json({ user: { id: 'b', email: 'b@example.com' } }, { 'set-auth-token': 'token-b' }),
-      '/api/auth/get-session': () => json({ session: { activeOrganizationId: 'org-b' } }),
+      // Runs after signup saved B's login: put A's back on disk, as another `chkit obsessiondb login`
+      // could, so a claim that rereads the disk instead of using what signup verified sends token-a.
+      '/api/auth/get-session': async () => {
+        await saveCredentials({ access_token: 'token-a', base_url: 'https://api.test.com' })
+        return json({ session: { activeOrganizationId: 'org-b' } })
+      },
       '/rpc/services/instanceClaimStatus': () => json({ json: { eligible: true } }),
       '/rpc/services/claimInstance': () => json({ json: { outcome: 'claimed', id: 'svc-b', slug: 'dev-b' } }),
       '/rpc/services/get': () => json({ json: runningService }),
@@ -152,9 +157,9 @@ describe('runOnboarding claim with an earlier login of another account on disk',
 
     await runOnboarding({ configPath, connect: 'claim', email: 'b@example.com', code: '123456' })
 
-    const claimRequests = requests.filter((r) => r.path.startsWith('/rpc/services/'))
-    expect(claimRequests.length).toBeGreaterThan(0)
-    expect(claimRequests.every((r) => r.auth === 'Bearer token-b')).toBe(true)
+    expect(requests.map((r) => r.path)).toContain('/rpc/services/claimInstance')
+    const afterSignIn = requests.slice(requests.findIndex((r) => r.path === '/api/auth/sign-in/email-otp') + 1)
+    expect(afterSignIn.every((r) => r.auth === 'Bearer token-b')).toBe(true)
     expect(await loadSelectedService(configPath)).toEqual({ service_slug: 'dev-b', service_name: 'dev-b' })
   })
 })

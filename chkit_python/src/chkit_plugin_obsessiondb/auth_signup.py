@@ -18,7 +18,6 @@ import string
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
 
 from chkit_plugin_obsessiondb.api_client import (
     OtpRateLimitError,
@@ -150,14 +149,24 @@ def _ensure_active_organization(
 
 
 @dataclass(frozen=True, slots=True)
-class SignupOutcome:
-    """What a signup run did — mirrors TS ``SignupOutcome``.
+class SignupOtpSent:
+    """Only sent the code: the caller re-runs with ``--code`` to verify."""
 
-    ``credentials`` is set only for ``verified``: the ones this run saved.
-    """
 
-    status: Literal["otp_sent", "verified", "failed"]
-    credentials: Credentials | None = None
+@dataclass(frozen=True, slots=True)
+class SignupVerified:
+    """Verified the code; ``credentials`` are the ones this run saved."""
+
+    credentials: Credentials
+
+
+@dataclass(frozen=True, slots=True)
+class SignupFailed:
+    """Did not complete; the reason has been printed."""
+
+
+# What a signup run did — mirrors TS ``SignupOutcome``.
+SignupOutcome = SignupOtpSent | SignupVerified | SignupFailed
 
 
 def run_signup(
@@ -165,7 +174,7 @@ def run_signup(
     print_fn: Callable[[object], None],
     options: SignupOptions | None = None,
 ) -> int:
-    return 1 if signup(base_url, print_fn, options).status == "failed" else 0
+    return 1 if isinstance(signup(base_url, print_fn, options), SignupFailed) else 0
 
 
 def signup(  # noqa: PLR0912
@@ -179,7 +188,7 @@ def signup(  # noqa: PLR0912
     json_mode = options.json_mode
     email = options.email or _prompt_email(print_fn, json_mode=json_mode)
     if email is None:
-        return SignupOutcome("failed")
+        return SignupFailed()
 
     # A supplied code means this is the verify step of a prior request — re-sending
     # would invalidate the code the caller is about to submit.
@@ -191,7 +200,7 @@ def signup(  # noqa: PLR0912
                 print_fn(error_envelope("obsessiondb signup", "otp_rate_limited", str(error)))
             else:
                 print_fn(str(error))
-            return SignupOutcome("failed")
+            return SignupFailed()
 
         if not json_mode:
             print_fn(f"We sent a 6-digit code to {email}.")
@@ -202,11 +211,11 @@ def signup(  # noqa: PLR0912
             else:
                 for line in verify_step_hint(email):
                     print_fn(line)
-            return SignupOutcome("otp_sent")
+            return SignupOtpSent()
 
     code = options.code or _prompt_code(print_fn, json_mode=json_mode)
     if code is None:
-        return SignupOutcome("failed")
+        return SignupFailed()
 
     result = verify_otp(base_url, email, code)
     credentials = Credentials(access_token=result.token, base_url=base_url)
@@ -223,4 +232,4 @@ def signup(  # noqa: PLR0912
     else:
         print_fn(f"Welcome back, {result.user.email}.")
 
-    return SignupOutcome("verified", credentials)
+    return SignupVerified(credentials)
