@@ -88,11 +88,14 @@ describe('async mutations', () => {
           if (mergesStopped) await runOnEveryReplica(fixture.executor, getLiveEnv(), `SYSTEM START MERGES ${db}.t`)
         } finally {
           // A run the test left mid-way would go on against the dropped database.
-          if (run) {
-            run.kill()
-            await run.result
+          try {
+            if (run) {
+              run.kill()
+              await run.result
+            }
+          } finally {
+            await dropFixture(fixture)
           }
-          await dropFixture(fixture)
         }
       }
     },
