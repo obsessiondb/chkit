@@ -672,9 +672,11 @@ def test_checks_uncopied_old_nested_and_pins_only_a_snapshot_from_the_definition
 
 
 @pytest.mark.parametrize("value", [0, 1])
-def test_refuses_explicit_flatten_nested_on_either_definition(value: int) -> None:
+# A quoted key names the same setting, and the server applies the last one.
+@pytest.mark.parametrize("key", ["flatten_nested", "`flatten_nested`", '"flatten_nested"'])
+def test_refuses_explicit_flatten_nested_on_either_definition(key: str, value: int) -> None:
     nested = [*COLUMNS, {"name": "n", "type": "Nested(x UInt64)"}]
-    settings = {"flatten_nested": value}
+    settings = {key: value}
     for old, new in (
         (events(["id"], columns=nested, settings=settings), NEW),
         (OLD, events(["user_id", "id"], columns=nested, settings=settings)),
@@ -767,6 +769,30 @@ def test_checks_every_replica_has_no_ttl_when_the_snapshot_is_created_as_it() ->
         cluster="c2",
     ).operations[0].sql
     assert "no_ttl" not in from_definition
+
+
+def test_checks_every_replica_runs_clickhouse_24_9_or_later_for_both_snapshot_paths() -> None:
+    engine = "ReplicatedMergeTree"
+    as_table = plan().operations[0].sql
+    from_definition = plan(
+        old_def=events(["id"], engine=engine),
+        new_def=events(["user_id", "id"], engine=engine),
+        cluster="c2",
+    ).operations[0].sql
+    version = (
+        "toUInt32OrZero(splitByChar('.', version())[1]) "
+        "* 100 + toUInt32OrZero(splitByChar('.', version())[2]) >= 2409 AS supported_version"
+    )
+    guard = (
+        "throwIf(min(supported_version) = 0, 'A cutover needs ClickHouse 24.9 or later on every "
+        "replica: an older server cannot attach the table\\'s parts to the snapshot "
+        "(ATTACH PARTITION ALL FROM). Nothing was created or copied.')"
+    )
+
+    assert f"FROM (SELECT {version}," in as_table
+    assert f"FROM clusterAllReplicas('c2', view(SELECT {version}," in from_definition
+    for start in (as_table, from_definition):
+        assert start.startswith(f"SELECT\n  {guard},\n  throwIf(min(atomic) = 0,")
 
 
 def test_checks_every_replica_stores_the_engine_of_the_old_definition() -> None:

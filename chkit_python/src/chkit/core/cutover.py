@@ -912,7 +912,9 @@ def _create_cutover_sql(
 
     validate_start_query = " ".join(
         [
-            f"SELECT (SELECT count() FROM system.databases WHERE name = "
+            # Both snapshot paths use ATTACH PARTITION ALL FROM, which needs ClickHouse 24.9.
+            f"SELECT {server_version} >= 2409 AS supported_version,",
+            f"(SELECT count() FROM system.databases WHERE name = "
             f"{_string_literal(database)} AND engine IN ('Atomic', 'Replicated')) AS atomic,",
             f"{table_count(table)} AS present,",
             f"{stored_engine},",
@@ -934,6 +936,13 @@ def _create_cutover_sql(
     validate_start = "\n".join(
         [
             "SELECT",
+            "  throwIf(min(supported_version) = 0, "
+            + _string_literal(
+                "A cutover needs ClickHouse 24.9 or later on every replica: an older server "
+                "cannot attach the table's parts to the snapshot (ATTACH PARTITION ALL FROM). "
+                "Nothing was created or copied."
+            )
+            + "),",
             "  throwIf(min(atomic) = 0, "
             + _string_literal(
                 f"Database {database} must use the Atomic or Replicated engine: "
@@ -1203,7 +1212,7 @@ def _assert_cutover_supported(  # noqa: PLR0912, PLR0915
                 "migration."
             )
     if any(
-        "flatten_nested" in (side.settings or {}) and _has_nested_columns(side)
+        _sets_flatten_nested(side) and _has_nested_columns(side)
         for side in (old_def, new_def)
     ):
         problems.append(
@@ -1603,6 +1612,15 @@ def _nested_open(tokens: list[SQLToken]) -> SQLToken | None:
 
 def _is_nested_type(type_: str) -> bool:
     return _nested_open(_type_tokens(type_)) is not None
+
+
+def _sets_flatten_nested(definition: TableDefinition) -> bool:
+    """A quoted settings key (`flatten_nested`) names the same setting, and the
+    server applies the last one, so it would override the cutover's own."""
+    return any(
+        re.sub(r'^([`"])(.*)\1$', r"\2", key.strip(), flags=re.S) == "flatten_nested"
+        for key in (definition.settings or {})
+    )
 
 
 def _has_nested_columns(definition: TableDefinition) -> bool:

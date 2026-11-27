@@ -327,8 +327,9 @@ describe('planCutover', () => {
 
   test('refuses explicit flatten_nested on either definition with Nested', () => {
     const nested = [...columns, { name: 'n', type: 'Nested(x UInt64)' }]
-    for (const value of [0, 1]) {
-      const settings = { flatten_nested: value }
+    // A quoted key names the same setting, and the server applies the last one.
+    for (const [key, value] of ['flatten_nested', '`flatten_nested`', '"flatten_nested"'].flatMap((k) => [0, 1].map((v) => [k, v] as const))) {
+      const settings = { [key]: value }
       for (const input of [{ oldDef: { ...OLD, columns: nested, settings } }, { newDef: { ...NEW, columns: nested, settings } }]) {
         expect(messages(() => plan(input))).toEqual([
           'Cannot cut over app.events: settings.flatten_nested is set on a table with Nested columns: the cutover creates its tables with flatten_nested = 1.',
@@ -387,6 +388,20 @@ describe('planCutover', () => {
     expect(start).toContain("throwIf(min(no_ttl) = 0, 'app.events has a TTL")
     const fromDefinition = plan({ oldDef: { ...OLD, engine: 'ReplicatedMergeTree' }, newDef: { ...NEW, engine: 'ReplicatedMergeTree' }, options: { cluster: 'c2' } }).operations[0]?.sql ?? ''
     expect(fromDefinition).not.toContain('no_ttl')
+  })
+
+  test('checks on every replica that ClickHouse is 24.9 or later for both snapshot paths', () => {
+    const engine = 'ReplicatedMergeTree'
+    const asTable = plan().operations[0]?.sql ?? ''
+    const fromDefinition = plan({ oldDef: { ...OLD, engine }, newDef: { ...NEW, engine }, options: { cluster: 'c2' } }).operations[0]?.sql ?? ''
+    const version = "toUInt32OrZero(splitByChar('.', version())[1]) * 100 + toUInt32OrZero(splitByChar('.', version())[2]) >= 2409 AS supported_version"
+    const guard = "throwIf(min(supported_version) = 0, 'A cutover needs ClickHouse 24.9 or later on every replica: an older server cannot attach the table\\'s parts to the snapshot (ATTACH PARTITION ALL FROM). Nothing was created or copied.')"
+
+    expect(asTable).toContain(`FROM (SELECT ${version},`)
+    expect(fromDefinition).toContain(`FROM clusterAllReplicas('c2', view(SELECT ${version},`)
+    for (const start of [asTable, fromDefinition]) {
+      expect(start).toStartWith(`SELECT\n  ${guard},\n  throwIf(min(atomic) = 0,`)
+    }
   })
 
   test('checks on every replica that the table stores the engine of the old definition, before it creates anything', () => {

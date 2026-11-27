@@ -690,6 +690,7 @@ function createCutoverSql(input: {
   return {
     validateStart: [
       'SELECT',
+      `  throwIf(min(supported_version) = 0, ${stringLiteral("A cutover needs ClickHouse 24.9 or later on every replica: an older server cannot attach the table's parts to the snapshot (ATTACH PARTITION ALL FROM). Nothing was created or copied.")}),`,
       `  throwIf(min(atomic) = 0, ${stringLiteral(`Database ${database} must use the Atomic or Replicated engine: EXCHANGE TABLES needs it.`)}),`,
       `  throwIf(min(present) = 0, ${stringLiteral(`Table ${target} does not exist.`)}),`,
       `  throwIf(min(stored_engine) = 0, ${stringLiteral(`${target} does not use the engine the schema declares (${oldEngine}). The cutover's snapshot, created AS the table, would take its engine, and an engine such as SummingMergeTree or ReplacingMergeTree merges rows away before they are copied. Nothing was created or copied. Run chkit drift, change the schema to match the table, and generate the cutover again.`)}),`,
@@ -727,7 +728,9 @@ function createCutoverSql(input: {
         : []),
       `FROM ${everyReplica(
         [
-          `SELECT (SELECT count() FROM system.databases WHERE name = ${stringLiteral(database)} AND engine IN ('Atomic', 'Replicated')) AS atomic,`,
+          // Both snapshot paths use ATTACH PARTITION ALL FROM, which needs ClickHouse 24.9.
+          `SELECT ${serverVersion} >= 2409 AS supported_version,`,
+          `(SELECT count() FROM system.databases WHERE name = ${stringLiteral(database)} AND engine IN ('Atomic', 'Replicated')) AS atomic,`,
           `${tableCount(table)} AS present,`,
           `${storedEngine},`,
           ...(unflattenedNested ? [`${unflattenedNested},`] : []),
@@ -820,7 +823,7 @@ function assertCutoverSupported(input: {
       )
     }
   }
-  if ([oldDef, newDef].some((def) => def.settings?.flatten_nested !== undefined && hasNestedColumns(def))) {
+  if ([oldDef, newDef].some((def) => setsFlattenNested(def) && hasNestedColumns(def))) {
     problems.push('settings.flatten_nested is set on a table with Nested columns: the cutover creates its tables with flatten_nested = 1.')
   }
 
@@ -1041,6 +1044,12 @@ function nestedOpen(tokens: SQLToken[]): SQLToken | undefined {
 
 function isNestedType(type: string): boolean {
   return nestedOpen(typeTokens(type)) !== undefined
+}
+
+// A quoted settings key (`flatten_nested`) names the same setting, and the
+// server applies the last one, so it would override the cutover's own.
+function setsFlattenNested(def: TableDefinition): boolean {
+  return Object.keys(def.settings ?? {}).some((key) => key.trim().replace(/^([`"])(.*)\1$/s, '$2') === 'flatten_nested')
 }
 
 function hasNestedColumns(def: TableDefinition): boolean {
