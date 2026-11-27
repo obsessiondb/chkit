@@ -46,10 +46,9 @@ function parseOperationLine(
   beforeRetry: string | null,
 ): MigrationOperationSummary | null {
   // A key holds object names, which may contain spaces (they are backtick-quoted
-  // in the SQL), so it runs up to the trailing risk= (and mode=) fields. It
-  // may hold any character, as in chkit-py, also a line separator (#888).
+  // in the SQL), so it runs up to the trailing risk= (and mode=) fields.
   const match = summary.match(
-    /^([a-z_]+)\s+key=([\s\S]+?)\s+risk=([a-z_]+)(?:\s+mode=([a-z_]+))?$/,
+    /^([a-z_]+)\s+key=(.+?)\s+risk=([a-z_]+)(?:\s+mode=([a-z_]+))?$/,
   )
   if (!match) return null
   const rawMode = match[4]

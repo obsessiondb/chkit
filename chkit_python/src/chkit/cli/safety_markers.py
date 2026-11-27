@@ -66,7 +66,7 @@ _BEFORE_RETRY_PREFIX = "-- before-retry:"
 
 # JavaScript's ``\s`` and trim, so both ports read the same markers (#831).
 _OPERATION_LINE = re.compile(
-    js_regex(r"^([a-z_]+)\s+key=([\s\S]+?)\s+risk=([a-z_]+)(?:\s+mode=([a-z_]+))?$")
+    js_regex(r"^([a-z_]+)\s+key=(.+?)\s+risk=([a-z_]+)(?:\s+mode=([a-z_]+))?$")
 )
 _OPERATION_PREFIX = re.compile(js_regex(r"^-- operation:\s*"))
 _TRAILING_SEMICOLON = re.compile(js_regex(r";\s*$"))
