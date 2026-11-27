@@ -354,7 +354,7 @@ class _PreparedSubmission:
     state_dir: str | None = None
     # The failed or cancelled job that a `--plan-id` re-submission replaces.
     replaced_job: ReplacedJob | None = None
-    # Chunks a re-submission leaves out because they finished in the replaced job.
+    # Chunks a re-submission leaves out because they already finished.
     skipped_chunks: int = 0
 
 

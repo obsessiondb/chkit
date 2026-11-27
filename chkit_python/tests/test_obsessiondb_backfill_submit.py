@@ -553,9 +553,11 @@ def test_parse_resubmit_input_rejects_planning_flags_next_to_plan_id() -> None:
 PLAN_ID = "abcdef0123456789"
 
 
-def _setup_saved_plan(tmp_path: Path, *, job_id: str | None = None) -> Path:
-    """Save ``make_plan()`` as ``backfill plan`` would; optionally its marker."""
-    plan = make_plan()
+def _setup_saved_plan(
+    tmp_path: Path, *, job_id: str | None = None, plan: BackfillPlanState | None = None
+) -> Path:
+    """Save ``plan`` (``make_plan()``) as ``backfill plan`` would; optionally its marker."""
+    plan = plan or make_plan()
     write_json(
         tmp_path / "meta/backfill/plans" / f"{PLAN_ID}.json",
         plan.model_copy(
@@ -706,6 +708,147 @@ def test_handle_submit_plan_id_leaves_out_chunks_that_finished_in_the_job(
         "Skipped 1 chunk that already finished.\n"
         f"Track progress: {BASE}/svc-1/jobs/job-new"
     ]
+
+
+def test_handle_submit_plan_id_across_a_chain_never_resends_a_finished_chunk(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Mirror of the TS chain test: each owed chunk is sent until it finishes,
+    and no chunk that finished in any earlier job is sent again."""
+    plan = make_plan()
+    chunks = plan.chunk_plan.chunks
+    plan = plan.model_copy(
+        update={
+            "chunk_plan": plan.chunk_plan.model_copy(
+                update={"chunks": [*chunks, chunks[1].model_copy(update={"id": "c3"})]}
+            )
+        }
+    )
+    submission_path = _setup_saved_plan(tmp_path, job_id="job-1", plan=plan)
+    # What each job carried, and how it ended: its status and the insert runs of each task.
+    jobs: dict[str, dict[str, Any]] = {"job-1": {"task_ids": ["c1", "c2", "c3"]}}
+    submitted: list[list[str]] = []
+
+    def fake_jobs_get(_creds: Credentials, *, job_id: str) -> JobDetail:
+        job = jobs[job_id]
+        return JobDetail.model_validate(
+            {
+                "id": job_id,
+                "serviceId": "svc-1",
+                "type": "backfill",
+                "target": "app.events",
+                "status": job["status"],
+                "concurrency": 4,
+                "totalTasks": len(job["task_ids"]),
+                "completedTasks": 0,
+                "failedTasks": 0,
+                "createdAt": "2026-03-29T00:00:00Z",
+                "updatedAt": "2026-03-29T01:00:00Z",
+                "maxRetries": 3,
+                "tasks": [
+                    {
+                        "id": task_id,
+                        "taskIndex": index,
+                        "runs": [
+                            {"type": "insert", "status": status}
+                            for status in job["runs"].get(task_id, [])
+                        ],
+                    }
+                    for index, task_id in enumerate(job["task_ids"])
+                ],
+            }
+        )
+
+    def fake_jobs_submit(_creds: Credentials, **kwargs: Any) -> str:
+        task_ids = [task.id for task in kwargs["tasks"]]
+        submitted.append(task_ids)
+        job_id = f"job-{len(submitted) + 1}"
+        jobs[job_id] = {"task_ids": task_ids}
+        return job_id
+
+    _patch_jobs_api(monkeypatch, "failed")
+    monkeypatch.setattr(backfill_resubmit_module, "jobs_get", fake_jobs_get)
+    monkeypatch.setattr(backfill_submit_module, "jobs_submit", fake_jobs_submit)
+
+    finished: set[str] = set()
+
+    def end_job_and_resubmit(
+        job_id: str, status: str, runs: dict[str, list[str]]
+    ) -> tuple[int, Any]:
+        jobs[job_id].update(status=status, runs=runs)
+        finished.update(task_id for task_id, s in runs.items() if "done" in s)
+        before = len(submitted)
+        msgs: list[Any] = []
+        code = handle_submit(
+            _submit_context(
+                flags={"--plan-id": PLAN_ID}, msgs=msgs, json_mode=True, config_dir=tmp_path
+            )
+        )
+        # A re-submit never sends a chunk that already finished in any job.
+        for task_ids in submitted[before:]:
+            assert [t for t in task_ids if t in finished] == []
+        return code, msgs[0]
+
+    # job-1: c1 finished on its retry; c2 was still running and c3 never started.
+    hop1 = end_job_and_resubmit("job-1", "failed", {"c1": ["failed", "done"], "c2": ["running"]})
+    # job-2: c2 finished; c3 was still pending when the job was cancelled.
+    hop2 = end_job_and_resubmit("job-2", "cancelled", {"c2": ["done"], "c3": ["pending"]})
+    # job-3: c3 failed again.
+    hop3 = end_job_and_resubmit("job-3", "failed", {"c3": ["failed"]})
+    # job-4: c3 finished, so nothing is owed any more.
+    hop4 = end_job_and_resubmit("job-4", "failed", {"c3": ["done"]})
+
+    assert submitted == [["c2", "c3"], ["c3"], ["c3"]]
+    for (code, msg), job_id, replaced, task_count, skipped in [
+        (hop1, "job-2", "job-1", 2, 1),
+        (hop2, "job-3", "job-2", 1, 2),
+        (hop3, "job-4", "job-3", 1, 2),
+    ]:
+        assert code == 0
+        assert (msg["jobId"], msg["replacedJobId"], msg["taskCount"], msg["skippedChunks"]) == (
+            job_id,
+            replaced,
+            task_count,
+            skipped,
+        )
+    assert hop4[0] == 1
+    assert f"Every chunk of plan {PLAN_ID} already finished" in hop4[1]["error"]
+    assert json.loads(submission_path.read_text(encoding="utf-8"))["jobId"] == "job-4"
+
+
+@pytest.mark.parametrize("task_ids", [("c1",), ("c1", "unknown")])
+def test_handle_submit_plan_id_refuses_an_incomplete_task_list(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, task_ids: tuple[str, ...]
+) -> None:
+    """A chunk missing from the response, also behind an unknown task, is not
+    taken as finished."""
+    submission_path = _setup_saved_plan(tmp_path, job_id="job-old")
+    before = submission_path.read_text(encoding="utf-8")
+    calls = _patch_jobs_api(monkeypatch, "failed")
+    real_get = vars(backfill_resubmit_module)["jobs_get"]  # the fake set above
+
+    def partial_get(creds: Credentials, *, job_id: str) -> JobDetail:
+        job: JobDetail = real_get(creds, job_id=job_id)
+        return job.model_copy(
+            update={"tasks": [{**job.tasks[0], "id": task_id} for task_id in task_ids]}
+        )
+
+    monkeypatch.setattr(backfill_resubmit_module, "jobs_get", partial_get)
+
+    msgs: list[Any] = []
+    code = handle_submit(
+        _submit_context(
+            flags={"--plan-id": PLAN_ID}, msgs=msgs, json_mode=True, config_dir=tmp_path
+        )
+    )
+
+    assert code == 1
+    assert msgs[0]["error"] == (
+        f"Job job-old for plan {PLAN_ID} lists 1 of its 2 tasks, so its unfinished"
+        " chunks are unknown. Nothing was re-submitted."
+    )
+    assert [procedure for procedure, _ in calls] == ["jobs/get"]
+    assert submission_path.read_text(encoding="utf-8") == before
 
 
 def test_handle_submit_plan_id_refuses_when_every_chunk_finished_in_the_job(
