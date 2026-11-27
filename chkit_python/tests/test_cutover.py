@@ -502,8 +502,7 @@ def test_checks_the_table_stores_the_old_column_types() -> None:
     def server(type_: str) -> str:
         return (
             "replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, "
-            f"'c {type_}', '{{}}') SETTINGS input_format_force_null_for_omitted_fields = 0, "
-            "data_type_default_nullable = 0), "
+            f"'c {type_}', '{{}}')), "
             "',\\n *', ', '), '\\n *', '')"
         )
 
@@ -520,6 +519,22 @@ def test_checks_the_table_stores_the_old_column_types() -> None:
         "throwIf(max(mistyped_columns) > 0, 'app.events stores a column with another type "
         "than the schema declares"
     ) in start
+
+
+@pytest.mark.parametrize("cluster", [None, "c2"])
+def test_sets_cutover_type_check_settings_once_on_the_outer_query(cluster: str | None) -> None:
+    # TS cutover.test.ts asserts the same.
+    engine = "ReplicatedMergeTree" if cluster else "MergeTree"
+    start = plan(
+        old_def=events(["id"], engine=engine),
+        new_def=events(["user_id", "id"], engine=engine),
+        cluster=cluster,
+    ).operations[0].sql
+    assert start.endswith(
+        " SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0;"
+    )
+    assert start.count("input_format_force_null_for_omitted_fields") == 1
+    assert start.count("data_type_default_nullable") == 1
 
 
 @pytest.mark.parametrize("cluster", [None, "c2"])

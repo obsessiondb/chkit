@@ -215,10 +215,23 @@ describe('planCutover', () => {
     // The server reads each type from a one-row format() table: defaultValueOfTypeName
     // fails for some types before ClickHouse 26.4.
     expect(start).toContain(
-      "(SELECT countIf(has(['id', 'user_id', 'payload', 'price', 'n.x', 'n.y z'], name) AND NOT has([('id', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c UInt64', '{}') SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0), ',\\n *', ', '), '\\n *', '')), ('user_id', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c UInt64', '{}') SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0), ',\\n *', ', '), '\\n *', '')), ('payload', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c String', '{}') SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0), ',\\n *', ', '), '\\n *', '')), ('price', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c Nullable(Decimal64(2))', '{}') SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0), ',\\n *', ', '), '\\n *', '')), ('n.x', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c Array(UInt8)', '{}') SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0), ',\\n *', ', '), '\\n *', '')), ('n.y z', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c Array(Decimal64(2))', '{}') SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0), ',\\n *', ', '), '\\n *', ''))], (name, type))) FROM system.columns WHERE database = 'app' AND table = 'events' AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')) AS mistyped_columns"
+      "(SELECT countIf(has(['id', 'user_id', 'payload', 'price', 'n.x', 'n.y z'], name) AND NOT has([('id', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c UInt64', '{}')), ',\\n *', ', '), '\\n *', '')), ('user_id', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c UInt64', '{}')), ',\\n *', ', '), '\\n *', '')), ('payload', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c String', '{}')), ',\\n *', ', '), '\\n *', '')), ('price', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c Nullable(Decimal64(2))', '{}')), ',\\n *', ', '), '\\n *', '')), ('n.x', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c Array(UInt8)', '{}')), ',\\n *', ', '), '\\n *', '')), ('n.y z', replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, 'c Array(Decimal64(2))', '{}')), ',\\n *', ', '), '\\n *', ''))], (name, type))) FROM system.columns WHERE database = 'app' AND table = 'events' AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')) AS mistyped_columns"
     )
     expect(start).not.toContain("concat('Nested('")
     expect(start).toContain("throwIf(max(mistyped_columns) > 0, 'app.events stores a column with another type than the schema declares")
+  })
+
+  test.each([['locally', undefined], ['on cluster c2', 'c2']])('sets the cutover type-check settings once on the outer query %s', (_label, cluster) => {
+    // chkit-py's test_cutover.py asserts the same.
+    const engine = cluster ? 'ReplicatedMergeTree' : 'MergeTree'
+    const start = plan({
+      oldDef: events({ engine }),
+      newDef: events({ engine, primaryKey: ['user_id', 'id'], orderBy: ['user_id', 'id'] }),
+      options: { cluster },
+    }).operations[0]?.sql ?? ''
+    expect(start).toEndWith(' SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0;')
+    expect(start.split('input_format_force_null_for_omitted_fields')).toHaveLength(2)
+    expect(start.split('data_type_default_nullable')).toHaveLength(2)
   })
 
   for (const cluster of [undefined, 'c2']) {
