@@ -27,12 +27,13 @@ Key invariants:
 - Status ``unknown`` is a transient state (just-submitted or
   just-finished gap); loop until ``running`` / ``finished`` / ``failed``.
   A submit the client proved was never sent, found before a poll and
-  before any poll found the query, puts the record back to prepared and
-  stops the run; a re-run that confirms it prepared submits it again
+  before any poll found the query, tries to put the record back to
+  prepared and stops the run; a re-run that confirms it prepared submits it again
   (#800). Any other failed submit request records nothing: only the
   server's record for the id decides the outcome (#767). After
   ``MAX_UNKNOWN_POLLS`` unknown polls in a row, every replica is read
-  again, and rechecked while query_log is flushed; still unknown, the run
+  again and, while still unknown, rechecked as query_log is flushed; still
+  unknown, the run
   stops with ``async_outcome_unknown`` and the attempt stays recorded as
   started.
 - Every entry of an attempt's id is that attempt's.
