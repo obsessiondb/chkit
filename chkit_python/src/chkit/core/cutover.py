@@ -1631,7 +1631,7 @@ def _sets_flatten_nested(definition: TableDefinition) -> bool:
     """A quoted settings key (`flatten_nested`) names the same setting, and the
     server applies the last one, so it would override the cutover's own."""
     return any(
-        re.sub(r'^([`"])(.*)\1$', r"\2", key.strip(), flags=re.S) == "flatten_nested"
+        re.sub(r'^([`"])(.*)\1$', r"\2", js_trim(key), flags=re.S) == "flatten_nested"
         for key in (definition.settings or {})
     )
 

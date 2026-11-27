@@ -680,7 +680,9 @@ _EXPLICIT_FLATTEN_NESTED_GUARD = (
 
 
 @pytest.mark.parametrize("value", [0, 1])
-@pytest.mark.parametrize("key", ["flatten_nested", "`flatten_nested`", '"flatten_nested"'])
+@pytest.mark.parametrize(
+    "key", ["flatten_nested", "`flatten_nested`", '"flatten_nested"', "\ufeffflatten_nested"]
+)
 def test_checks_version_when_new_definition_sets_flatten_nested(key: str, value: int) -> None:
     start = plan(new_def=events(["user_id", "id"], settings={key: value})).operations[0].sql
     assert (

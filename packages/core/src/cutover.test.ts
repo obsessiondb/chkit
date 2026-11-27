@@ -327,7 +327,8 @@ describe('planCutover', () => {
 
   const explicitFlattenNestedGuard = "throwIf(min(flatten_nested_version) = 0, 'app.events: the schema sets flatten_nested, and the cutover creates its tables with that setting, which ClickHouse accepts in CREATE TABLE from version 25.1. Nothing was created or copied. Upgrade ClickHouse, or cut the table over by hand.')"
 
-  test.each(['flatten_nested', '`flatten_nested`', '"flatten_nested"'].flatMap((key) => [0, 1].map((value) => [key, value] as const)))(
+  // The key is trimmed as JavaScript trims, in both ports (#637): a BOM counts.
+  test.each(['flatten_nested', '`flatten_nested`', '"flatten_nested"', '\ufeffflatten_nested'].flatMap((key) => [0, 1].map((value) => [key, value] as const)))(
     'checks ClickHouse 25.1 when the new definition sets %s = %d',
     (key, value) => {
       const start = plan({ newDef: { ...NEW, settings: { [key]: value } } }).operations[0]?.sql
