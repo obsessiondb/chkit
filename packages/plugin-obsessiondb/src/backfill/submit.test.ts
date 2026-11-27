@@ -557,11 +557,11 @@ describe('handleSubmit --plan-id', () => {
 			return outcome
 		}
 
-		// job-1: c1 finished on its retry; c2 was still running and c3 never started.
-		const hop1 = await endJobAndResubmit('job-1', 'failed', { c1: ['failed', 'done'], c2: ['running'] })
-		// job-2: c2 finished; c3 was still pending when the job was cancelled.
-		const hop2 = await endJobAndResubmit('job-2', 'cancelled', { c2: ['done'], c3: ['pending'] })
-		// job-3: c3 failed again.
+		// job-1 had a successful retry for c1, a failed run for c2, and no runs for c3.
+		const hop1 = await endJobAndResubmit('job-1', 'failed', { c1: ['failed', 'done'], c2: ['failed'] })
+		// job-2 finished c2 and was cancelled before c3 started.
+		const hop2 = await endJobAndResubmit('job-2', 'cancelled', { c2: ['done'], c3: [] })
+		// job-3 failed its first run of c3.
 		const hop3 = await endJobAndResubmit('job-3', 'failed', { c3: ['failed'] })
 		// job-4: c3 finished, so nothing is owed any more.
 		const hop4 = await endJobAndResubmit('job-4', 'failed', { c3: ['done'] })
@@ -579,7 +579,7 @@ describe('handleSubmit --plan-id', () => {
 		status: string,
 		plan: BackfillPlanState,
 		tasks: Array<{ id: string; runs?: unknown }>,
-		unsettled: string,
+		chunks: string,
 	) {
 		const { configPath, submissionPath, planId } = await setupPlan({ jobId: 'job-old', plan })
 		const before = await readFile(submissionPath, 'utf8')
@@ -592,8 +592,8 @@ describe('handleSubmit --plan-id', () => {
 			ok: false,
 			command: 'backfill submit',
 			error:
-				`Job job-old for plan ${planId} still has ${unsettled}. ` +
-				`Plan ${planId} has no idempotency token, so a re-submit now could write those chunks twice. ` +
+				`Job job-old for plan ${planId} has runs that are not done or failed yet, for ${chunks}. ` +
+				'A re-submit now could write those chunks twice. ' +
 				'Wait until every run of job job-old is done or failed (chkit plugin backfill status --job-id job-old ' +
 				'--json lists them), then re-submit. Nothing was re-submitted.',
 		})
@@ -601,69 +601,74 @@ describe('handleSubmit --plan-id', () => {
 		expect(await readFile(submissionPath, 'utf8')).toBe(before)
 	}
 
-	describe.each(['failed', 'cancelled'])('tokenless plan with a %s job', (status) => {
+	describe.each([
+		['true', true],
+		['false', false],
+	])('plan with requireIdempotencyToken=%s', (_label, requireIdempotencyToken) => {
+		describe.each(['failed', 'cancelled'])('with a %s job', (status) => {
+			test.each([
+				['running', 'running'],
+				['pending', 'pending'],
+				['queued', 'queued'],
+				['missing', undefined],
+				['null', null],
+			])('refuses a run with %s status', async (_case, runStatus) => {
+				await expectUnsettledRefusal(
+					status,
+					makePlan(requireIdempotencyToken),
+					[jobTask('c1', 0, 'done'), { id: 'c2', runs: [{ type: 'insert', status: runStatus }] }],
+					'chunk c2',
+				)
+			})
+		})
+
 		test.each([
-			['running', 'running'],
-			['pending', 'pending'],
-			['queued', 'queued'],
-			['missing', undefined],
-			['null', null],
-		])('refuses a run with %s status', async (_case, runStatus) => {
+			['missing', { id: 'c2' }],
+			['non-list', { id: 'c2', runs: {} }],
+		])('refuses a task with a %s runs field', async (_case, task) => {
 			await expectUnsettledRefusal(
-				status,
-				makePlan(false),
-				[jobTask('c1', 0, 'done'), { id: 'c2', runs: [{ type: 'insert', status: runStatus }] }],
-				'1 run pending or running, for chunk c2',
+				'failed',
+				makePlan(requireIdempotencyToken),
+				[jobTask('c1', 0, 'done'), task],
+				'chunk c2',
 			)
 		})
-	})
 
-	test.each([
-		['missing', { id: 'c2' }],
-		['non-list', { id: 'c2', runs: {} }],
-	])('refuses a tokenless plan with a %s runs field', async (_case, task) => {
-		await expectUnsettledRefusal(
-			'failed',
-			makePlan(false),
-			[jobTask('c1', 0, 'done'), task],
-			'1 run pending or running, for chunk c2',
-		)
-	})
+		test('lists at most five unsettled chunks in task order', async () => {
+			const plan = makePlan(requireIdempotencyToken)
+			const c2 = plan.chunkPlan.chunks[1]
+			if (!c2) throw new Error('makePlan has no second chunk')
+			for (const id of ['c3', 'c4', 'c5', 'c6', 'c7']) plan.chunkPlan.chunks.push({ ...c2, id })
+			await expectUnsettledRefusal(
+				'failed',
+				plan,
+				[
+					{ id: 'c2', runs: [{ type: 'insert', status: 'running' }, { type: 'cleanup', status: 'pending' }] },
+					...['c1', 'c3', 'c4', 'c5', 'c6', 'c7'].map((id, index) => jobTaskWithRuns(id, index + 1, ['pending'])),
+				],
+				'chunks c2, c1, c3, c4, c5 and 2 more',
+			)
+		})
 
-	test('counts every unsettled run and lists at most five chunks in task order', async () => {
-		const plan = makePlan(false)
-		const c2 = plan.chunkPlan.chunks[1]
-		if (!c2) throw new Error('makePlan has no second chunk')
-		for (const id of ['c3', 'c4', 'c5', 'c6', 'c7']) plan.chunkPlan.chunks.push({ ...c2, id })
-		await expectUnsettledRefusal(
-			'failed',
-			plan,
-			[
-				{ id: 'c2', runs: [{ type: 'insert', status: 'running' }, { type: 'cleanup', status: 'pending' }] },
-				...['c1', 'c3', 'c4', 'c5', 'c6', 'c7'].map((id, index) => jobTaskWithRuns(id, index + 1, ['pending'])),
-			],
-			'8 runs pending or running, for chunks c2, c1, c3, c4, c5 and 2 more',
-		)
-	})
+		const settledRuns: Array<[string, RunStatus[]]> = [
+			['only failed runs', ['failed']],
+			['no runs', []],
+		]
 
-	const settledRuns: Array<[string, RunStatus[]]> = [
-		['only failed runs', ['failed']],
-		['no runs', []],
-	]
+		test.each(settledRuns)('re-submits the owed chunk with %s', async (_case, statuses) => {
+			const { configPath, planId } = await setupPlan({ jobId: 'job-old', plan: makePlan(requireIdempotencyToken) })
+			const calls = mockJobsApi('cancelled', ['c1'], [
+				jobTaskWithRuns('c1', 0, ['failed', 'done']),
+				jobTaskWithRuns('c2', 1, statuses),
+			])
 
-	test.each(settledRuns)('re-submits the owed chunk of a tokenless plan with %s', async (_case, statuses) => {
-		const { configPath, planId } = await setupPlan({ jobId: 'job-old', plan: makePlan(false) })
-		const calls = mockJobsApi('cancelled', ['c1'], [
-			jobTaskWithRuns('c1', 0, ['failed', 'done']),
-			jobTaskWithRuns('c2', 1, statuses),
-		])
+			const { result } = await resubmit(configPath, { '--plan-id': planId })
 
-		const { result } = await resubmit(configPath, { '--plan-id': planId })
-
-		expect(result).toEqual({ handled: true, exitCode: 0 })
-		expect(calls.map((call) => call.procedure)).toEqual(['jobs/get', 'jobs/submit'])
-		const tasks = calls[1]?.body.json?.tasks as Array<{ id: string }>
-		expect(tasks.map((task) => task.id)).toEqual(['c2'])
+			expect(result).toEqual({ handled: true, exitCode: 0 })
+			expect(calls.map((call) => call.procedure)).toEqual(['jobs/get', 'jobs/submit'])
+			const tasks = calls[1]?.body.json?.tasks as Array<{ id: string }>
+			expect(tasks.map((task) => task.id)).toEqual(['c2'])
+		})
 	})
 
 	test.each([
