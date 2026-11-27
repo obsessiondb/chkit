@@ -136,10 +136,12 @@ def project(
 
 
 def _insert(client: Any, database: str, *kinds: str) -> None:
+    # Replicated and Shared tables drop an insert whose block repeats an earlier
+    # one (two clicks in the same second), so every insert is counted on its own.
     values = ", ".join(f"(now(), '{kind}')" for kind in kinds)
     client.command(
         f"INSERT INTO {quote_ident(database)}.events VALUES {values}",
-        settings={"async_insert": 0},
+        settings={"async_insert": 0, "insert_deduplicate": 0},
     )
 
 

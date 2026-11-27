@@ -47,7 +47,10 @@ describe('materialized view query change e2e (#760)', () => {
           `table(${JSON.stringify(countsTable(database))})`,
           `materializedView(${JSON.stringify(countsView(database, `SELECT kind, count() AS events FROM ${database}.events${where} GROUP BY kind`))})`,
         ])
-      const insert = (kind: string) => executor.command(`INSERT INTO ${quoteIdent(database)}.events VALUES (now(), '${kind}')`)
+      // Replicated and Shared tables drop an insert whose block repeats an
+      // earlier one (two clicks in the same second), so every insert is counted on its own.
+      const insert = (kind: string) =>
+        executor.command(`INSERT INTO ${quoteIdent(database)}.events SETTINGS insert_deduplicate = 0 VALUES (now(), '${kind}')`)
       try {
         await writeView('')
         await generateAndMigrate(fixture, 'init', [])
