@@ -577,12 +577,13 @@ function createCutoverSql(input: {
   // as AggregateFunction(argMax, LowCardinality(String), DateTime). The row
   // omits the column, which input_format_force_null_for_omitted_fields would
   // refuse for a type that is not Nullable, and data_type_default_nullable
-  // would make the type Nullable.
+  // would make the type Nullable. Both are set on the outer query: format()
+  // ignores them in its subquery on ClickHouse 24.9 to 25.8 (26.3 reads them).
   // toTypeName prints a named Tuple over several lines, and system.columns
   // on one: the line breaks go. A newline in an Enum label is escaped, so no
   // label changes.
   const storedType = (type: string) =>
-    `replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, ${stringLiteral(`c ${type}`)}, '{}') SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0), ',\\n *', ', '), '\\n *', '')`
+    `replaceRegexpAll(replaceRegexpAll((SELECT toTypeName(c) FROM format(JSONEachRow, ${stringLiteral(`c ${type}`)}, '{}')), ',\\n *', ', '), '\\n *', '')`
   const typePairs = `[${stored.map((leaf) => `(${stringLiteral(leaf.name)}, ${storedType(leaf.type)})`).join(', ')}]`
   const mistypedColumns = `(SELECT countIf(has(${literals(stored.map((leaf) => leaf.name))}, name) AND NOT has(${typePairs}, (name, type))) ${storedColumns}) AS mistyped_columns`
   const storedTable = (condition: string, alias: string, settings = '') =>
@@ -746,7 +747,8 @@ function createCutoverSql(input: {
           `${pendingMutations} AS mutations${settingsMatch ? ',' : ''}`,
           ...(settingsMatch ? [settingsMatch] : []),
         ].join(' ')
-      )};`,
+      )}` +
+        ' SETTINGS input_format_force_null_for_omitted_fields = 0, data_type_default_nullable = 0;',
     ].join('\n'),
     createMirror: `CREATE MATERIALIZED VIEW IF NOT EXISTS ${q(names.mirror)} TO ${q(names.shadow)} AS\nSELECT ${columnList} FROM ${q(table)};`,
     insertBarrier: "SELECT query_id FROM system.processes WHERE query_kind IN ('Insert', 'AsyncInsertFlush');",
