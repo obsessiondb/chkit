@@ -838,7 +838,14 @@ def test_checks_primary_key_before_26_7_when_the_snapshot_comes_from_the_definit
         "database = 'app' AND name = 'events') OR toUInt32OrZero(splitByChar('.', version())[1]) "
         "* 100 + toUInt32OrZero(splitByChar('.', version())[2]) >= 2607) AS declared_key"
     ) in start
-    assert "throwIf(min(declared_key) = 0, 'app.events was created without PRIMARY KEY." in start
+    assert (
+        "throwIf(min(declared_key) = 0, 'app.events was created without PRIMARY KEY. Its replication "
+        "path in the schema has no {uuid}, so the cutover\\'s snapshot is created from the schema "
+        "with PRIMARY KEY, and before ClickHouse 26.7 the table\\'s parts do not attach to it. "
+        "Nothing was created or copied. Recreate the table with PRIMARY KEY, or cut it over by hand: "
+        'see "When a cutover does not fit" at '
+        "https://chkit.obsessiondb.com/cli/generate/#when-a-cutover-does-not-fit.')"
+    ) in start
     assert "uuid_path" not in start
 
 

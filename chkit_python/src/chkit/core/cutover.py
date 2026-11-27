@@ -1056,8 +1056,8 @@ def _create_cutover_sql(
                         "schema has no {uuid}, so the cutover's snapshot is created from the "
                         "schema with PRIMARY KEY, and before ClickHouse 26.7 the table's parts do "
                         "not attach to it. Nothing was created or copied. Recreate the table with "
-                        'PRIMARY KEY, or cut it over by hand: see "When a cutover does not fit" in '
-                        "the cutover guide."
+                        'PRIMARY KEY, or cut it over by hand: see "When a cutover does not fit" at '
+                        "https://chkit.obsessiondb.com/cli/generate/#when-a-cutover-does-not-fit."
                     )
                     + "),"
                 ]

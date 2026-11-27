@@ -125,6 +125,24 @@ chkit generate --name events_by_user --cutover analytics.events=id
 - A cutover is refused, with a `cutover_unsupported` validation issue, for engines other than `MergeTree`, `ReplicatedMergeTree` and `SharedMergeTree`, a `Replicated` table without `clickhouse.cluster`, a Nullable key, a TTL, a column whose type changes or that is renamed in the same migration, a renamed table, a new `CHECK` constraint, and writers chkit cannot follow (a Kafka-style consumer, directly or through intermediate tables, a refreshable materialized view or a `Buffer` table writing into the table). A view that reads from or writes into the table and is recreated in the same migration is refused too.
 - `migrate` stops a cutover, at its first step and before the swap, while asynchronous inserts with `wait_for_async_insert = 0` reach the table: ClickHouse drops their buffered rows when the table is swapped.
 
+### When a cutover does not fit
+
+A table without a unique key, a change that transforms rows, an engine that merges rows, or a table the cutover's first statement refuses (such as a `Replicated` table created without `PRIMARY KEY` whose replication path has no `{uuid}`, on ClickHouse before 26.7) needs a reviewed manual migration, with writers paused from the copy until the swap:
+
+1. Keep the schema unchanged and scaffold a migration with `chkit generate --empty --name copy_events`. In it, create the new table as `analytics.events_previous` with the new definition, copy the rows with `INSERT INTO analytics.events_previous SELECT ... FROM analytics.events`, applying the transformation you need, and validate the copy with a guard such as `SELECT throwIf(...)`. `generate` and `check` warn about the copy's `INSERT`; the warning does not stop them. For a `Replicated` table, give the new table its own replication path: ClickHouse expands `{table}` when it creates the table, so each table keeps its path after the swap.
+2. Change the schema to the final definition of `analytics.events`, and declare the old layout as `analytics.events_previous` if you keep it. Run `chkit generate`, which records the final definitions in the snapshot, and replace the statements it planned for both tables with a guard and the swap:
+
+```sql
+-- operation: cutover_validate key=table:analytics.events:cutover:before_exchange risk=caution
+SELECT throwIf((SELECT sorting_key FROM system.tables WHERE database = 'analytics' AND name = 'events') != 'id', 'events is no longer on its old layout; inspect before you retry');
+
+-- operation: exchange_tables key=table:analytics.events risk=caution
+-- before-retry: SELECT throwIf((SELECT sorting_key FROM system.tables WHERE database = 'analytics' AND name = 'events') != 'id', 'the EXCHANGE may already have run')
+EXCHANGE TABLES analytics.events AND analytics.events_previous;
+```
+
+3. Apply both migrations, check that `chkit status`, `chkit drift`, `chkit check` and `chkit generate --dryrun` report nothing left to do, and resume the writers. To drop the old table, remove `analytics.events_previous` from the schema later, a normal destructive change, or leave it out of the schema in step 2 and add `DROP TABLE analytics.events_previous` after the swap.
+
 ### Dictionary password warnings
 
 A dictionary's `SOURCE(...)` clause is a raw string (see [Credentials in `source`](/schema/dsl-reference/#credentials-in-source)), so any credentials it embeds are written verbatim into the generated migration SQL — ClickHouse has no DDL-level secret substitution. A password change is a real diff like any other field change and produces a `CREATE OR REPLACE DICTIONARY` migration.

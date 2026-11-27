@@ -716,7 +716,7 @@ function createCutoverSql(input: {
         : []),
       ...(declaredKey
         ? [
-            `  throwIf(min(declared_key) = 0, ${stringLiteral(`${target} was created without PRIMARY KEY. Its replication path in the schema has no {uuid}, so the cutover's snapshot is created from the schema with PRIMARY KEY, and before ClickHouse 26.7 the table's parts do not attach to it. Nothing was created or copied. Recreate the table with PRIMARY KEY, or cut it over by hand: see "When a cutover does not fit" in the cutover guide.`)}),`,
+            `  throwIf(min(declared_key) = 0, ${stringLiteral(`${target} was created without PRIMARY KEY. Its replication path in the schema has no {uuid}, so the cutover's snapshot is created from the schema with PRIMARY KEY, and before ClickHouse 26.7 the table's parts do not attach to it. Nothing was created or copied. Recreate the table with PRIMARY KEY, or cut it over by hand: see "When a cutover does not fit" at https://chkit.obsessiondb.com/cli/generate/#when-a-cutover-does-not-fit.`)}),`,
           ]
         : []),
       `  throwIf(max(leftovers) > 0, ${stringLiteral(`Objects of an earlier attempt of this cutover exist (${names.shadow}, ${names.mirror}, ${names.snapshot} or ${names.reconcile}). If the tables were already swapped, ${names.shadow} is the pre-cutover table and may hold rows not yet reconciled into ${table}: do not drop it. Inspect them before you run the migration again.`)}),`,
