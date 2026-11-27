@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from chkit.cli.commands.migrate import _collect_destructive_markers_for_pending
 from chkit.cli.safety_markers import (
     DestructiveOperationMarker,
     MigrationOperationSummary,
@@ -212,6 +213,34 @@ def test_scan_flags_extra_unmarked_statement() -> None:
     )
     [stmt] = scan_destructive_sql_statements(sql)
     assert stmt.type == "drop_table"
+
+
+def test_pending_scan_lists_appended_statement_beside_danger_marker_once_each(
+    tmp_path: Path,
+) -> None:
+    # Same case as the TS scanDestructive test: both ports list the marked DROP
+    # and the hand-appended one, in that order, each once.
+    (tmp_path / "005_drop_and_appended.sql").write_text(
+        "-- operation: drop_table key=table:default.old risk=danger\n"
+        "DROP TABLE default.old;\n"
+        "DROP TABLE default.legacy;\n",
+        encoding="utf-8",
+    )
+    markers = _collect_destructive_markers_for_pending(tmp_path, ["005_drop_and_appended.sql"])
+    assert [(m.migration, m.type, m.key, m.summary) for m in markers] == [
+        (
+            "005_drop_and_appended.sql",
+            "drop_table",
+            "table:default.old",
+            "drop_table key=table:default.old risk=danger",
+        ),
+        (
+            "005_drop_and_appended.sql",
+            "drop_table",
+            "default.legacy",
+            "unmarked destructive SQL: DROP TABLE default.legacy;",
+        ),
+    ]
 
 
 def test_scan_ignores_commented_destructive() -> None:
