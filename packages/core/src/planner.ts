@@ -354,6 +354,20 @@ function diffMaterializedView(
   return [...queryOps, ...refreshOps, ...diffComment(oldDef, newDef)]
 }
 
+/** Every key reachable from `start` along `graph`'s edges, `start` excluded. */
+function reachable(graph: DependencyGraph, start: string): Set<string> {
+  const seen = new Set<string>()
+  const pending = [start]
+  for (let key = pending.pop(); key !== undefined; key = pending.pop()) {
+    for (const next of graph.get(key) ?? []) {
+      if (seen.has(next)) continue
+      seen.add(next)
+      pending.push(next)
+    }
+  }
+  return seen
+}
+
 /** Plans materialized views after the operations on their dependencies are known. */
 function diffMaterializedViews(
   changedViews: ReadonlyArray<[MaterializedViewDefinition, MaterializedViewDefinition]>,
@@ -383,10 +397,11 @@ function diffMaterializedViews(
   for (const [oldDef, newDef] of changedViews) {
     const key = definitionKey(newDef)
     if (!queryChanges.has(key) || dropped.has(key)) continue
-    const reads = createGraph.get(key)
+    // Through unchanged views too: ClickHouse analyzes the new query, views included.
+    const reads = reachable(createGraph, key)
     if (
-      [...(reads ?? [])].some((dependency) => unavailable.has(dependency)) ||
-      [...changedTables].some((table) => reads?.has(table) || dropGraph.get(table)?.has(key)) ||
+      [...reads].some((dependency) => unavailable.has(dependency)) ||
+      [...changedTables].some((table) => reads.has(table) || reachable(dropGraph, table).has(key)) ||
       hasUnqualifiedReference(oldDef.as) ||
       hasUnqualifiedReference(newDef.as)
     ) dropped.add(key)

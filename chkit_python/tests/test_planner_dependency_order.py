@@ -127,6 +127,52 @@ def test_mv_query_changes_in_place_and_keeps_unrelated_column_statements_in_orde
     ) == ["alter_materialized_view_modify_query", "alter_table_add_column", "alter_table_drop_column"]
 
 
+def test_mv_query_recreates_view_when_migration_changes_source_column_type() -> None:
+    def tagged(type_: str) -> TableDefinition:
+        return app_table("src", [_ID, {"name": "tag", "type": type_}])
+
+    plan = plan_diff(
+        [tagged("String"), app_table("out"), query_mv(_OLD_QUERY)],
+        [tagged("UInt64"), app_table("out"), query_mv(_NEW_QUERY)],
+    )
+    assert [op.type for op in plan.operations] == [
+        "drop_materialized_view",
+        "alter_table_modify_column",
+        "create_materialized_view",
+    ]
+
+
+def test_mv_query_recreates_view_reading_recreated_view_through_unchanged_view() -> None:
+    shared = [
+        app_table("src"),
+        app_table("out"),
+        app_table("up_out"),
+        app_view("up_view", "SELECT id FROM app.a_up"),
+    ]
+    joined = "SELECT s.id AS id FROM app.src AS s INNER JOIN app.up_view AS u ON s.id = u.id"
+    plan = plan_diff(
+        [
+            app_table("base"),
+            *shared,
+            query_mv("SELECT id FROM app.base", "a_up", "up_out"),
+            query_mv(_OLD_QUERY, "z_down"),
+        ],
+        [
+            app_table("base", [_ID, {"name": "spare", "type": "UInt64"}]),
+            *shared,
+            query_mv("SELECT id FROM app.base WHERE id > 0", "a_up", "up_out"),
+            query_mv(joined, "z_down"),
+        ],
+    )
+    assert [op.type for op in plan.operations] == [
+        "drop_materialized_view",
+        "drop_materialized_view",
+        "alter_table_add_column",
+        "create_materialized_view",
+        "create_materialized_view",
+    ]
+
+
 def test_mv_query_recreates_view_and_preserves_order_when_nested_column_becomes_scalar() -> None:
     old = app_table("src", [_ID, {"name": "k.x", "type": "Array(UInt32)"}])
     next_ = app_table(

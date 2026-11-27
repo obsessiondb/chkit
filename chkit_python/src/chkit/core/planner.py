@@ -394,6 +394,18 @@ def _diff_materialized_view(
     return [*query_ops, *refresh_ops, *_diff_comment(old, new)]
 
 
+def _reachable(graph: DependencyGraph, start: str) -> set[str]:
+    """Every key reachable from ``start`` along ``graph``'s edges, ``start`` excluded."""
+    seen: set[str] = set()
+    pending = [start]
+    while pending:
+        for following in graph.get(pending.pop(), ()):
+            if following not in seen:
+                seen.add(following)
+                pending.append(following)
+    return seen
+
+
 def _diff_materialized_views(
     changed_views: Sequence[tuple[MaterializedViewDefinition, MaterializedViewDefinition]],
     operations: Sequence[MigrationOperation],
@@ -424,11 +436,12 @@ def _diff_materialized_views(
         key = definition_key(new)
         if key not in query_changes or key in dropped:
             continue
-        reads = create_graph.get(key, ())
+        # Through unchanged views too: ClickHouse analyzes the new query, views included.
+        reads = _reachable(create_graph, key)
         if (
             any(dependency in unavailable for dependency in reads)
             or any(
-                table in reads or key in drop_graph.get(table, ())
+                table in reads or key in _reachable(drop_graph, table)
                 for table in changed_tables
             )
             or has_unqualified_reference(old.as_)

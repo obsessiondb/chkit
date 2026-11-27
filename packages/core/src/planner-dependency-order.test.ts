@@ -66,6 +66,31 @@ describe('materialized view query dependency order', () => {
     )).toEqual(['drop_materialized_view', op, 'create_materialized_view'])
   })
 
+  test('recreates the view when the migration changes the type of a source column', () => {
+    const tagged = (type: string) => appTable('src', [id, { name: 'tag', type }])
+    expect(types(
+      [tagged('String'), appTable('out'), mv(oldQuery)],
+      [tagged('UInt64'), appTable('out'), mv(newQuery)]
+    )).toEqual(['drop_materialized_view', 'alter_table_modify_column', 'create_materialized_view'])
+  })
+
+  test('recreates a changed view that reads a recreated view through an unchanged view', () => {
+    const base = (columns: ColumnDefinition[]) => appTable('base', columns)
+    const shared = [appTable('src'), appTable('out'), appTable('up_out'), appView('up_view', 'SELECT id FROM app.a_up')]
+    const down = (as: string) => mv(as, 'z_down')
+    const joined = 'SELECT s.id AS id FROM app.src AS s INNER JOIN app.up_view AS u ON s.id = u.id'
+    expect(types(
+      [base([id]), ...shared, mv('SELECT id FROM app.base', 'a_up', 'up_out'), down(oldQuery)],
+      [base([id, { name: 'spare', type: 'UInt64' }]), ...shared, mv('SELECT id FROM app.base WHERE id > 0', 'a_up', 'up_out'), down(joined)]
+    )).toEqual([
+      'drop_materialized_view',
+      'drop_materialized_view',
+      'alter_table_add_column',
+      'create_materialized_view',
+      'create_materialized_view',
+    ])
+  })
+
   test('keeps unrelated column statements in order and changes the query in place', () => {
     const src = appTable('src')
     const out = appTable('out')
