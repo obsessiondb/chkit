@@ -3,4 +3,4 @@
 "@chkit/clickhouse": patch
 ---
 
-`migrate` now honors `async_insert` and `wait_for_async_insert` from the configured ClickHouse URL and names the source of each override in its warning. Command-line settings take precedence, and migration journal writes use the durable defaults.
+`migrate` treats `async_insert` and `wait_for_async_insert` in the `clickhouse.url` query string like `--setting`: the value is sent on every migration statement, with the override warning, and `--setting` wins when both set it.
