@@ -6,9 +6,9 @@ Submits the statement via ``ClickHouseClient.submit`` with a random
 ``query_id`` of its own, recorded in the journal before the submit (#767),
 and, without waiting for its response, polls
 ``query_status`` until terminal. The per-statement journal state
-is written before submit (intent), after each progress poll (heartbeat),
-and on terminal (completed | failed) so a CLI crash or kill mid-migration
-can resume on the next run.
+is written before submit (prepared, then submitted) and on a terminal
+outcome (completed, or failed for a rejection before start) so a CLI crash
+or kill mid-migration can resume on the next run.
 
 Key invariants:
 
@@ -24,9 +24,14 @@ Key invariants:
   flushed (#701). A started attempt without an outcome stops the run with
   ``async_outcome_unknown`` (#767).
 - Status ``unknown`` is a transient state (just-submitted or
-  just-finished gap); loop until ``running`` / ``finished`` / ``failed``
-  unless the submit itself rejected before any poll found the query
-  running, which is recorded as failed.
+  just-finished gap); loop until ``running`` / ``finished`` / ``failed``.
+  A submit the client proved was never sent, before any poll found the
+  query, puts the record back to prepared and stops the run, so a re-run
+  submits it again (#800). Any other failed submit request records
+  nothing: only the server's record for the id decides the outcome (#767).
+  After ``MAX_UNKNOWN_POLLS`` unknown polls in a row, every replica is read
+  once more through a query_log flush; still unknown, the run stops with
+  ``async_outcome_unknown`` and the attempt stays recorded as started.
 - Every entry of an attempt's id is that attempt's.
 """
 
@@ -75,7 +80,7 @@ POLL_INTERVAL_SECONDS = 5.0
 # an hour of skew: an entry it misses reads as no outcome, which stops a
 # re-run instead of retrying.
 QUERY_LOG_MARGIN_MS = 3_600_000
-# Poll request failures in a row, and `unknown` polls after a failed submit (#657).
+# Poll request failures in a row (#657).
 MAX_TRANSIENT_POLL_ERRORS = 20
 # The last_error of a 'started' record this release writes. The record is
 # fenced (OperationState.attempt_fenced): its query id names this attempt
