@@ -13,7 +13,7 @@ import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import type { ClickHouseExecutor } from '@chkit/clickhouse'
+import { resolveReplicaFanoutOrThrow, type ClickHouseExecutor } from '@chkit/clickhouse'
 
 import type { TableDriftDetail } from '../commands/drift/compare.js'
 import { isoWithoutZone } from '../commands/migrate/async-apply.js'
@@ -661,6 +661,8 @@ async function recreateTable(
   onCluster = '',
 ): Promise<void> {
   const options = { cluster: target.connection.cluster }
+  // Probed once and cached, so a failed probe fails here instead of letting the waits read one replica.
+  await resolveReplicaFanoutOrThrow(target.admin, options.cluster)
   await target.admin.command(`DROP TABLE ${target.database}.${project.table}${onCluster} SYNC`)
   // The CREATE may land on a replica that has not applied the DROP.
   await waitForTableAbsent(target.admin, target.database, project.table, options)

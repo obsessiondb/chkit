@@ -30,6 +30,7 @@ from chkit.cli.journal_store import JournalStore, MigrationRowState
 from chkit.cli.main import app
 from chkit.clickhouse.client import ClickHouseClient, clickhouse_error_code
 from chkit.clickhouse.ddl_propagation import wait_for_table, wait_for_table_absent
+from chkit.clickhouse.replicas import resolve_replica_fanout_or_raise
 from chkit.core.model import ChxResolvedClickHouseConfig
 from tests.e2e_testkit import (
     create_journal_table_name,
@@ -739,6 +740,8 @@ def _recreate_table(
     *,
     on_cluster: str = "",
 ) -> None:
+    # Probed once and cached, so a failed probe fails here instead of letting the waits read one replica.
+    resolve_replica_fanout_or_raise(target.admin, target.cluster)
     target.admin.execute(f"DROP TABLE {target.database}.{project.table}{on_cluster} SYNC")
     # The CREATE may land on a replica that has not applied the DROP.
     wait_for_table_absent(target.admin, target.database, project.table, cluster=target.cluster)
@@ -817,11 +820,6 @@ def run_refused_at_start_scenario(
             settings,
             on_cluster=on_cluster,
         )
-        created = target.admin.query(
-            "SELECT name FROM system.tables "
-            f"WHERE database = '{target.database}' AND name = '{project.table}'"
-        ).rows
-        assert created, "the table is not listed"
 
         _generate_cutover(target, project)
         refused = cli(["migrate", "--apply", "--json"])
@@ -868,11 +866,6 @@ def run_created_outside_chkit_scenario(
             + (f" {clauses}" if clauses else ""),
             settings,
         )
-        created = target.admin.query(
-            "SELECT name FROM system.tables "
-            f"WHERE database = '{target.database}' AND name = '{project.table}'"
-        ).rows
-        assert created, "the table is not listed"
         target.admin.execute(
             f"INSERT INTO {fqn} (id, user_id, payload) "
             "SELECT number, number % 97, 'historic' FROM numbers(1000)"
