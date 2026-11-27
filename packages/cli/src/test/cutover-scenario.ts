@@ -26,9 +26,10 @@ import {
   createStatelessLiveExecutor,
   formatTestDiagnostic,
   getLiveEnv,
-  pollUntil,
   runCli,
   startCli,
+  waitForTable,
+  waitForTableAbsent,
   type CliResult,
 } from './e2e-testkit.js'
 
@@ -652,6 +653,21 @@ export async function runRetryScenario(
   }
 }
 
+async function recreateTable(
+  target: CutoverTarget,
+  project: CutoverProject,
+  createSql: string,
+  settings?: Record<string, number>,
+  onCluster = '',
+): Promise<void> {
+  const options = { cluster: target.connection.cluster }
+  await target.admin.command(`DROP TABLE ${target.database}.${project.table}${onCluster} SYNC`)
+  // The CREATE may land on a replica that has not applied the DROP.
+  await waitForTableAbsent(target.admin, target.database, project.table, options)
+  await target.admin.command(createSql, settings)
+  await waitForTable(target.admin, target.database, project.table, options)
+}
+
 /**
  * A table created with only ORDER BY, as outside chkit (#524). Before
  * ClickHouse 26.7 its parts attach only to a table that leaves PRIMARY KEY
@@ -661,11 +677,9 @@ export async function runUndeclaredPrimaryKeyScenario(target: CutoverTarget, lab
   const project = await createCutoverProject(target, label)
   try {
     const fqn = `${target.database}.${project.table}`
-    await target.admin.command(`DROP TABLE ${fqn} SYNC`)
-    await target.admin.command(`CREATE TABLE ${fqn} (id UInt64, user_id UInt64, payload String) ENGINE = ${target.engine} ORDER BY id`)
-    const [created] = await pollUntil(
-      () => target.admin.query<{ engine_full: string }>(`SELECT engine_full FROM system.tables WHERE database = '${target.database}' AND name = '${project.table}'`),
-      (found) => found.length > 0,
+    await recreateTable(target, project, `CREATE TABLE ${fqn} (id UInt64, user_id UInt64, payload String) ENGINE = ${target.engine} ORDER BY id`)
+    const [created] = await target.admin.query<{ engine_full: string }>(
+      `SELECT engine_full FROM system.tables WHERE database = '${target.database}' AND name = '${project.table}'`,
     )
     if (created === undefined || created.engine_full.includes(' PRIMARY KEY ')) throw new Error(`the table must have no PRIMARY KEY, found ${JSON.stringify(created)}`)
     await target.admin.command(`INSERT INTO ${fqn} (id, user_id, payload) SELECT number, number % 97, 'historic' FROM numbers(1000)`)
@@ -704,14 +718,12 @@ export async function runRefusedAtStartScenario(
     const fqn = `${target.database}.${project.table}`
     const cluster = target.connection.cluster
     const onCluster = cluster ? ` ON CLUSTER '${cluster}'` : ''
-    await target.admin.command(`DROP TABLE ${fqn}${onCluster} SYNC`)
-    await target.admin.command(
+    await recreateTable(
+      target,
+      project,
       `CREATE TABLE ${fqn}${onCluster} (${created.columns}) ENGINE = ${created.engine(project.table)} ORDER BY ${created.orderBy ?? 'id'}${created.clauses ? ` ${created.clauses}` : ''}`,
       created.settings,
-    )
-    await pollUntil(
-      () => target.admin.query<{ name: string }>(`SELECT name FROM system.tables WHERE database = '${target.database}' AND name = '${project.table}'`),
-      (found) => found.length > 0,
+      onCluster,
     )
 
     await writeSchema(target, project, ['user_id', 'id'])
@@ -745,14 +757,11 @@ export async function runCreatedOutsideChkitScenario(
   const project = await createCutoverProject(target, label, schemaColumns)
   try {
     const fqn = `${target.database}.${project.table}`
-    await target.admin.command(`DROP TABLE ${fqn} SYNC`)
-    await target.admin.command(
+    await recreateTable(
+      target,
+      project,
       `CREATE TABLE ${fqn} (${created.columns}) ENGINE = ${target.engine} ORDER BY ${created.orderBy ?? 'id'}${created.clauses ? ` ${created.clauses}` : ''}`,
       created.settings,
-    )
-    await pollUntil(
-      () => target.admin.query<{ name: string }>(`SELECT name FROM system.tables WHERE database = '${target.database}' AND name = '${project.table}'`),
-      (found) => found.length > 0,
     )
     await target.admin.command(`INSERT INTO ${fqn} (id, user_id, payload) SELECT number, number % 97, 'historic' FROM numbers(1000)`)
 
