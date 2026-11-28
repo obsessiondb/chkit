@@ -125,6 +125,15 @@ chkit generate --name events_by_user --cutover analytics.events=id
 - A cutover is refused, with a `cutover_unsupported` validation issue, for engines other than `MergeTree`, `ReplicatedMergeTree` and `SharedMergeTree`, a `Replicated` table without `clickhouse.cluster`, a Nullable key, a TTL, a column whose type changes or that is renamed in the same migration, a renamed table, a new `CHECK` constraint, and writers chkit cannot follow (a Kafka-style consumer, directly or through intermediate tables, a refreshable materialized view or a `Buffer` table writing into the table). A view that reads from or writes into the table and is recreated in the same migration is refused too.
 - `migrate` stops a cutover, at its first step and before the swap, while asynchronous inserts with `wait_for_async_insert = 0` reach the table: ClickHouse drops their buffered rows when the table is swapped.
 
+### When a cutover does not fit
+
+A table without a unique key, a change that transforms rows, or an engine that merges rows needs a reviewed [hand-written migration](/guides/migration-workflow/#hand-written-migrations) instead of `--cutover`. chkit does not mirror the writes of such a migration or verify its copy: pause the writers from the copy until the swap, run its DDL on every replica (`ON CLUSTER` with `clickhouse.cluster`), and run `chkit drift` after it is applied.
+
+The cutover's first statement also refuses a `Replicated` table created without `PRIMARY KEY` whose replication path in the schema has no `{uuid}`, while a replica runs ClickHouse older than 26.7: the cutover's snapshot then takes `PRIMARY KEY` from the schema, and the table's parts do not attach to it. The statement creates and copies nothing, so either:
+
+- upgrade every replica to ClickHouse 26.7 or later and run the same `chkit migrate` command again, or
+- replace the cutover as [Abandoning a failed migration](/cli/migrate/#abandoning-a-failed-migration) describes: delete the migration file, restore `chkit/meta/snapshot.json` from git to its state before the cutover was generated, run `chkit generate` without `--cutover`, and replace the generated `DROP TABLE` and `CREATE TABLE` with the hand-written migration before you apply it. Statements of the migration that ran before the cutover's first statement stay applied; that page covers them.
+
 ### Dictionary password warnings
 
 A dictionary's `SOURCE(...)` clause is a raw string (see [Credentials in `source`](/schema/dsl-reference/#credentials-in-source)), so any credentials it embeds are written verbatim into the generated migration SQL — ClickHouse has no DDL-level secret substitution. A password change is a real diff like any other field change and produces a `CREATE OR REPLACE DICTIONARY` migration.

@@ -1,0 +1,5 @@
+---
+"chkit": patch
+---
+
+The cutover's `PRIMARY KEY` check now points to the "When a cutover does not fit" section of the `chkit generate` reference instead of a guide that no longer exists.

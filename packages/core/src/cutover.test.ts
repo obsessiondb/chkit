@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 
 import {
   cutoverNames,
@@ -427,8 +429,26 @@ describe('planCutover', () => {
     expect(start).toContain(
       "((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR (SELECT any(position(engine_full, ' PRIMARY KEY ') > 0) FROM system.tables WHERE database = 'app' AND name = 'events') OR toUInt32OrZero(splitByChar('.', version())[1]) * 100 + toUInt32OrZero(splitByChar('.', version())[2]) >= 2607) AS declared_key"
     )
-    expect(start).toContain("throwIf(min(declared_key) = 0, 'app.events was created without PRIMARY KEY.")
+    expect(start).toContain(
+      "throwIf(min(declared_key) = 0, 'app.events was created without PRIMARY KEY. Its replication path in the " +
+        "schema has no {uuid}, so the cutover\\'s snapshot is created from the schema with PRIMARY KEY, and before " +
+        "ClickHouse 26.7 the table\\'s parts do not attach to it. Nothing was created or copied. Recreate the table " +
+        'with PRIMARY KEY, or cut it over by hand: see "When a cutover does not fit" at ' +
+        "https://chkit.obsessiondb.com/cli/generate/#when-a-cutover-does-not-fit.')"
+    )
     expect(start).not.toContain('uuid_path')
+  })
+
+  test('links the PRIMARY KEY guard to a heading in the generate reference', () => {
+    const engine = 'ReplicatedMergeTree'
+    const start = plan({ oldDef: { ...OLD, engine }, newDef: { ...NEW, engine }, options: { cluster: 'c2' } }).operations[0]?.sql ?? ''
+    const [, title, anchor] = start.match(
+      /throwIf\(min\(declared_key\) = 0, [^\n]+see "([^"]+)" at https:\/\/chkit\.obsessiondb\.com\/cli\/generate\/#([a-z-]+)\./
+    ) ?? []
+    const docs = readFileSync(resolve(import.meta.dir, '../../../apps/docs/src/content/docs/cli/generate.md'), 'utf8')
+    const heading = docs.split(/\r?\n/).find((line) => line === `### ${title}`)
+    expect(heading).toBe('### When a cutover does not fit')
+    expect(heading?.slice(4).toLowerCase().replaceAll(' ', '-')).toBe(anchor)
   })
 
   test('mirrors the copied columns and copies only rows whose key the shadow lacks', () => {
