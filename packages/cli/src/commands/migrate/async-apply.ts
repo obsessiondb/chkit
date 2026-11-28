@@ -29,7 +29,6 @@ const QUERY_LOG_MARGIN_MS = 3_600_000
 // A poll request can fail transiently (gateway 504/524, network blip) while the
 // server-side async query keeps running. Tolerate a bounded number of these so a
 // momentary timeout doesn't abort a long-running load; only give up after the budget.
-// The same budget limits `unknown` polls after a failed submit (#657).
 const MAX_TRANSIENT_POLL_ERRORS = 20
 // The lastError of a 'started' record this release writes. The record is
 // fenced (OperationState.attemptFenced): its query id names this attempt
