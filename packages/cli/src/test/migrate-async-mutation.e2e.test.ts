@@ -56,11 +56,12 @@ describe('async mutations', () => {
       // SYSTEM STOP MERGES acts on one replica, and any replica may run the
       // mutation, so merges stop on every replica.
       let mergesStopped = false
+      let run: ReturnType<typeof migrate> | undefined
       try {
         // The mutation stays queued until merges start again.
         mergesStopped = true
         await runOnEveryReplica(fixture.executor, getLiveEnv(), `SYSTEM STOP MERGES ${db}.t`)
-        const run = migrate(fixture, args)
+        run = migrate(fixture, args)
         const queryId = await waitForStartedQueryId(fixture)
         await pollUntil(
           () => fixture.executor.queryStatus(queryId, { everyReplica: true }),
@@ -86,7 +87,15 @@ describe('async mutations', () => {
         try {
           if (mergesStopped) await runOnEveryReplica(fixture.executor, getLiveEnv(), `SYSTEM START MERGES ${db}.t`)
         } finally {
-          await dropFixture(fixture)
+          // A run the test left mid-way would go on against the dropped database.
+          try {
+            if (run) {
+              run.kill()
+              await run.result
+            }
+          } finally {
+            await dropFixture(fixture)
+          }
         }
       }
     },
